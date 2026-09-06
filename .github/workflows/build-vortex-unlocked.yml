@@ -27,7 +27,6 @@ permissions:
 
 jobs:
   build:
-    timeout-minutes: 180
     runs-on: windows-latest
     env:
       NO_PARALLEL: "true"
@@ -36,8 +35,6 @@ jobs:
     steps:
       - name: Checkout Vortex Unlocked (patch repository)
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
 
       - name: Record upstream base of the snapshot
         shell: pwsh
@@ -48,8 +45,6 @@ jobs:
       - name: Clone latest upstream Vortex
         shell: pwsh
         run: |
-          git config --global --add safe.directory '*'
-          git config --global core.autocrlf false
           git clone https://github.com/Nexus-Mods/Vortex.git vortex
           cd vortex
           $sha = git rev-parse --short HEAD
@@ -80,24 +75,22 @@ jobs:
           echo "Using Node.js version: $nodeVersion"
 
       - name: Install pnpm
-        uses: pnpm/action-setup@v4
-        with:
-          version: 9
+        uses: pnpm/action-setup@v6
 
       - name: Use Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6
         with:
           node-version: ${{ steps.node-version.outputs.NODE_VERSION }}
           cache: "pnpm"
           cache-dependency-path: vortex/pnpm-lock.yaml
 
       - name: Setup .NET 9
-        uses: actions/setup-dotnet@v4
+        uses: actions/setup-dotnet@v5
         with:
           dotnet-version: "9.0.x"
 
       - name: Setup Python 3.11
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: "3.11"
 
