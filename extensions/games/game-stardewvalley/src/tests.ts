@@ -1,0 +1,72 @@
+/**
+ * Defines Stardew Valley diagnostic tests shown in Vortex health checks.
+ */
+import type { types } from "@nexusmods/vortex-api";
+import { selectors } from "@nexusmods/vortex-api";
+import { coerce as semverCoerce, gte } from "semver";
+
+import { GAME_ID } from "./common";
+import type ModManifestCache from "./manifests/ModManifestCache";
+import { findSMAPIMod } from "./smapi/selectors";
+import { downloadAndInstallSMAPI } from "./smapi/workflow";
+
+/** Verifies whether active mods require a newer SMAPI version. */
+export async function testSMAPIOutdated(
+  api: types.IExtensionApi,
+  modManifestCache: ModManifestCache,
+): Promise<types.ITestResult> {
+  const state = api.getState();
+  const activeGameId = selectors.activeGameId(state);
+  if (activeGameId !== GAME_ID) {
+    return undefined as any;
+  }
+
+  let currentSMAPIVersion = findSMAPIMod(api)?.attributes?.version;
+  if (currentSMAPIVersion === undefined) {
+    // SMAPI isn't installed or enabled.
+    return undefined as any;
+  }
+
+  const isSmapiOutdated = async () => {
+    currentSMAPIVersion = findSMAPIMod(api)?.attributes?.version;
+    if (currentSMAPIVersion === undefined) {
+      return false;
+    }
+    const installedVersion = currentSMAPIVersion;
+    const enabledManifests = await modManifestCache.getManifests();
+    const incompatibleModIds: string[] = [];
+    for (const [id, manifests] of Object.entries(enabledManifests)) {
+      const incompatible = manifests.filter((iter) => {
+        if (iter.MinimumApiVersion !== undefined) {
+          const minApiVersion = semverCoerce(iter.MinimumApiVersion ?? "0.0.0");
+          if (minApiVersion === null) {
+            return false;
+          }
+          return !gte(installedVersion, minApiVersion);
+        }
+        return false;
+      });
+      if (incompatible.length > 0) {
+        incompatibleModIds.push(id);
+      }
+    }
+    return incompatibleModIds.length > 0;
+  };
+
+  const outdated = await isSmapiOutdated();
+  const t = api.translate;
+  return outdated
+    ? ({
+        description: {
+          short: t("SMAPI update required"),
+          long: t(
+            "Some Stardew Valley mods require a newer version of SMAPI to function correctly, " +
+              "you should check for SMAPI updates in the mods page.",
+          ),
+        },
+        automaticFix: () => downloadAndInstallSMAPI(api, true),
+        onRecheck: () => isSmapiOutdated(),
+        severity: "warning" as types.ProblemSeverity,
+      } as any)
+    : (undefined as any);
+}

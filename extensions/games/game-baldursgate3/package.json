@@ -1,0 +1,38 @@
+{
+  "name": "game-baldursgate3",
+  "version": "1.5.10",
+  "description": "Support for Baldur's Gate 3",
+  "author": "Black Tree Gaming Ltd.",
+  "license": "GPL-3.0",
+  "type": "commonjs",
+  "private": true,
+  "config": {
+    "game": "Baldur's Gate 3"
+  },
+  "scripts": {
+    "_assets": "copyfiles -u 1 -f ./assets/* dist && copyfiles -u 1 -f ./tools/* dist/tools",
+    "build": "node build.mjs && pnpm run _assets && pnpm extractInfo",
+    "test": "vitest run --config vitest.config.ts"
+  },
+  "devDependencies": {
+    "vitest": "catalog:",
+    "@nexusmods/vortex-api": "workspace:*"
+  },
+  "dependencies": {
+    "lru-cache": "catalog:"
+  },
+  "nx": {
+    "tags": [
+      "vortex:extension"
+    ],
+    "targets": {
+      "build": {
+        "inputs": [
+          "default",
+          "typescript",
+          "vortex-api"
+        ]
+      }
+    }
+  }
+}

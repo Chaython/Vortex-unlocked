@@ -1,0 +1,17 @@
+import { types, util } from "@nexusmods/vortex-api";
+
+import * as actions from "./actions";
+
+const persistentReducer: types.IReducerSpec = {
+  reducers: {
+    [actions.setGameVersion as any]: (state, payload) => {
+      const { gameId, version } = payload;
+      return util.setSafe(state, ["versions", gameId], version);
+    },
+  },
+  defaults: {
+    versions: {},
+  },
+};
+
+export default persistentReducer;

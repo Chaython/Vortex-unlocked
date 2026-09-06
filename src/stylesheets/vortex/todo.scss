@@ -1,0 +1,74 @@
+@use "sass:color";
+.todo-search {
+    background-color: $brand-success;
+}
+
+.todo-settings {
+    background-color: $brand-info;
+}
+
+.todo-more {
+    background-color: $brand-secondary;
+}
+
+.todo-workaround {
+    background-color: $brand-warning;
+}
+
+.todo-search:hover {
+    background-color: color.adjust($brand-success, $lightness: -10%);
+}
+
+.todo-settings:hover {
+    background-color: color.adjust($brand-info, $lightness: -10%);
+}
+
+.todo-more:hover {
+    background-color: color.adjust($brand-secondary, $lightness: -10%);
+}
+
+.todo-workaround:hover {
+    background-color: color.adjust($brand-warning, $lightness: -10%);
+}
+
+.todo {
+    display: flex;
+    flex-direction: column;
+    width: 140px;
+    height: 105px;
+    justify-content: center;
+    align-items: center;
+    position: relative;
+    margin: 0;
+    text-align: center;
+    padding: 8px;
+    max-width: 140px;
+    min-width: 110px;
+    border-radius: 4px;
+
+    > svg {
+        width: 2em;
+        height: 2em;
+        margin-bottom: 0.7em;
+    }
+
+    .todo-text {
+        font-size: larger;
+        text-align: center;
+        padding: 0 5px;
+        line-height: 1.2;
+    }
+
+    .icon-todo-type {
+        width: 2em;
+        height: 2em;
+    }
+
+    .btn-dismiss {
+        position: absolute;
+        top: 2px;
+        right: 2px;
+        margin: 0;
+        padding: 2px;
+    }
+}

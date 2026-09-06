@@ -1,0 +1,140 @@
+import type { DownloadState, ResolvedEndpoint, ResolvedResource } from "@vortex/shared/download";
+import { staticChunker } from "@vortex/shared/download";
+import { toWireError } from "@vortex/shared/errors";
+import type { Serializable } from "@vortex/shared/ipc";
+import type {
+  WireDownloadCheckpoint,
+  WireEndpoint,
+  WireResolvedResource,
+} from "@vortex/shared/ipc";
+import type { WebContents } from "electron";
+
+import { betterIpcMain } from "../ipc";
+import { log } from "../logging";
+import type { DownloadManager } from "./manager";
+
+function wireToResolvedEndpoint(wire: WireEndpoint): ResolvedEndpoint {
+  return { url: new URL(wire.url), headers: wire.headers };
+}
+
+function wireToResolvedResource(wire: WireResolvedResource): ResolvedResource {
+  const probe = wireToResolvedEndpoint(wire.probeEndpoint);
+  if (!wire.chunkEndpoints?.length) return probe;
+  return {
+    probeEndpoint: probe,
+    chunkEndpoint: (chunk) =>
+      Promise.resolve(
+        wireToResolvedEndpoint(wire.chunkEndpoints?.[chunk.index] ?? wire.probeEndpoint),
+      ),
+  };
+}
+
+function resourceToUrl(resource: ResolvedResource): string {
+  if ("url" in resource) return resource.url.toString();
+  return resource.probeEndpoint.url.toString();
+}
+
+export function init(manager: DownloadManager): void {
+  // Our network timeouts are 30 seconds, which means that we will fail
+  // with the callback before the network could. Give it a bit of extra time to avoid spurious failures.
+  const timeout = 45_000;
+
+  const webContentsByDownloadId = new Map<string, WebContents>();
+
+  betterIpcMain.handle("download:start", async (event, dest, collationId, downloadId) => {
+    const webContents = event.sender;
+    // free users must click through the website serially at their own pace (~10-13s each),
+    // so any wall-clock timer abandons every download past the first few in a batch.
+    // The renderer reports resolution failures (cancel/skip/network) immediately and
+    // mainCallback rejects if the renderer is destroyed, so a timer is redundant.
+    const wireResource = await betterIpcMain.callback(
+      "download:resolve",
+      webContents,
+      0,
+      collationId,
+    );
+    const resource = wireToResolvedResource(wireResource);
+    const resolver = () => Promise.resolve(resource);
+    const handle = manager.download(resource, dest, resolver, undefined, undefined, downloadId);
+    webContentsByDownloadId.set(handle.downloadId, webContents);
+    handle.promise.catch((err) =>
+      log("error", "download failed", { downloadId: handle.downloadId, err }),
+    );
+    return { downloadId: handle.downloadId };
+  });
+
+  betterIpcMain.handle("download:cancel", (_event, downloadId) => {
+    manager.cancel(downloadId);
+  });
+
+  betterIpcMain.handle("download:pause", async (_event, downloadId) => {
+    const result = await manager.pause(downloadId);
+    if (result.status !== "paused") {
+      throw new Error(`Download ${downloadId} is not paused: status is ${result.status}`);
+    }
+    const { checkpoint } = result;
+    const resource = resourceToUrl(checkpoint.resource as ResolvedResource);
+    const wire: WireDownloadCheckpoint = {
+      downloadId: checkpoint.downloadId,
+      resource,
+      dest: checkpoint.dest,
+      completedRanges: checkpoint.completedRanges,
+      etag: checkpoint.etag,
+    };
+    return wire;
+  });
+
+  betterIpcMain.handle("download:resume", (event, wireCheckpoint) => {
+    const webContents = event.sender;
+    const resource = wireToResolvedResource({
+      probeEndpoint: { url: wireCheckpoint.resource },
+    });
+    const checkpoint = {
+      ...wireCheckpoint,
+      resource,
+    };
+    const resolver = () => Promise.resolve(resource);
+    const handle = manager.resume(checkpoint, resolver, staticChunker());
+    webContentsByDownloadId.set(wireCheckpoint.downloadId, webContents);
+    handle.promise.catch((err) =>
+      log("error", "download failed", {
+        downloadId: wireCheckpoint.downloadId,
+        err,
+      }),
+    );
+  });
+
+  betterIpcMain.handle("download:getState", (_event, downloadId) => {
+    const handle = manager.get(downloadId);
+    if (handle === undefined) throw new Error(`Unknown download: ${downloadId}`);
+    return stateToWire(handle.getState());
+  });
+
+  betterIpcMain.handle("download:getStates", (_event, downloadIds) => {
+    const result: Record<string, ReturnType<typeof stateToWire>> = {};
+    for (const downloadId of downloadIds) {
+      const handle = manager.get(downloadId);
+      if (handle === undefined) continue;
+      result[downloadId] = stateToWire(handle.getState());
+    }
+    return result;
+  });
+
+  betterIpcMain.handle("download:configure", (_event, options) => {
+    manager.configure({
+      concurrency: options.concurrency !== undefined ? Number(options.concurrency) : undefined,
+      bytesPerSecond:
+        options.bytesPerSecond !== undefined ? Number(options.bytesPerSecond) : undefined,
+    });
+  });
+}
+
+function stateToWire(state: DownloadState) {
+  return {
+    ...state,
+    // VortexErrorData's `unknown`-bearing payloads fail AssertSerializable, so
+    // the wire field stays opaque `Serializable | null` and we cast at the
+    // boundary.
+    error: state.status === "failed" ? (toWireError(state.error) as unknown as Serializable) : null,
+  };
+}

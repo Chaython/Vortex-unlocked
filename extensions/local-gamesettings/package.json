@@ -1,0 +1,48 @@
+{
+  "name": "local-gamesettings",
+  "version": "0.1.4",
+  "description": "Management for local game settings",
+  "scripts": {
+    "build": "node build.mjs && pnpm extractInfo",
+    "typecheck": "pnpm tsc"
+  },
+  "author": "Black Tree Gaming Ltd.",
+  "license": "GPL-3.0",
+  "devDependencies": {
+    "@types/bluebird": "catalog:",
+    "bluebird": "catalog:",
+    "copyfiles": "catalog:",
+    "i18next": "catalog:",
+    "immutability-helper": "catalog:",
+    "json-loader": "catalog:",
+    "react": "catalog:",
+    "react-bootstrap": "catalog:",
+    "react-dom": "catalog:",
+    "react-i18next": "catalog:",
+    "redux": "catalog:",
+    "redux-act": "catalog:",
+    "@nexusmods/vortex-api": "workspace:*",
+    "vortex-parse-ini": "catalog:"
+  },
+  "nx": {
+    "tags": [
+      "vortex:extension"
+    ],
+    "targets": {
+      "build": {
+        "inputs": [
+          "default",
+          "typescript",
+          "vortex-api"
+        ]
+      },
+      "typecheck": {
+        "inputs": [
+          "default",
+          "typescript",
+          "vortex-api"
+        ]
+      }
+    }
+  }
+}

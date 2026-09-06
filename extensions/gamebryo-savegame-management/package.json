@@ -1,0 +1,63 @@
+{
+  "name": "gamebryo-savegame-management",
+  "version": "0.2.0",
+  "description": "Management for Gamebryo savegames",
+  "scripts": {
+    "_assets": "copyfiles -u 1 -f src/stylesheets/savegame_management.scss dist",
+    "build": "node build.mjs && pnpm run _assets && pnpm extractInfo",
+    "typecheck": "pnpm tsc",
+    "test": "pnpm exec vitest run"
+  },
+  "author": "Black Tree Gaming Ltd.",
+  "license": "GPL-3.0",
+  "devDependencies": {
+    "@types/react": "catalog:",
+    "@types/react-bootstrap": "catalog:",
+    "@types/react-dom": "catalog:",
+    "@types/react-redux": "catalog:",
+    "@types/react-router": "catalog:",
+    "@types/redux": "catalog:",
+    "@types/redux-thunk": "catalog:",
+    "bluebird": "catalog:",
+    "copyfiles": "catalog:",
+    "i18next": "catalog:",
+    "immutability-helper": "catalog:",
+    "lodash": "catalog:",
+    "prop-types": "catalog:",
+    "react": "catalog:",
+    "react-dom": "catalog:",
+    "react-i18next": "catalog:",
+    "react-redux": "catalog:",
+    "react-select": "catalog:",
+    "redux": "catalog:",
+    "redux-act": "catalog:",
+    "redux-thunk": "catalog:",
+    "turbowalk": "catalog:",
+    "@nexusmods/vortex-api": "workspace:*",
+    "vortex-parse-ini": "catalog:"
+  },
+  "dependencies": {
+    "lz4js": "^0.2.0"
+  },
+  "nx": {
+    "tags": [
+      "vortex:extension"
+    ],
+    "targets": {
+      "build": {
+        "inputs": [
+          "default",
+          "typescript",
+          "vortex-api"
+        ]
+      },
+      "typecheck": {
+        "inputs": [
+          "default",
+          "typescript",
+          "vortex-api"
+        ]
+      }
+    }
+  }
+}

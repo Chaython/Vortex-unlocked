@@ -1,0 +1,45 @@
+{
+  "name": "common-interpreters",
+  "version": "1.0.0",
+  "author": "Black Tree Gaming Ltd.",
+  "description": "Adds support for running java, python, ... executables",
+  "license": "GPL-3.0",
+  "scripts": {
+    "build": "node build.mjs && pnpm extractInfo",
+    "typecheck": "pnpm tsc"
+  },
+  "devDependencies": {
+    "@types/node": "catalog:",
+    "@types/react": "catalog:",
+    "@types/react-redux": "catalog:",
+    "@types/redux": "catalog:",
+    "@types/which": "catalog:",
+    "bluebird": "catalog:",
+    "copyfiles": "catalog:",
+    "redux": "catalog:",
+    "typescript": "catalog:",
+    "@nexusmods/vortex-api": "workspace:*",
+    "which": "catalog:"
+  },
+  "nx": {
+    "tags": [
+      "vortex:extension"
+    ],
+    "targets": {
+      "build": {
+        "inputs": [
+          "default",
+          "typescript",
+          "vortex-api"
+        ]
+      },
+      "typecheck": {
+        "inputs": [
+          "default",
+          "typescript",
+          "vortex-api"
+        ]
+      }
+    }
+  }
+}

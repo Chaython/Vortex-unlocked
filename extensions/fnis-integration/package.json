@@ -1,0 +1,62 @@
+{
+  "name": "fnis-integration",
+  "version": "0.1.0",
+  "description": "Keeps animation data updated and local to the profile",
+  "scripts": {
+    "build": "node build.mjs && pnpm extractInfo",
+    "typecheck": "pnpm tsc"
+  },
+  "author": "Black Tree Gaming Ltd.",
+  "license": "GPL-3.0",
+  "type": "commonjs",
+  "private": true,
+  "config": {
+    "extensionName": "FNIS Integration"
+  },
+  "devDependencies": {
+    "@types/bluebird": "catalog:",
+    "@types/node": "catalog:",
+    "@types/react": "catalog:",
+    "@types/react-bootstrap": "catalog:",
+    "@types/react-dom": "catalog:",
+    "@types/redux": "catalog:",
+    "@types/redux-thunk": "catalog:",
+    "@types/semver": "catalog:",
+    "bluebird": "catalog:",
+    "copyfiles": "catalog:",
+    "exe-version": "workspace:*",
+    "i18next": "catalog:",
+    "modmeta-db": "catalog:",
+    "react": "catalog:",
+    "react-dom": "catalog:",
+    "react-i18next": "catalog:",
+    "react-redux": "catalog:",
+    "redux": "catalog:",
+    "redux-act": "catalog:",
+    "redux-thunk": "catalog:",
+    "typescript": "catalog:",
+    "@nexusmods/vortex-api": "workspace:*",
+    "winapi-bindings": "catalog:"
+  },
+  "nx": {
+    "tags": [
+      "vortex:extension"
+    ],
+    "targets": {
+      "build": {
+        "inputs": [
+          "default",
+          "typescript",
+          "vortex-api"
+        ]
+      },
+      "typecheck": {
+        "inputs": [
+          "default",
+          "typescript",
+          "vortex-api"
+        ]
+      }
+    }
+  }
+}

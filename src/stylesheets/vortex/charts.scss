@@ -1,0 +1,57 @@
+.chart-container {
+    text-align: -webkit-center;
+    margin-right: $half-gutter;
+}
+
+.recharts-default-tooltip {
+    background-color: $brand-menu;
+    border: $border-width solid $border-color;
+}
+
+.recharts-text.recharts-cartesian-axis-tick-value {
+    fill: $gray-dark;
+}
+
+.download-chart .recharts-area {
+    .recharts-area-area {
+        fill: url(#graph-gradient);
+    }
+    .recharts-area-curve {
+        stroke: $brand-clickable;
+        stroke-width: 1.2px;
+    }
+}
+
+// without padding the labels on the y-axis are faded out.
+// Note that the chart maintains aspect ratio so adding a padding
+// on the horizontal actually also causes a small padding on the vertical
+.download-chart .recharts-surface {
+    padding-left: 15px;
+}
+
+.download-chart .recharts-reference-line {
+    line {
+        stroke: $brand-danger;
+    }
+    text {
+        fill: $link-color;
+        &:hover {
+            fill: $link-hover-color;
+        }
+    }
+}
+
+.dashlet-download .recharts-sector {
+    fill: $brand-success;
+    cursor: pointer;
+}
+
+.graph-gradient-start {
+    stop-color: #d78f46;
+    stop-opacity: 0.9;
+}
+
+.graph-gradient-end {
+    stop-color: #d78f46;
+    stop-opacity: 0;
+}

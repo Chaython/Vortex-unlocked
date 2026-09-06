@@ -1,0 +1,33 @@
+{
+  "$schema": "https://www.schemastore.org/tsconfig.json",
+  "extends": "../../tsconfig.base.json",
+  "include": [
+    "src/**/*",
+    "./test-setup.ts",
+    "../../typings.custom/*.d.ts",
+    "src/typings.custom/*.d.ts"
+  ],
+  "exclude": [
+    "src/__mocks__/",
+    "src/__tests__/",
+    "./dist",
+    "./temp",
+    "./lib",
+    "node_modules",
+    // Shim for lib-minimal packages (e.g. @vortex/shared); the renderer's `dom`
+    // lib already provides these globals, so including it would redeclare them.
+    "../../typings.custom/web-globals.d.ts"
+  ],
+  "compilerOptions": {
+    "composite": true,
+    "noEmit": true,
+    "target": "esnext",
+    "module": "node16", // TODO: change to esnext
+    "moduleResolution": "node16", // TODO: change to bundler
+    "jsx": "react",
+    "lib": ["ESNext", "DOM", "DOM.Iterable"],
+    "paths": {
+      "@/*": ["./src/*"]
+    }
+  }
+}

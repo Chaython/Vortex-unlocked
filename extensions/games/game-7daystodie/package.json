@@ -1,0 +1,33 @@
+{
+  "name": "game-7daystodie",
+  "description": "Support for 7 Days to Die",
+  "author": "nelson3219 & Senjay",
+  "version": "1.1.1",
+  "license": "GPL-3.0",
+  "type": "commonjs",
+  "private": true,
+  "config": {
+    "game": "7 Days to Die"
+  },
+  "scripts": {
+    "_assets": "copyfiles -u 1 -f ./assets/* dist",
+    "build": "node build.mjs && pnpm run _assets && pnpm extractInfo"
+  },
+  "devDependencies": {
+    "@nexusmods/vortex-api": "workspace:*"
+  },
+  "nx": {
+    "tags": [
+      "vortex:extension"
+    ],
+    "targets": {
+      "build": {
+        "inputs": [
+          "default",
+          "typescript",
+          "vortex-api"
+        ]
+      }
+    }
+  }
+}

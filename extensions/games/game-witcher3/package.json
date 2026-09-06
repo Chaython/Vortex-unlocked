@@ -1,0 +1,33 @@
+{
+  "name": "game-witcher3",
+  "version": "1.7.5",
+  "description": "Support for The Witcher 3",
+  "scripts": {
+    "_assets": "copyfiles -u 1 -f ./assets/* dist",
+    "build": "node build.mjs && pnpm run _assets && pnpm extractInfo"
+  },
+  "author": "Black Tree Gaming Ltd.",
+  "license": "GPL-3.0",
+  "type": "commonjs",
+  "private": true,
+  "config": {
+    "game": "The Witcher 3"
+  },
+  "devDependencies": {
+    "@nexusmods/vortex-api": "workspace:*"
+  },
+  "nx": {
+    "tags": [
+      "vortex:extension"
+    ],
+    "targets": {
+      "build": {
+        "inputs": [
+          "default",
+          "typescript",
+          "vortex-api"
+        ]
+      }
+    }
+  }
+}

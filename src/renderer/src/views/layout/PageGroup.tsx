@@ -1,0 +1,79 @@
+import { getErrorMessageOrDefault } from "@vortex/shared";
+import React, { memo, useMemo, type FC } from "react";
+import { Nav } from "react-bootstrap";
+import { useTranslation } from "react-i18next";
+import { useSelector } from "react-redux";
+
+import { NavItem } from "../../controls/TooltipControls";
+import { log } from "../../logging";
+import type { IMainPage } from "../../types/IMainPage";
+import type { IState } from "../../types/IState";
+import { PageButton } from "../PageButton";
+
+export interface IPageGroupProps {
+  title: string | undefined;
+  groupKey: string;
+  pages: IMainPage[];
+  mainPage: string;
+  secondaryPage: string;
+  tabsMinimized: boolean;
+  onClickPage: (pageId: string, ctrlKey: boolean) => void;
+}
+
+/**
+ * Provides a page group in the sidebar.
+ * For Classic layout.
+ */
+export const PageGroup: FC<React.PropsWithChildren<IPageGroupProps>> = memo((props) => {
+  const { title, groupKey, pages, mainPage, secondaryPage, tabsMinimized, onClickPage } = props;
+
+  const { t } = useTranslation();
+
+  // Vortex Unlocked: watched so the "Hide Dashboard tab" setting re-filters
+  // the classic-layout sidebar immediately, without a restart.
+  const hideDashboard = useSelector(
+    (state: IState) => (state.settings.interface as any)?.hideDashboard === true,
+  );
+
+  const visiblePages = useMemo(() => {
+    return pages.filter((page) => {
+      try {
+        return page.visible();
+      } catch (err) {
+        log("error", "Failed to determine page visibility", {
+          error: getErrorMessageOrDefault(err),
+          page: page.id,
+        });
+        return false;
+      }
+    });
+  }, [pages, hideDashboard]);
+
+  if (visiblePages.length === 0) {
+    return null;
+  }
+
+  const showTitle = !tabsMinimized && title !== undefined;
+
+  return (
+    <div key={groupKey}>
+      {showTitle ? <p className="main-nav-group-title">{t(title)}</p> : null}
+
+      <Nav activeKey={mainPage} bsStyle="pills" className="main-nav-group" stacked={true}>
+        {visiblePages.map((page) => (
+          <NavItem
+            className={secondaryPage === page.id ? "secondary" : undefined}
+            eventKey={page.id}
+            id={page.id}
+            key={page.id}
+            placement="right"
+            tooltip={t(page.title, { ns: page.namespace })}
+            onClick={(e) => onClickPage(page.id, e.ctrlKey)}
+          >
+            <PageButton namespace={page.namespace} page={page} />
+          </NavItem>
+        ))}
+      </Nav>
+    </div>
+  );
+});

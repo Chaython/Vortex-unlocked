@@ -1,0 +1,36 @@
+import type { ModChangeReason } from "../../analytics/mixpanel/MixpanelEvents";
+import type { IMod } from "./IMod";
+
+export interface IRemoveModOptions {
+  // if true will not raise any notifications/toasts
+  silent?: boolean;
+
+  // why the mod is being removed, for the mods_removed analytics event. Defaults to
+  // user_manual when unset (a direct user action). Programmatic removals should set it.
+  reason?: ModChangeReason;
+
+  // Event emitters should set this to true if the mod is being replaced.
+  //  e.g. when reinstalling or updating a mod.
+  willBeReplaced?: boolean;
+
+  // set to indicate that the mod wasn't fully installed and thus events that are
+  // expected when removing an installed mod should not trigger.
+  // what "not fully installed" means is up to the emitter, e.g. when canceling a collection
+  // installation we use this flag even though the collection is installed but its dependencies
+  // aren't
+  incomplete?: boolean;
+
+  // usually we don't allow a mod to be removed while something is being installed,
+  // this disables that check in case the removal happens as a preparation step of the
+  // installation
+  ignoreInstalling?: boolean;
+
+  // Generally this can be resolved from the state itself when listening to
+  //  the 'will-remove-mod' and 'remove-mod' events; however, the state will
+  //  not contain the removed mod information when listening to
+  //  'did-remove-mod' - which is where this becomes handy.
+  modData?: IMod;
+
+  // called to signal progress to the caller
+  progressCB?: (numRemoved: number, numTotal: number, name: string) => void;
+}

@@ -1,0 +1,56 @@
+{
+  "name": "changelog-dashlet",
+  "version": "0.0.5",
+  "description": "Dashlet to show the changelog of the current Vortex version",
+  "scripts": {
+    "_assets": "copyfiles -u 1 -f src/changelog.scss dist",
+    "build": "node build.mjs && pnpm run _assets && pnpm extractInfo",
+    "typecheck": "pnpm tsc"
+  },
+  "author": "Black Tree Gaming Ltd.",
+  "license": "GPL-3.0",
+  "type": "commonjs",
+  "private": true,
+  "config": {
+    "extensionName": "Dashlet: Changelog"
+  },
+  "devDependencies": {
+    "@types/bluebird": "catalog:",
+    "@types/react": "catalog:",
+    "@types/react-bootstrap": "catalog:",
+    "@types/react-dom": "catalog:",
+    "@types/redux": "catalog:",
+    "@types/redux-thunk": "catalog:",
+    "@types/semver": "catalog:",
+    "copyfiles": "catalog:",
+    "lodash": "catalog:",
+    "react-i18next": "catalog:",
+    "react-markdown": "catalog:",
+    "react-redux": "catalog:",
+    "redux": "catalog:",
+    "redux-act": "catalog:",
+    "semver": "catalog:",
+    "@nexusmods/vortex-api": "workspace:*"
+  },
+  "nx": {
+    "tags": [
+      "vortex:extension"
+    ],
+    "targets": {
+      "build": {
+        "inputs": [
+          "default",
+          "typescript",
+          "vortex-api"
+        ]
+      },
+      "typecheck": {
+        "inputs": [
+          "default",
+          "typescript",
+          "vortex-api"
+        ]
+      }
+    }
+  }
+}

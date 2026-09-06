@@ -1,0 +1,19 @@
+@use "sass:color";
+// Alerts
+
+@mixin alert-variant($background, $border, $text-color) {
+    background-color: $background;
+    border-color: $border;
+    color: $text-color;
+
+    .btn-embed.no-hover {
+        color: $text-color;
+    }
+
+    hr {
+        border-top-color: color.adjust($border, $lightness: -5%);
+    }
+    .alert-link {
+        color: color.adjust($text-color, $lightness: -10%);
+    }
+}

@@ -1,0 +1,53 @@
+{
+  "name": "extensions-dashlet",
+  "version": "0.0.3",
+  "description": "Dashlet to advertise newly released extensions and remind user to endorse",
+  "scripts": {
+    "_assets": "copyfiles -u 1 -f src/extensions-dashlet.scss dist",
+    "build": "node build.mjs && pnpm run _assets && pnpm extractInfo",
+    "typecheck": "pnpm tsc"
+  },
+  "author": "Black Tree Gaming Ltd.",
+  "license": "GPL-3.0",
+  "type": "commonjs",
+  "private": true,
+  "config": {
+    "extensionName": "Dashlet: Extensions"
+  },
+  "devDependencies": {
+    "@types/node": "catalog:",
+    "@types/react": "catalog:",
+    "@types/react-bootstrap": "catalog:",
+    "@types/react-redux": "catalog:",
+    "copyfiles": "catalog:",
+    "i18next": "catalog:",
+    "memoize-one": "catalog:",
+    "react-i18next": "catalog:",
+    "redux": "catalog:",
+    "redux-thunk": "catalog:",
+    "turbowalk": "catalog:",
+    "typescript": "catalog:",
+    "@nexusmods/vortex-api": "workspace:*"
+  },
+  "nx": {
+    "tags": [
+      "vortex:extension"
+    ],
+    "targets": {
+      "build": {
+        "inputs": [
+          "default",
+          "typescript",
+          "vortex-api"
+        ]
+      },
+      "typecheck": {
+        "inputs": [
+          "default",
+          "typescript",
+          "vortex-api"
+        ]
+      }
+    }
+  }
+}

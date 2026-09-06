@@ -1,0 +1,19 @@
+{
+  "$schema": "https://www.schemastore.org/tsconfig.json",
+  "extends": "../../tsconfig.strict.json",
+  "include": [
+    "src/**/*",
+    "../../typings.custom/electron.d.ts",
+    "../../typings.custom/promise.d.ts",
+    "./download-duckdb-extensions.ts"
+  ],
+  "compilerOptions": {
+    "composite": true,
+    "noEmit": true,
+    "target": "esnext",
+    "module": "esnext",
+    "moduleResolution": "bundler",
+    "customConditions": ["node", "development"],
+    "types": ["node"]
+  }
+}

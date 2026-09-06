@@ -1,0 +1,7816 @@
+/**
+ * @see docs/mod-management/collections.md - For collections & phased installation documentation
+ */
+
+import * as os from "os";
+import * as path from "path";
+
+import { HTTPError } from "@nexusmods/nexus-api";
+import {
+  getErrorCode,
+  getErrorMessage,
+  getErrorMessageOrDefault,
+  unknownToError,
+} from "@vortex/shared";
+import { parseError } from "@vortex/shared";
+import { AlreadyDownloaded, InsufficientDiskSpace } from "@vortex/shared/errors";
+import * as _ from "lodash";
+import type { IHashResult, ILookupResult, IRule } from "modmeta-db";
+import Zip from "node-7z";
+import type * as Redux from "redux";
+import { generate as shortid } from "shortid";
+
+/**
+ * InstallManager - Handles mod installation with phased collection support.
+ *
+ * ## Phased Installation Methods
+ *
+ * The following methods work together to manage phase-gated collection installs:
+ *
+ * 1. `ensurePhaseState(sourceModId)` - Initialize phase tracking for a collection
+ *    - Creates tracking maps for active/pending installations per phase
+ *    - Sets up deployment scheduling and re-queue prevention
+ *
+ * 2. `markPhaseDownloadsFinished(sourceModId, phase, api)` - Called when downloads for a phase complete
+ *    - Marks phase as ready for installation
+ *    - Sets `allowedPhase` if this is the first phase
+ *    - Calls `maybeAdvancePhase()` to check if we can progress
+ *
+ * 3. `maybeAdvancePhase(sourceModId, api)` - Attempts to advance to next phase
+ *    - Checks if current phase is deployed
+ *    - Verifies no active installations in current phase
+ *    - Advances `allowedPhase` to next incomplete phase
+ *    - Starts pending installations for newly-allowed phase
+ *
+ * 4. `scheduleDeployOnPhaseSettled(api, sourceModId, phaseNum)` - Schedules deployment when phase completes
+ *    - Called with `options.deployOnSettle = true`
+ *    - Sets `isDeploying` flag to block new installations
+ *    - Runs deployment, then clears flag and resumes installations
+ *
+ * 5. `startPendingForPhase(sourceModId, phase)` - Starts queued installations for a phase
+ *    - Called when phase becomes allowed or after deployment completes
+ *
+ * ## Phase State Structure (mInstallPhaseState)
+ *
+ * - `allowedPhase` - Current phase that can install
+ * - `downloadsFinished` - Phases with completed downloads
+ * - `pendingByPhase` - Queued installs per phase
+ * - `activeByPhase` - Active install count per phase
+ * - `deployedPhases` - Phases that have been deployed
+ * - `isDeploying` - CRITICAL: Blocks installs during deployment
+ *
+ * See docs/mod-management/collections.md for architectural overview.
+ */
+import { removeDownload, setDownloadModInfo, startActivity, stopActivity } from "../../actions";
+import {
+  markModInstalled,
+  markSessionStalled,
+  updateModStatus,
+} from "../../actions/collectionInstallTracking";
+import {
+  type IConditionResult,
+  type IDialogContent,
+  showDialog,
+  dismissNotification,
+} from "../../actions/notifications";
+import { log } from "../../logging";
+import type { ICollectionModInstallInfo } from "../../types/collections/ICollectionInstallSession";
+import type { ICheckbox, IDialogResult } from "../../types/IDialog";
+import type { IExtensionApi, ThunkStore } from "../../types/IExtensionContext";
+import type { IProfile, IState } from "../../types/IState";
+import { getBatchContext, type IBatchContext } from "../../util/BatchContext";
+import calculateFolderSize from "../../util/calculateFolderSize";
+import {
+  generateCollectionSessionId,
+  isOutstandingOptionalMember,
+  isTerminalMemberStatus,
+  modRuleId,
+  referenceId,
+} from "../../util/collectionInstallSession";
+import {
+  getCollectionActiveSession,
+  getCollectionInstallProgress,
+  getCollectionModByReference,
+  getCollectionSessionById,
+  getCollectionStatusBreakdown,
+  isCollectionPhaseComplete,
+  isCollectionPhaseSettledSuccessfully,
+} from "../../util/collectionInstallSessionSelectors";
+import { resyncCollectionSessionRules } from "../../util/collectionSessionReconstruct";
+import type { CollectionInstallOutcome } from "../../util/collectionSessionWrite";
+import {
+  matchSessionRuleEntry,
+  planDependencyErrorRecovery,
+  sessionWriteForDependency,
+} from "../../util/collectionSessionWrite";
+import { markCollectionMemberSkipped } from "../../util/collectionSkip";
+import ConcurrencyLimiter from "../../util/ConcurrencyLimiter";
+import {
+  DataInvalid,
+  NotFound,
+  ProcessCanceled,
+  SelfCopyCheckError,
+  SetupError,
+  TemporaryError,
+  UserCanceled,
+  ArchiveBrokenError,
+} from "../../util/CustomErrors";
+import {
+  createErrorReport,
+  didIgnoreError,
+  isOutdated,
+  withTrackedActivity,
+} from "../../util/errorHandling";
+import * as fs from "../../util/fs";
+import type { TFunction } from "../../util/i18n";
+import { prettifyNodeErrorMessage } from "../../util/message";
+import {
+  activeGameId,
+  activeProfile,
+  downloadPathForGame,
+  gameProfiles,
+  installPathForGame,
+  knownGames,
+  lastActiveProfileForGame,
+  profileById,
+} from "../../util/selectors";
+import { getSafe } from "../../util/storeHelper";
+import {
+  batchDispatch,
+  delay,
+  isFilenameValid,
+  isPathValid,
+  setdefault,
+  toPromise,
+  truthy,
+  unique,
+} from "../../util/util";
+import walk from "../../util/walk";
+import { emitModStateChanged } from "../analytics/mixpanel/modChangeAnalytics";
+import { classifyInstallKind } from "../analytics/mixpanel/modInstallAnalytics";
+import { resolveCategoryId } from "../category_management/util/retrieveCategoryPath";
+import { finishDownload } from "../download_management/actions/state";
+import type { IDownload } from "../download_management/types/IDownload";
+import getDownloadGames from "../download_management/util/getDownloadGames";
+import { appendReferenceTagActions } from "../download_management/util/referenceTags";
+import { discoveryByGame } from "../gamemode_management/selectors";
+import type { IModType } from "../gamemode_management/types/IModType";
+import { getGame } from "../gamemode_management/util/getGame";
+import { convertGameIdReverse } from "../nexus_integration/util/convertGameId";
+import { setModEnabled, setModsEnabled } from "../profile_management/actions/profiles";
+import {
+  addModRule,
+  removeModRule,
+  setFileOverride,
+  setINITweakEnabled,
+  setModAttribute,
+  setModAttributes,
+  setModType,
+} from "./actions/mods";
+import {
+  MAX_VARIANT_NAME,
+  MIN_VARIANT_NAME,
+  VORTEX_OVERRIDE_INSTRUCTIONS_FILENAME,
+} from "./constants";
+import InstallContext from "./InstallContext";
+import makeListInstaller from "./listInstaller";
+import deriveModInstallName from "./modIdManager";
+import { NotificationAggregator } from "./NotificationAggregator";
+import type { Dependency, IDependency, IDependencyError, IModInfoEx } from "./types/IDependency";
+import type { IInstallContext } from "./types/IInstallContext";
+import type { IInstallOptions } from "./types/IInstallOptions";
+import type { IInstallResult, IInstruction, InstructionType } from "./types/IInstallResult";
+import type { IChoiceType, IFileListItem, IMod, IModReference, IModRule } from "./types/IMod";
+import type { IModInstaller, ISupportedInstaller } from "./types/IModInstaller";
+import type { IInstallationDetails, InstallFunc } from "./types/InstallFunc";
+import type { IReplaceChoice, ReplaceChoice } from "./types/IReplaceChoice";
+import type { ISupportedResult, ITestSupportedDetails, TestSupported } from "./types/TestSupported";
+import { getCSharpScriptAllowListForGame } from "./util/cSharpScriptAllowList";
+import gatherDependencies, {
+  findDownloadByRef,
+  lookupFromDownload,
+  selectedOptionalRules,
+} from "./util/dependencies";
+import filterModInfo from "./util/filterModInfo";
+import { findModByRef } from "./util/findModByRef";
+import { InstallPhaseTracker, type IDeploymentDetails } from "./util/InstallPhaseTracker";
+import { isFuzzyVersion } from "./util/isFuzzyVersion";
+import metaLookupMatch from "./util/metaLookupMatch";
+import modName, { renderModReference } from "./util/modName";
+import queryGameId from "./util/queryGameId";
+import { reconcileOrphanedArchive } from "./util/reconcileOrphanedArchive";
+import { selectRequeueCandidates } from "./util/requeueCandidates";
+import { OPTIONAL_PHASE, rulePhase } from "./util/rulePhase";
+import testModReference, {
+  downloadHasReferenceTag,
+  downloadReferenceTags,
+  downloadToModRef,
+  idOnlyRef,
+  isDependencyRule,
+  isRequiredRule,
+  modMatchesInstallSpec,
+  referenceEqual,
+  ruleInstallSpec,
+  testRefByIdentifiers,
+} from "./util/testModReference";
+
+// Interface for tracking active installation information
+interface IActiveInstallation {
+  installId: string;
+  archiveId: string;
+  archivePath: string;
+  modId: string;
+  gameId: string;
+  callback: (error: Error, id: string) => void;
+  startTime: number;
+  baseName: string;
+}
+
+interface IInvalidInstruction {
+  type: InstructionType;
+  error: string;
+}
+
+/** The collection (and its revision) a dependency download belongs to, for download analytics. */
+interface IParentCollection {
+  collectionId: string;
+  revisionId?: string;
+}
+
+class InstructionGroups {
+  public copy: IInstruction[] = [];
+  public mkdir: IInstruction[] = [];
+  public submodule: IInstruction[] = [];
+  public generatefile: IInstruction[] = [];
+  public iniedit: IInstruction[] = [];
+  public unsupported: IInstruction[] = [];
+  public attribute: IInstruction[] = [];
+  public setmodtype: IInstruction[] = [];
+  public error: IInstruction[] = [];
+  public rule: IInstruction[] = [];
+  public enableallplugins: IInstruction[] = [];
+}
+
+async function buildFileList(basePath: string): Promise<string[]> {
+  const fileList: string[] = [];
+  await walk(basePath, (iterPath, stats) => {
+    const relPath = path.normalize(path.relative(basePath, iterPath));
+    if (stats.isFile()) {
+      fileList.push(relPath);
+    } else {
+      // unfortunately we also have to pass directories because
+      // some mods contain empty directories to control stop-folder
+      // management...
+      fileList.push(relPath + path.sep);
+    }
+    return Promise.resolve();
+  });
+  return fileList;
+}
+
+export const INI_TWEAKS_PATH = "Ini Tweaks";
+
+export const INSTALL_ACTION = "Update current profile";
+export const REPLACE_ACTION = "Update all profiles";
+export const VARIANT_ACTION = "Add Variant";
+
+// file types supported by 7z but we don't want to extract
+// I was tempted to put .exe in here but there may actually be cases where the
+// exe is a self-extracting archive and we would be able to handle it
+const FILETYPES_AVOID = [".dll"];
+
+function nop() {
+  // nop
+}
+
+function findDownloadByReferenceTag(
+  downloads: Record<string, IDownload>,
+  reference: IModReference,
+): string | null {
+  const dlId = findDownloadByRef(reference, downloads);
+  if (dlId) {
+    return dlId;
+  }
+
+  if (!reference?.tag) {
+    return null;
+  }
+
+  return (
+    Object.keys(downloads).find(
+      (id) =>
+        downloadHasReferenceTag(downloads[id], reference.tag) ||
+        (reference.md5Hint && downloads[id].fileMD5 === reference.md5Hint),
+    ) || null
+  );
+}
+
+function getReadyDownloadId(
+  downloads: Record<string, IDownload>,
+  reference: { tag?: string; md5Hint?: string },
+  hasActiveOrPendingCheck: (downloadId: string) => boolean,
+): string | null {
+  const downloadId = findDownloadByReferenceTag(downloads, reference);
+
+  if (!downloadId) {
+    return null;
+  }
+
+  const download = downloads[downloadId];
+  if (download.state === "finished" && !hasActiveOrPendingCheck(downloadId)) {
+    return downloadId;
+  }
+
+  return null;
+}
+
+function getModsByPhase(allMods: any[], phase: number): any[] {
+  return allMods.filter((mod: any) => (mod.phase ?? 0) === phase);
+}
+
+function withActivityTracking<T>(
+  api: IExtensionApi,
+  activityType: string,
+  activityId: string,
+  promise: PromiseLike<T>,
+): Promise<T> {
+  api.store.dispatch(startActivity(activityType, activityId));
+  return Promise.resolve(promise).finally(() => {
+    api.store.dispatch(stopActivity(activityType, activityId));
+  });
+}
+
+function findCollectionByDownload(
+  state: IState,
+  download: IDownload,
+  sourceModId?: string,
+): { collectionMod: IMod; matchingRule: IModRule; gameId: string } | null {
+  const gameId = activeProfile(state)?.gameId;
+  if (!gameId) {
+    log("debug", "No active game profile", { downloadId: download.id });
+    return null;
+  }
+
+  const activeCollection = getCollectionActiveSession(state);
+  // Always try direct rule matching when sourceModId is available - this uses
+  // testModReference which is more robust than the session-based field equality
+  // checks below.  Previously this was gated on activeCollection == null which
+  // meant the robust path was skipped during active collection installations.
+  if (sourceModId != null) {
+    const mods: { [modId: string]: IMod } = state.persistent.mods[gameId];
+    const collectionMod = mods?.[sourceModId];
+    if (!collectionMod || !download?.id) {
+      log("debug", "No collection mod found for sourceModId", {
+        downloadId: download.id,
+        sourceModId,
+      });
+      return null;
+    }
+
+    const lookup = lookupFromDownload(download);
+
+    // Download lookups will not hold any patch/filelist/installerChoices info.
+    //  Which is why in this case we want to ensure that we only match using regular reference fields.
+    const matchingRule = collectionMod.rules?.find((rule) =>
+      testModReference(lookup, rule.reference),
+    );
+
+    if (matchingRule) {
+      return { collectionMod, matchingRule, gameId };
+    }
+  }
+
+  // Get the current active collection installation
+  if (!activeCollection?.collectionId) {
+    log("debug", "No active collection installation found", {
+      downloadId: download.id,
+    });
+    return null;
+  }
+
+  const matchingRule = getCollectionModByReference(state, lookupFromDownload(download));
+  if (!matchingRule) {
+    log("debug", "No matching rule found in collection for download", {
+      downloadId: download.id,
+    });
+    return null;
+  }
+
+  const collectionMod = state.persistent.mods[gameId]?.[activeCollection.collectionId];
+  if (!collectionMod) {
+    log("debug", "Collection mod not found in state", {
+      gameId,
+      collectionId: activeCollection.collectionId,
+    });
+    return null;
+  }
+  return { collectionMod, matchingRule: matchingRule.rule, gameId };
+}
+
+/**
+ * Helper: Filter rules to only include non-ignored requires/recommends rules
+ */
+function filterDependencyRules(rules: IModRule[]): IModRule[] {
+  return (rules ?? []).filter(
+    (rule: IModRule) => ["recommends", "requires"].includes(rule.type) && !rule.ignored,
+  );
+}
+
+/**
+ * Whether the collection rule behind a resolved dependency has since been marked ignored.
+ * filterDependencyRules drops ignored rules ONCE, at gather time; this re-reads the durable
+ * flag so a mod the user ignores mid-install (after the dependency list was gathered) is not
+ * installed after the fact.
+ */
+function isDependencyRuleIgnored(
+  state: IState,
+  gameId: string,
+  sourceModId: string,
+  reference: IModReference,
+): boolean {
+  const rules = state.persistent.mods[gameId]?.[sourceModId]?.rules ?? [];
+  return rules.some(
+    (rule) =>
+      rule.ignored === true && isDependencyRule(rule) && referenceEqual(rule.reference, reference),
+  );
+}
+
+/**
+ * Helper: Check if dependency installation was canceled via event and handle early return
+ * Returns true if should continue, false if canceled
+ */
+function checkAndEmitDependencyInstallStart(
+  api: IExtensionApi,
+  gameId: string,
+  modId: string,
+  isRecommended: boolean,
+): boolean {
+  let canceled = false;
+  api.events.emit("will-install-dependencies", gameId, modId, isRecommended, () => {
+    canceled = true;
+  });
+  return !canceled;
+}
+
+function validateVariantName(t: TFunction, content: IDialogContent): IConditionResult[] {
+  const variantName = content.input.find((inp) => inp.id === "variant")?.value ?? "";
+
+  if (variantName.length < MIN_VARIANT_NAME || variantName.length > MAX_VARIANT_NAME) {
+    return [
+      {
+        id: "variant",
+        actions: ["Continue"],
+        errorText: t("Name must be between {{min}}-{{max}} characters long", {
+          replace: {
+            min: MIN_VARIANT_NAME,
+            max: MAX_VARIANT_NAME,
+          },
+        }),
+      },
+    ];
+  }
+
+  // The variant name is appended to the install folder name with a "+",
+  // so it must be a valid filename — path separators would create subfolders
+  // and orphan the mod (see issue #22813).
+  if (!isFilenameValid(variantName)) {
+    return [
+      {
+        id: "variant",
+        actions: ["Continue"],
+        errorText: t(
+          'Name cannot contain path separators or any of these characters: / \\ : * ? " < > |',
+        ),
+      },
+    ];
+  }
+
+  return [];
+}
+
+async function mapWithConcurrency<T, R>(
+  items: T[],
+  fn: (item: T, index: number) => Promise<R> | R,
+  concurrency: number,
+  signal?: AbortSignal,
+): Promise<R[]> {
+  const results: R[] = new Array(items.length);
+  let nextIdx = 0;
+  async function worker() {
+    let abortPromise: Promise<never> | undefined;
+    if (signal !== undefined) {
+      abortPromise = new Promise<never>((_, reject) => {
+        if (signal.aborted) {
+          reject(new UserCanceled());
+          return;
+        }
+        signal.addEventListener("abort", () => reject(new UserCanceled()), { once: true });
+      });
+      // silences the unhandled-rejection warning
+      // that fires when Promise.race picks the fn result and the loser later
+      // rejects on a late abort
+      abortPromise.catch(() => undefined);
+    }
+    while (nextIdx < items.length) {
+      if (signal?.aborted) return;
+      const idx = nextIdx++;
+      try {
+        results[idx] =
+          abortPromise === undefined
+            ? await fn(items[idx], idx)
+            : await Promise.race([Promise.resolve(fn(items[idx], idx)), abortPromise]);
+      } catch (err) {
+        if (signal?.aborted) return;
+        throw err;
+      }
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(concurrency, items.length) }, () => worker()));
+  return results;
+}
+
+/**
+ * central class for the installation process
+ *
+ * @class InstallManager
+ */
+class InstallManager {
+  // Exported so other features that fire their own install fan-out (e.g. health check's bulk
+  // install actions) can size their own queue against the same, already-tuned budget instead of
+  // picking an unrelated number.
+  static readonly MAX_SIMULTANEOUS_INSTALLS = 5;
+  private mApi: IExtensionApi;
+  private mInstallers: IModInstaller[] = [];
+  private mGetInstallPath: (gameId: string) => string;
+  private mDependencyInstalls: { [modId: string]: () => void } = {};
+  private mNotificationAggregator: NotificationAggregator;
+  private mNotificationAggregationTimeoutMS: number = 5000;
+
+  // Bounds how many collection dependencies are processed concurrently through the
+  // download -> install pipeline (driving the DownloadManager to queue downloads ahead, and
+  // orchestrating queued installs). This is NOT the install-concurrency cap: the actual install
+  // step runs under mInstallLimit. Sized larger than mInstallLimit on purpose, so downloads are
+  // fetched ahead while a smaller number install. Must stay a DIFFERENT limiter from mInstallLimit
+  // because the orchestration acquires a slot here and then calls this.install() (mInstallLimit) -
+  // gating both on one limiter would nest it and deadlock the pipeline.
+  private mDependencyPipelineLimit: ConcurrencyLimiter = new ConcurrencyLimiter(10);
+
+  // Queues installations for processing - primarily used to keep track of pending installations
+  //  for the current dependency phase if/when concurrent download and installation is disabled.
+  private mPendingInstalls: Map<string, IDependency> = new Map();
+
+  // Tracks the currently active installations - can be used with debug functions
+  //  to inspect the state of ongoing installations
+  private mActiveInstalls: Map<string, IActiveInstallation> = new Map();
+
+  // Installation paths (mod.installationPath) of mods that completed
+  // installation or removal since the last deployment. Consumed (and cleared)
+  // by the deployment flow to auto-resolve expected external changes caused by
+  // Vortex's own operations. We track installation paths rather than mod IDs
+  // because that's what the deployment manifest stores in IDeployedFile.source,
+  // and in the update-via-replace flow a new mod can end up with id !=
+  // installationPath (e.g. new mod id reusing the previous version's staging
+  // folder), which would otherwise miss the auto-resolve filter.
+  private mRecentChangedPaths: Set<string> = new Set();
+
+  // Tracks retry counts for failed dependency installations
+  private mDependencyRetryCount: Map<string, number> = new Map();
+  private static readonly MAX_DEPENDENCY_RETRIES = 3;
+
+  // Caps how many mods install (extract/deploy) at once, across BOTH top-level and dependency
+  // installs - every install routes through this.install(), which acquires a slot here. This is
+  // the real install-concurrency cap (MAX_SIMULTANEOUS_INSTALLS); it replaces the old sequential
+  // mQueue. Dependency orchestration/look-ahead is bounded separately by mDependencyPipelineLimit.
+  private mInstallLimit: ConcurrencyLimiter = new ConcurrencyLimiter(
+    InstallManager.MAX_SIMULTANEOUS_INSTALLS,
+  );
+
+  constructor(api: IExtensionApi, installPath: (gameId: string) => string) {
+    this.mApi = api;
+    this.mGetInstallPath = installPath;
+    this.mNotificationAggregator = new NotificationAggregator(api);
+
+    api.onAsync(
+      "install-from-dependencies",
+      (dependentId: string, rules: IModRule[], recommended: boolean, profileId?: string) => {
+        profileId =
+          profileId || lastActiveProfileForGame(api.getState(), activeGameId(api.getState()));
+        const contextName = recommended ? "install-recommendations" : "install-dependencies";
+        const batchedContext = getBatchContext(contextName, "", true);
+        batchedContext?.set("profileId", profileId);
+        const profile = profileById(api.getState(), profileId);
+        if (profile === undefined) {
+          return Promise.reject(new ProcessCanceled("No game active"));
+        }
+        const { mods } = api.getState().persistent;
+        const collection = mods[profile.gameId]?.[dependentId];
+
+        if (collection === undefined) {
+          return Promise.resolve();
+        }
+
+        const instPath = this.mGetInstallPath(profile.gameId);
+
+        const filtered = rules.filter(
+          (iter) => collection.rules?.find((rule) => _.isEqual(iter, rule)) !== undefined,
+        );
+
+        if (recommended) {
+          return withActivityTracking(
+            api,
+            "installing_dependencies",
+            dependentId,
+            this.withDependenciesContext("install-recommendations", profile.id, () =>
+              this.installRecommendationsImpl(
+                api,
+                profile,
+                profile.gameId,
+                dependentId,
+                modName(collection),
+                filtered,
+                instPath,
+                true,
+              ),
+            ),
+          );
+        } else {
+          return withActivityTracking(
+            api,
+            "installing_dependencies",
+            dependentId,
+            this.withDependenciesContext("install-collections", profile.id, () =>
+              this.installDependenciesImpl(
+                api,
+                profile,
+                profile.gameId,
+                dependentId,
+                modName(collection),
+                filtered,
+                instPath,
+                true,
+              ),
+            ),
+          );
+        }
+      },
+    );
+
+    api.onAsync("cancel-dependency-install", (modId: string) => {
+      this.mDependencyInstalls[modId]?.();
+      return Promise.resolve();
+    });
+
+    api.onAsync("reset-dependency-installs", () => {
+      // Cancel all dependency installs
+      Object.values(this.mDependencyInstalls).forEach((cancel) => cancel());
+
+      // Clear the dependency installs map
+      this.mDependencyInstalls = {};
+
+      this.mDependencyPipelineLimit = new ConcurrencyLimiter(10);
+
+      // Clear all retry counters
+      this.mDependencyRetryCount.clear();
+
+      return Promise.resolve();
+    });
+
+    api.events.on("did-finish-download", (downloadId: string, state: string) => {
+      if (state === "finished") {
+        const context = getBatchContext("install-recommendations", "");
+        const sourceModId = context?.get?.("sourceModId", null);
+        this.handleDownloadFinished(api, downloadId, sourceModId);
+      } else if (state === "failed") {
+        this.handleDownloadFailed(api, downloadId);
+      }
+    });
+  }
+
+  private handleDownloadFinished(
+    api: IExtensionApi,
+    downloadId: string,
+    sourceModId?: string,
+  ): boolean {
+    const state = api.getState();
+    const download = state.persistent.downloads.files[downloadId];
+
+    if (!download || download.state !== "finished") {
+      log("debug", "Skipping download - not found or not finished", {
+        downloadId,
+        state: download?.state,
+      });
+      return false;
+    }
+
+    // Check if this download is part of a collection installation
+    const collectionInfo = findCollectionByDownload(state, download, sourceModId);
+    if (!collectionInfo) {
+      return false;
+    }
+
+    const { collectionMod, matchingRule, gameId } = collectionInfo;
+    const collectionId = collectionMod.id;
+    if (process.env.NODE_ENV !== "production") {
+      log("debug", "Found collection for download", {
+        downloadId,
+        collectionId,
+      });
+    }
+
+    const isInstallingDependencies = !!this.mDependencyInstalls[collectionId];
+    const hasPhaseState = this.mPhaseTracker.has(collectionId);
+
+    if (!isInstallingDependencies && !hasPhaseState) {
+      log(
+        "debug",
+        "Collection is not currently installing (no active dependency install or phase state)",
+        { collectionId, downloadId },
+      );
+      return false;
+    }
+
+    if (hasPhaseState) {
+      const phaseState = this.mPhaseTracker.get(collectionId);
+      if (phaseState) {
+        // Add this download to the cache under every rule tag it satisfies
+        for (const tag of downloadReferenceTags(download)) {
+          phaseState.downloadLookupCache.byTag.set(tag, downloadId);
+        }
+        if (download.fileMD5) {
+          phaseState.downloadLookupCache.byMd5.set(download.fileMD5, downloadId);
+        }
+      }
+    }
+
+    // Create a dependency object and queue the installation
+    const dependency: IDependency = {
+      // install-spec triple (installerChoices / fileList / patches) from the single
+      // extraction point, so it stays in sync with the rule and its legacy fallbacks
+      ...ruleInstallSpec(matchingRule),
+      extra: matchingRule.extra,
+      reference: matchingRule.reference,
+      lookupResults: [], // Will be populated if needed
+      download: downloadId,
+      phase: rulePhase(matchingRule),
+      sessionRuleId: modRuleId(matchingRule),
+    };
+
+    // record that this collection mod's download is available, coupled to the install
+    // queueing below so we never mark "downloaded" for a download we then don't install
+    // (no-op outside an active collection session)
+    this.writeCollectionSession(
+      dependency.reference,
+      { type: "status", status: "downloaded" },
+      dependency.sessionRuleId,
+    );
+
+    // Ensure the phase is marked as having downloads finished
+    // This is needed when downloads complete after initial dependency processing
+    if (hasPhaseState) {
+      this.markPhaseDownloadsFinished(collectionId, dependency.phase, api);
+    }
+
+    // Queue the installation
+    this.queueInstallation(
+      api,
+      dependency,
+      downloadId,
+      gameId,
+      collectionId,
+      matchingRule.type === "recommends",
+      dependency.phase,
+    );
+    return true;
+  }
+
+  private handleDownloadFailed(api: IExtensionApi, downloadId: string) {
+    const state = api.getState();
+    const download = state.persistent.downloads.files[downloadId];
+
+    if (!download) {
+      log("debug", "Skipping download failure - download not found", {
+        downloadId,
+      });
+      return;
+    }
+
+    // Check if this download is part of a collection installation.
+    const collectionInfo = findCollectionByDownload(state, download);
+    if (!collectionInfo) {
+      return;
+    }
+
+    const { collectionMod, matchingRule, gameId } = collectionInfo;
+    const collectionId = collectionMod.id;
+    log("debug", "Found collection for failed download", {
+      downloadId,
+      collectionId,
+    });
+
+    // Check if we're currently in collection installation for this collection
+    const isInstallingCollection =
+      !!this.mDependencyInstalls[collectionId] || this.mPhaseTracker.has(collectionId);
+
+    if (!isInstallingCollection) {
+      log("debug", "Collection is not currently installing - ignoring download failure", {
+        collectionId,
+        downloadId,
+      });
+      return;
+    }
+
+    // Get the download error message
+    const errorMessage =
+      download.failCause?.message || "Download failed due to network or server error";
+    const modName = renderModReference(matchingRule.reference);
+    // Report the download failure via aggregated notifications for collections
+    if (this.mNotificationAggregator) {
+      this.mNotificationAggregator.addNotification(
+        collectionId,
+        "error",
+        "Collection Download Failed",
+        `Failed to download "${modName}": ${errorMessage}`,
+        modName,
+        { allowReport: false },
+      );
+    } else {
+      // Fallback to direct notification if aggregator not available
+      api.showErrorNotification(
+        "Collection Download Failed",
+        `Failed to download "${modName}": ${errorMessage}`,
+        {
+          allowReport: false,
+        },
+      );
+    }
+
+    // Settle the member as failed on the collection session. A terminally failed download is not
+    // requeued, so without this the member stays on "downloading" while rendering "Download failed"
+    // - bucketed under the Downloading filter and missed by the Failed filter. Mirrors how
+    // handleDownloadSkipped settles a skipped member, then lets the phase advance past it.
+    this.writeCollectionSession(
+      matchingRule.reference,
+      { type: "status", status: "failed" },
+      modRuleId(matchingRule),
+      collectionId,
+    );
+    this.maybeAdvancePhase(collectionId, api);
+  }
+
+  private handleDownloadSkipped(api: IExtensionApi, sourceModId: string, dep: IDependency) {
+    if (!sourceModId || !dep) {
+      return;
+    }
+
+    // Check if we're currently in collection installation for this collection
+    const isInstallingCollection =
+      !!this.mDependencyInstalls[sourceModId] || this.mPhaseTracker.has(sourceModId);
+    if (!isInstallingCollection) {
+      log("debug", "Collection is not currently installing - ignoring skipped download", {
+        sourceModId,
+      });
+      return;
+    }
+
+    const downloads = api.getState().persistent.downloads.files;
+    const dlId = dep.download ?? findDownloadByReferenceTag(downloads, dep.reference);
+    if (dlId != null) {
+      // Remove any active or pending installation for this dependency
+      const installKey = this.generateDependencyInstallKey(sourceModId, dlId);
+      this.mPendingInstalls.delete(installKey);
+      this.mActiveInstalls.delete(installKey);
+    }
+
+    // Mark the skipped member ignored directly against the active session (collections is core
+    // now, so no event round-trip through the InstallDriver is needed).
+    markCollectionMemberSkipped(api, { reference: dep.reference });
+
+    // See if we can advance the phase
+    this.maybeAdvancePhase(sourceModId, api);
+  }
+
+  /**
+   * Get information about all currently active installations
+   */
+  public getActiveInstallations(): IActiveInstallation[] {
+    return Array.from(this.mActiveInstalls.values());
+  }
+
+  /**
+   * Get information about a specific active installation
+   */
+  public getActiveInstallation(installId: string): IActiveInstallation | undefined {
+    return this.mActiveInstalls.get(installId);
+  }
+
+  /**
+   * Check if an installation is currently active
+   */
+  public isInstallationActive(installId: string): boolean {
+    return this.mActiveInstalls.has(installId);
+  }
+
+  /**
+   * Get count of active installations
+   */
+  public getActiveInstallationCount(): number {
+    const state = this.mApi.getState();
+    const currentGameId = activeGameId(state);
+    let count = 0;
+    for (const install of this.mActiveInstalls.values()) {
+      const gameId = install.gameId || currentGameId;
+      const mods = state.persistent.mods[gameId] ?? {};
+      if (mods[install.modId]?.type !== "collection") {
+        count++;
+      }
+    }
+    return count;
+  }
+
+  /**
+   * Returns a promise that resolves once there are no active or pending
+   * installations. Resolves immediately if already idle.
+   */
+  public waitForIdle(): Promise<void> {
+    const shouldResolve = () =>
+      this.getActiveInstallationCount() === 0 ||
+      getCollectionActiveSession(this.mApi.getState()) !== undefined;
+
+    if (shouldResolve()) {
+      return Promise.resolve();
+    }
+    return new Promise<void>((resolve) => {
+      const check = () => {
+        if (shouldResolve()) {
+          resolve();
+        } else {
+          setTimeout(check, 500);
+        }
+      };
+      setTimeout(check, 500);
+    });
+  }
+
+  /**
+   * Record that a mod was recently installed/reinstalled. The deployment flow
+   * uses this to auto-resolve expected external changes for these mods. We
+   * resolve to mod.installationPath because that's what the deployment
+   * manifest's IDeployedFile.source field stores; for the replace-existing-mod
+   * flow this can differ from `modId`.
+   */
+  public markRecentInstall(modId: string, gameId: string): void {
+    if (!modId) {
+      return;
+    }
+    const mod = this.mApi.getState().persistent.mods?.[gameId]?.[modId];
+    this.mRecentChangedPaths.add(mod?.installationPath ?? modId);
+  }
+
+  /**
+   * Record that a mod was just removed by Vortex. The next deployment flow
+   * will treat any srcdeleted/refchange entries from this installation path as
+   * expected (and drop them from the manifest).
+   */
+  public markRecentRemoval(installationPath: string): void {
+    if (installationPath) {
+      this.mRecentChangedPaths.add(installationPath);
+    }
+  }
+
+  /**
+   * Returns the set of installation paths whose mods finished installing or
+   * were removed since the last deployment, and clears the internal tracking.
+   * Intended to be called once per deployment cycle.
+   */
+  public consumeRecentChanges(): Set<string> {
+    const result = new Set(this.mRecentChangedPaths);
+    this.mRecentChangedPaths.clear();
+    return result;
+  }
+
+  /**
+   * Force cleanup of stuck installations (for debugging)
+   * @param maxAgeMinutes - installations older than this will be force-cleaned
+   */
+  public forceCleanupStuckInstalls(api: IExtensionApi, maxAgeMinutes: number = 10): number {
+    const now = Date.now();
+    const maxAgeMs = maxAgeMinutes * 60 * 1000;
+    const stuckInstalls: IActiveInstallation[] = [];
+
+    this.mActiveInstalls.forEach((install, installId) => {
+      const age = now - install.startTime;
+      if (age > maxAgeMs) {
+        stuckInstalls.push(install);
+      }
+    });
+
+    // Force cleanup of stuck installations
+    stuckInstalls.forEach((install) => {
+      const { installId, modId, callback } = install;
+      this.mActiveInstalls.delete(installId);
+      try {
+        const timeoutError = new Error(`Installation timed out after ${maxAgeMinutes} minutes`);
+        timeoutError.name = "InstallationTimeoutError";
+        callback(timeoutError, modId);
+        log("info", "InstallManager: Called callback for stuck installation", {
+          installId,
+          modId,
+        });
+      } catch (callbackError) {
+        log("error", "InstallManager: Error calling callback for stuck installation", {
+          installId,
+          modId,
+          error: getErrorMessageOrDefault(callbackError),
+        });
+      }
+
+      // Try to dismiss any lingering notifications
+      try {
+        api.store.dispatch(dismissNotification(`install_${installId}`));
+        api.store.dispatch(dismissNotification(`ready-to-install-${installId}`));
+      } catch (err) {
+        log("warn", "Error dismissing notification during force cleanup", {
+          installId,
+          error: getErrorMessageOrDefault(err),
+        });
+      }
+    });
+
+    return stuckInstalls.length;
+  }
+
+  /**
+   * add an installer extension
+   *
+   * @param {number} priority priority of the installer. the lower the number the higher
+   *                          the priority, so at priority 0 the extension would always be
+   *                          the first to be queried
+   * @param {TestSupported} testSupported
+   * @param {IInstall} install
+   *
+   * @memberOf InstallManager
+   */
+  public addInstaller(
+    id: string,
+    priority: number,
+    testSupported: TestSupported,
+    install: InstallFunc,
+  ) {
+    this.mInstallers.push({ id, priority, testSupported, install });
+    this.mInstallers.sort((lhs: IModInstaller, rhs: IModInstaller): number => {
+      return lhs.priority - rhs.priority;
+    });
+  }
+
+  public simulate(
+    api: IExtensionApi,
+    gameId: string,
+    archivePath: string,
+    tempPath: string,
+    extractList?: IFileListItem[],
+    unattended?: boolean,
+    installChoices?: any,
+    progress?: (entries: string[], percent: number) => void,
+  ): Promise<IInstallResult> {
+    // Create a dedicated Zip instance for this simulation to prevent conflicts
+    const simulationZip = new Zip();
+
+    let extractProm: Promise<any>;
+    if (FILETYPES_AVOID.includes(path.extname(archivePath).toLowerCase())) {
+      extractProm = Promise.reject(
+        new ArchiveBrokenError(path.basename(archivePath), "file type on avoidlist"),
+      );
+    } else {
+      extractProm = Promise.resolve(
+        simulationZip
+          .extractFull(
+            archivePath,
+            tempPath,
+            { ssc: false },
+            progress,
+            () => this.queryPassword(api.store) as any,
+          )
+          .catch((err: Error) =>
+            this.isCritical(err.message)
+              ? Promise.reject(new ArchiveBrokenError(path.basename(archivePath), err.message))
+              : Promise.reject(err),
+          ),
+      );
+    }
+
+    let fileList: string[] = [];
+
+    return extractProm
+      .then(({ code, errors }: { code: number; errors: string[] }) => {
+        log("debug", "extraction completed");
+        if (errors.length > 0) {
+          const message =
+            code > 1
+              ? `Extraction completed with ${errors.length} error(s)`
+              : `Extraction completed with ${errors.length} warning(s)`;
+          const logLevel = code > 1 ? "error" : "warn";
+          log(logLevel, message, {
+            code,
+            errors: errors.join("; "),
+          });
+        }
+        if (code !== 0) {
+          const critical = errors.find((err) => this.isCritical(err));
+          if (critical !== undefined) {
+            return Promise.reject(new ArchiveBrokenError(path.basename(archivePath), critical));
+          }
+          if (errors.some((err) => this.isDiskFull(err))) {
+            return Promise.reject(new InsufficientDiskSpace(path.parse(tempPath).root));
+          }
+          return this.queryContinue(api, errors, archivePath);
+        } else {
+          return Promise.resolve();
+        }
+      })
+      .then(async () => {
+        fileList = await buildFileList(tempPath);
+        if (truthy(extractList) && extractList.length > 0) {
+          return makeListInstaller(extractList, tempPath);
+        } else {
+          // TODO: add installer details to the simulate installer function
+          return this.getInstaller(fileList, gameId, archivePath);
+        }
+      })
+      .then((supportedInstaller) => {
+        if (supportedInstaller === undefined) {
+          throw new Error("no installer supporting this file");
+        }
+
+        const { installer, requiredFiles } = supportedInstaller;
+        const collectionInstallState = getCollectionActiveSession(api.getState());
+        const overrideInstructionsFilePresentInArchive = fileList.some(
+          (file) => path.basename(file) === VORTEX_OVERRIDE_INSTRUCTIONS_FILENAME,
+        );
+        const details: IInstallationDetails = collectionInstallState
+          ? null
+          : {
+              hasInstructionsOverrideFile: overrideInstructionsFilePresentInArchive,
+            };
+        return installer.install(
+          fileList,
+          tempPath,
+          gameId,
+          (perc: number) => {
+            log("info", "progress", perc);
+            progress([], perc);
+          },
+          installChoices,
+          unattended,
+          archivePath,
+          details,
+        );
+      });
+  }
+
+  /**
+   * start installing a mod.
+   *
+   * @param {string} archiveId id of the download. may be null if the download isn't
+   *                           in our download archive
+   * @param {string} archivePath path to the archive file
+   * @param {string} downloadGameId gameId of the download as reported by the downloader
+   * @param {IExtensionApi} extension api
+   * @param {*} info existing information about the mod (i.e. stuff retrieved
+   *                 from the download page)
+   * @param {boolean} processDependencies if true, test if the installed mod is dependent
+   *                                      of others and tries to install those too
+   * @param {boolean} enable if true, enable the mod after installation
+   * @param {Function} callback callback once this is finished
+   * @param {boolean} forceGameId set if the user has already been queried which game
+   *                              to install the mod for
+   * @param {IFileListItem[]} fileList if set, the listed files (and only those) get extracted
+   *                                   directly, ignoring any installer scripts
+   * @param {boolean} unattended if set and there is an option preset, the installation
+   *                             will happen automatically without user interaction
+   * @param {boolean} forceInstaller if set, this should be the id of an installer
+   *                                 (registerInstaller) to be used, instead of going through
+   *                                 the auto-detection.
+   */
+  public install(
+    archiveId: string,
+    archivePath: string,
+    downloadGameIds: string[],
+    api: IExtensionApi,
+    info: any,
+    processDependencies: boolean,
+    enable: boolean,
+    callback: (error: Error, id: string) => void,
+    forceGameId?: string,
+    fileList?: IFileListItem[],
+    unattended?: boolean,
+    forceInstaller?: string,
+    allowAutoDeploy?: boolean,
+    sourceModId?: string,
+    modReference?: IModReference,
+  ): void {
+    const baseName = path.basename(archivePath, path.extname(archivePath)).trim() || "EMPTY_NAME";
+    const installId = this.generateDependencyInstallKey(sourceModId, archiveId);
+    const dummyArchiveId = archiveId || "direct-install-" + shortid();
+    const installInfo: IActiveInstallation = {
+      installId,
+      archiveId: archiveId || dummyArchiveId,
+      archivePath,
+      modId: baseName, // Will be updated when final modId is determined
+      gameId: "", // Will be updated when gameId is determined
+      callback,
+      startTime: Date.now(),
+      baseName,
+    };
+    this.mActiveInstalls.set(installId, installInfo);
+
+    // Wrap callback to ensure proper cleanup and tracking
+    const trackedCallback = (err: Error, id: string) => {
+      const activeInstall = this.mActiveInstalls.get(installId);
+      if (activeInstall) {
+        activeInstall.modId = id || activeInstall.modId;
+        if (!err) {
+          log("info", "Installation completed successfully", {
+            installId,
+            modId: id,
+            duration: Date.now() - activeInstall.startTime,
+          });
+          if (id) {
+            this.markRecentInstall(id, activeInstall.gameId);
+          }
+        }
+      }
+
+      // Call the original callback
+      callback?.(err, id);
+
+      // Clean up tracking
+      this.mActiveInstalls.delete(installId);
+    };
+
+    if (archiveId != null) {
+      const download = api.getState().persistent.downloads.files[archiveId];
+      if (download && download.state !== "finished") {
+        const error = new Error(`Cannot install: download not finished (state: ${download.state})`);
+        trackedCallback(error, undefined);
+        return;
+      } else if (download) {
+        modReference = modReference || downloadToModRef(download);
+      }
+    }
+
+    const details: IInstallationDetails = {
+      modReference,
+    };
+
+    const state = api.getState();
+    const batchContext = getBatchContext(["install-dependencies", "install-recommendations"], "");
+    const profileId = batchContext?.get<string>("profileId") ?? activeProfile(state)?.id;
+    const currentProfile = profileById(state, profileId) ?? activeProfile(state);
+    // lets attribute extractors take the tag from the rule being installed rather than from
+    // whichever collection stamped the archive
+    const installingReference = modReference;
+
+    // Use parallel installation concurrency limiter instead of sequential mQueue
+    this.mInstallLimit
+      .do(() => {
+        return new Promise<string>((resolve, reject) => {
+          const installationZip = new Zip();
+
+          const fullInfo = { ...info, modReference: installingReference };
+          let rules: IRule[] = [];
+          let overrides: string[] = [];
+          let destinationPath: string;
+          let tempPath: string;
+          // Use the already-created installation tracking
+          const activeInstall = this.mActiveInstalls.get(installId);
+          if (!activeInstall) {
+            const error = new Error("Installation tracking lost");
+            trackedCallback(error, undefined);
+            reject(error);
+            return;
+          }
+
+          api.dismissNotification(`ready-to-install-${archiveId ?? dummyArchiveId}`);
+          let installProfile = currentProfile;
+          let modId = baseName;
+          let installGameId: string;
+          let installContext: InstallContext;
+          let archiveMD5: string;
+          let archiveSize: number;
+
+          // Update the callback to also handle promise resolution
+          const promiseCallback = (err: Error, id: string) => {
+            // Update the installation info with final details before calling tracked callback
+            const activeInstall = this.mActiveInstalls.get(installId);
+            if (activeInstall) {
+              activeInstall.modId = id || modId;
+              activeInstall.gameId = installGameId || "";
+            }
+            trackedCallback(err, id);
+            if (err) {
+              reject(err);
+            } else {
+              resolve(id);
+            }
+          };
+          let existingMod: IMod;
+          let installingFileId: number;
+          // How the user resolved a name conflict (variant vs replace), if one arose; read at
+          // startInstallCB to classify the install for analytics.
+          let replacementChoice: ReplaceChoice;
+          // Start the installation process - the promise will resolve when callback is called
+          const dlInfo =
+            archiveId != null ? api.getState().persistent.downloads.files[archiveId] : undefined;
+          const installationPromise = withTrackedActivity(
+            "vortex.mod-management",
+            "mod.install",
+            {
+              "mod.baseName": baseName,
+              "mod.archiveId": archiveId ?? "",
+              "mod.numericModId": dlInfo?.modInfo?.nexus?.ids?.modId ?? "",
+              "mod.fileId": dlInfo?.modInfo?.nexus?.ids?.fileId ?? "",
+              "mod.installerChoices":
+                fullInfo.choices != null ? JSON.stringify(fullInfo.choices) : "",
+              "mod.hasPatches": fullInfo.patches != null,
+              "mod.hasFileList": fileList != null,
+            },
+            (setAttribute, setError) =>
+              (forceGameId !== undefined
+                ? Promise.resolve(forceGameId)
+                : queryGameId(api.store, downloadGameIds, modId)
+              )
+                .then(async (gameId) => {
+                  // Convert game ID from Nexus page ID to internal ID if necessary
+                  const state = api.getState();
+                  const games = knownGames(state);
+                  const convertedGameId = convertGameIdReverse(games, gameId);
+                  installGameId = convertedGameId || gameId; // Use converted ID or fallback to original
+
+                  if (installGameId === undefined) {
+                    return Promise.reject(
+                      new ProcessCanceled("You need to select a game before installing this mod"),
+                    );
+                  }
+                  if (installGameId === "site" && baseName.toLowerCase().includes("extension")) {
+                    // Assumption here is that anything we try to install from the "Modding Tools"/"site" domain
+                    //  that contains "extension" in its archive name is an extension... If a non-extension tool
+                    //  contains "extension" in its archive name... well, that's not good but there's nothing we can
+                    //  do without API providing a unique tag for us to identify Vortex extensions. (AFAIK we can't even query the existing tags from the website)
+                    // Installation of non-Vortex tools with the extension basename will just install as a mod for
+                    //  the current game which I guess should be fine.
+                    return Promise.resolve(installGameId);
+                  }
+                  if (games.find((iter) => iter.id === installGameId) === undefined) {
+                    // Game extension for this download is not installed, this is theoretically fine as
+                    //  it may be a requirement which fits multiple game extensions. Assume the game extension
+                    //  and/or user know what they're doing.
+                    log("warn", "Game extension for download not installed", {
+                      installGameId,
+                      modId,
+                    });
+                    if (currentProfile === undefined) {
+                      return Promise.reject(
+                        new ProcessCanceled("You need to manage a game before installing this mod"),
+                      );
+                    }
+                    installGameId = currentProfile.gameId;
+                  }
+                  const discovery = discoveryByGame(state, installGameId);
+                  if (discovery?.path === undefined) {
+                    return Promise.reject(
+                      new ProcessCanceled("You need to manage a game before installing this mod"),
+                    );
+                  }
+                  if (installGameId !== currentProfile?.gameId) {
+                    const installProfileId = lastActiveProfileForGame(state, installGameId);
+                    batchContext?.set("profileId", installProfileId);
+                    installProfile = profileById(state, installProfileId);
+                  } else if (info.profileId && info.profileId !== currentProfile?.id) {
+                    // Use the target profile from install options (e.g., when installing for a collection
+                    // on a different profile than the active one)
+                    installProfile = profileById(state, info.profileId);
+                  }
+                  // TODO make the download first functionality optional
+                  await api.emitAndAwait(
+                    "will-install-mod",
+                    installGameId,
+                    archiveId,
+                    modId,
+                    fullInfo,
+                  );
+                  setAttribute("mod.installGameId", installGameId);
+                  return Promise.resolve(installGameId);
+                })
+                // calculate the md5 hash here so we can store it with the mod meta information later,
+                // otherwise we'd not remember the hash when installing from external file
+                .then((gameId) => {
+                  // Check if we already have the hash from the download to avoid recalculation
+                  const existingHash = getSafe(fullInfo, ["download", "fileMD5"], undefined);
+                  const existingSize = getSafe(fullInfo, ["download", "size"], undefined);
+                  if (existingHash && existingSize) {
+                    archiveMD5 = existingHash;
+                    archiveSize = existingSize;
+                    return Promise.resolve(gameId);
+                  }
+
+                  // Only calculate hash if we don't have it
+                  return api.genMd5Hash(archivePath).then((hash) => {
+                    archiveMD5 = hash.md5sum;
+                    archiveSize = hash.numBytes;
+                    try {
+                      _.merge(fullInfo, {
+                        download: {
+                          fileMD5: archiveMD5,
+                          size: archiveSize,
+                        },
+                      });
+                    } catch (err) {
+                      // no operation
+                    }
+                    return gameId;
+                  });
+                })
+                .then((gameId) => {
+                  if (installGameId === "site") {
+                    // install an already-downloaded extension
+                    return api
+                      .emitAndAwait("install-extension-from-download", archiveId)
+                      .then(() => Promise.reject(new UserCanceled()));
+                  }
+                  installContext = new InstallContext(
+                    gameId,
+                    api,
+                    unattended,
+                    sourceModId ? this.mNotificationAggregator : undefined,
+                    sourceModId,
+                  );
+                  installContext.startIndicator(baseName);
+
+                  return api.lookupModMeta({
+                    fileMD5: archiveMD5,
+                    fileSize: archiveSize,
+                    gameId: installGameId,
+                  });
+                })
+                .then((modInfo: ILookupResult[]) => {
+                  log("debug", "got mod meta information", {
+                    archivePath,
+                    resultCount: modInfo.length,
+                  });
+                  const match = metaLookupMatch(modInfo, path.basename(archivePath), installGameId);
+                  if (match !== undefined) {
+                    fullInfo.meta = match.value;
+                  }
+
+                  modId = this.deriveInstallName(baseName, fullInfo);
+                  let testModId = modId;
+                  // if the name is already taken, consult the user,
+                  // repeat until user canceled, decided to replace the existing
+                  // mod or provided a new, unused name
+
+                  let variantCounter: number = 0;
+                  replacementChoice = undefined;
+                  const checkNameLoop = () => {
+                    if (replacementChoice === "replace") {
+                      log("debug", '(nameloop) replacement choice "replace"', {
+                        testModId: testModId ?? "<undefined>",
+                      });
+                      return Promise.resolve(testModId);
+                    }
+                    const modNameMatches = this.checkModNameExists(testModId, api, installGameId);
+                    const variantMatches = this.checkModVariantsExist(
+                      api,
+                      installGameId,
+                      archiveId,
+                    );
+                    const existingIds = (
+                      replacementChoice === "variant"
+                        ? modNameMatches
+                        : Array.from(new Set([].concat(modNameMatches, variantMatches)))
+                    ).filter((id) => id !== undefined);
+                    if (existingIds.length === 0) {
+                      log("debug", "(nameloop) no existing ids", {
+                        testModId: testModId ?? "<undefined>",
+                      });
+                      return Promise.resolve(testModId);
+                    } else {
+                      const installOptions: IInstallOptions = {
+                        ...info,
+                        unattended,
+                        variantNumber: ++variantCounter,
+                        fileList,
+                      };
+                      return this.queryUserReplace(
+                        api,
+                        existingIds,
+                        installGameId,
+                        installOptions,
+                      ).then((choice: IReplaceChoice) => {
+                        if (choice.id === undefined) {
+                          log("error", "(nameloop) no valid id selection", {
+                            testModId,
+                            modNameMatches,
+                            variantMatches,
+                          });
+                        }
+                        testModId = choice.id;
+                        replacementChoice = choice.replaceChoice;
+                        if (choice.enable) {
+                          enable = true;
+                        }
+
+                        const activeSession = getCollectionActiveSession(api.getState());
+                        if (!activeSession) {
+                          // When user chooses to replace or create a variant, clear any pre-set
+                          // installer options so they get a fresh installation experience
+                          delete fullInfo.choices;
+                          delete fullInfo.patches;
+                          fileList = undefined;
+                        }
+                        setdefault(fullInfo, "custom", {} as any).variant = choice.variant;
+                        rules = choice.rules || [];
+                        fullInfo.previous = choice.attributes;
+                        return checkNameLoop();
+                      });
+                    }
+                  };
+                  return checkNameLoop();
+                })
+                // TODO: this is only necessary to get at the fileId and the fileId isn't
+                //   even a particularly good way to discover conflicts
+                .then((newModId) => {
+                  if (newModId === undefined) {
+                    // this shouldn't be possible, how would checkNameLoop return undefined?
+                    const err = new Error("failed to generate mod id");
+                    err["originalModId"] = modId;
+                    err["archivePath"] = archivePath;
+                    return Promise.reject(err);
+                  }
+                  modId = newModId;
+
+                  // When installing as a dependency of a collection, always tag the mod
+                  // with the collection name as its variant so it's clear which collection
+                  // installed it and different collection versions can coexist.
+                  if (
+                    sourceModId != null &&
+                    getSafe(fullInfo, ["custom", "variant"], undefined) === undefined
+                  ) {
+                    const collectionMod =
+                      api.getState().persistent.mods?.[installGameId]?.[sourceModId];
+                    if (collectionMod != null) {
+                      setdefault(fullInfo, "custom", {} as any).variant = modName(collectionMod);
+                    }
+                  }
+
+                  log("debug", "mod id for newly installed mod", {
+                    archivePath,
+                    modId,
+                  });
+                  return filterModInfo(fullInfo, undefined);
+                })
+                .then((modInfo) => {
+                  const fileId = modInfo.fileId ?? modInfo.revisionId;
+                  installingFileId = fileId;
+                  const isCollection = modInfo.revisionId !== undefined;
+
+                  // Collections handle their own update flow via collectionUpdate
+                  // in the collections extension — skip previous version detection.
+                  existingMod =
+                    fileId !== undefined && !isCollection
+                      ? this.findPreviousVersionMod(
+                          fileId,
+                          api.store,
+                          installGameId,
+                          modInfo.modId,
+                          modInfo.logicalFileName,
+                        )
+                      : undefined;
+
+                  const mods = api.getState().persistent.mods[installGameId] ?? {};
+                  const dependentRule: {
+                    [modId: string]: { owner: string; rule: IModRule };
+                  } = Object.keys(mods).reduce(
+                    (
+                      prev: {
+                        [modId: string]: { owner: string; rule: IModRule };
+                      },
+                      iter,
+                    ) => {
+                      // Skip the source collection when checking dependents — it's
+                      // being updated itself so its rules will be replaced.
+                      if (iter === sourceModId) {
+                        return prev;
+                      }
+                      const depRule = (mods[iter].rules ?? []).find(
+                        (rule) =>
+                          rule.type === "requires" && testModReference(existingMod, rule.reference),
+                      );
+                      if (depRule !== undefined) {
+                        prev[iter] = { owner: iter, rule: depRule };
+                      }
+                      return prev;
+                    },
+                    {},
+                  );
+
+                  let broken: string[] = [];
+                  if (truthy(archiveId)) {
+                    const download = api.getState().persistent.downloads.files[archiveId];
+                    if (download !== undefined) {
+                      const lookup = lookupFromDownload(download);
+                      broken = Object.keys(dependentRule).filter(
+                        (iter) =>
+                          !idOnlyRef(dependentRule[iter].rule.reference) &&
+                          !testModReference(lookup, dependentRule[iter].rule.reference),
+                      );
+                    }
+                  }
+                  if (broken.length > 0) {
+                    return this.queryIgnoreDependent(
+                      api.store,
+                      installGameId,
+                      broken.map((id) => dependentRule[id]),
+                    );
+                  } else {
+                    return Promise.resolve();
+                  }
+                })
+                .then(() => {
+                  // If no choices were provided (e.g. manual reinstall), preserve the
+                  // existing mod's installerChoices so the user doesn't have to redo them.
+                  // Only do this when the fileId matches, meaning it's the exact same
+                  // version being reinstalled — a different version (upgrade/downgrade)
+                  // may have different installer steps.
+                  if (fullInfo.choices === undefined) {
+                    const prevFileId = fullInfo.previous?.fileId;
+                    if (prevFileId !== undefined && prevFileId === installingFileId) {
+                      const prevChoices = fullInfo.previous?.installerChoices;
+                      if (prevChoices !== undefined) {
+                        fullInfo.choices = prevChoices;
+                      }
+                    }
+                  }
+
+                  if (existingMod !== undefined && installProfile !== undefined) {
+                    const wasEnabled = getSafe(
+                      installProfile.modState,
+                      [existingMod.id, "enabled"],
+                      false,
+                    );
+                    return this.userVersionChoice(existingMod, api.store).then((action: string) => {
+                      if (action === INSTALL_ACTION) {
+                        enable = enable || wasEnabled;
+                        if (wasEnabled) {
+                          setModsEnabled(api, installProfile.id, [existingMod.id], false, {
+                            allowAutoDeploy,
+                            installed: true,
+                            // mechanical disable for the reinstall, not a user-visible change.
+                            skipStateChangeEvent: true,
+                          });
+                        }
+                        rules = existingMod.rules || [];
+                        overrides = existingMod.fileOverrides;
+                        fullInfo.previous = existingMod.attributes;
+                        return Promise.resolve();
+                      } else if (action === REPLACE_ACTION) {
+                        rules = existingMod.rules || [];
+                        overrides = existingMod.fileOverrides;
+                        fullInfo.previous = existingMod.attributes;
+                        // we need to remove the old mod before continuing. This ensures
+                        // the mod is deactivated and undeployed (so we're not leave dangling
+                        // links) and it ensures we do a clean install of the mod
+                        return new Promise<void>((resolve, reject) => {
+                          api.events.emit(
+                            "remove-mod",
+                            installGameId,
+                            existingMod.id,
+                            (error: Error) => {
+                              if (error != null) {
+                                reject(error);
+                              } else {
+                                // use the same mod id as the old version so that all profiles
+                                // keep using it.
+                                modId = existingMod.id;
+                                enable = enable || wasEnabled;
+                                resolve();
+                              }
+                            },
+                            { willBeReplaced: true, reason: "version_update" },
+                          );
+                        });
+                      }
+                    });
+                  } else {
+                    return Promise.resolve();
+                  }
+                })
+                .then(() => {
+                  // Classify for analytics: existingMod is the prior version (if any),
+                  // replacementChoice the name-conflict resolution (variant vs replace).
+                  const installKind = classifyInstallKind(
+                    existingMod,
+                    installingFileId,
+                    replacementChoice,
+                  );
+                  installContext.startInstallCB(modId, installGameId, archiveId, installKind);
+
+                  destinationPath = path.join(this.mGetInstallPath(installGameId), modId);
+                  log("info", "installing to", { modId, destinationPath });
+                  installContext.setInstallPathCB(modId, destinationPath);
+                  tempPath = destinationPath + ".installing";
+                  return this.installInner(
+                    api,
+                    archivePath,
+                    tempPath,
+                    destinationPath,
+                    installGameId,
+                    installContext,
+                    installationZip,
+                    forceInstaller,
+                    fullInfo.choices,
+                    fileList,
+                    unattended,
+                    details,
+                  );
+                })
+                .then((result: IInstallResult & { installerId?: string }) => {
+                  setAttribute("mod.modId", modId);
+                  setAttribute("mod.installerId", result.installerId ?? "unknown");
+                  if (!Array.isArray(result.instructions)) {
+                    return Promise.reject(new DataInvalid("Installer produced no instructions"));
+                  }
+                  setAttribute(
+                    "mod.fileCount",
+                    result.instructions.filter((i) => i.type === "copy").length,
+                  );
+                  // update choices now that the installer may have produced new ones
+                  if (fullInfo.choices != null) {
+                    setAttribute("mod.installerChoices", JSON.stringify(fullInfo.choices));
+                  }
+                  const state: IState = api.store.getState();
+
+                  if (
+                    getSafe(state, ["persistent", "mods", installGameId, modId, "type"], "") === ""
+                  ) {
+                    return this.determineModType(installGameId, result.instructions).then(
+                      (type) => {
+                        installContext.setModType(modId, type);
+                        setAttribute("mod.modType", type);
+                        return result;
+                      },
+                    );
+                  } else {
+                    return Promise.resolve(result);
+                  }
+                })
+                .then(async (result: { instructions: IInstruction[] }) => {
+                  const setModTypeInstr: IInstruction = result.instructions.find(
+                    (instr) => instr.type === "setmodtype",
+                  );
+                  if (setModTypeInstr) {
+                    setAttribute("mod.modType", setModTypeInstr.value);
+                  }
+                  try {
+                    const overrideFile = result.instructions.find(
+                      (iter) =>
+                        iter.type === "copy" &&
+                        path.basename(iter.source) === VORTEX_OVERRIDE_INSTRUCTIONS_FILENAME,
+                    );
+                    if (!overrideFile) {
+                      return result;
+                    }
+
+                    // Remove the override instruction - we don't want to deploy this.
+                    result.instructions = result.instructions.filter(
+                      (iter) => iter !== overrideFile,
+                    );
+                    const content = await fs.readFileAsync(
+                      path.join(tempPath, overrideFile.source),
+                      "utf8",
+                    );
+                    const rawInstructions: IInstruction[] = JSON.parse(content);
+
+                    // filter out any instructions that could potentially be malicious.
+                    const overrideInstructions: IInstruction[] = rawInstructions.filter(
+                      (iter) => !["generatefile", "unsupported", "error"].includes(iter.type),
+                    );
+                    return {
+                      instructions: result.instructions,
+                      overrideInstructions,
+                    };
+                  } catch (err) {
+                    log("warn", "failed to read override instructions", err);
+                    return result;
+                  }
+                })
+                .then(
+                  (result: {
+                    instructions: IInstruction[];
+                    overrideInstructions?: IInstruction[];
+                  }) => {
+                    const startTime = Date.now();
+                    return this.processInstructions(
+                      api,
+                      installContext,
+                      archivePath,
+                      tempPath,
+                      destinationPath,
+                      installGameId,
+                      modId,
+                      result,
+                      fullInfo.choices,
+                      unattended,
+                      details,
+                    ).then((result) => {
+                      const endTime = Date.now();
+                      log("debug", "processed instructions", {
+                        installId: activeInstall.installId,
+                        duration: endTime - startTime,
+                      });
+                      return result;
+                    });
+                  },
+                )
+                .finally(() => {
+                  if (tempPath !== undefined) {
+                    log("debug", "removing temporary path", tempPath);
+                    return fs.removeAsync(tempPath);
+                  } else {
+                    return Promise.resolve();
+                  }
+                })
+                .then(() => {
+                  // Refresh download data from current state to get any Nexus info
+                  // (like category_id) that was fetched asynchronously after installation started
+                  if (archiveId) {
+                    const currentDownload = api.getState().persistent.downloads.files[archiveId];
+                    if (currentDownload) {
+                      fullInfo.download = currentDownload;
+                    }
+                  }
+                  return filterModInfo(fullInfo, destinationPath);
+                })
+                .then((modInfo) => {
+                  const state = api.getState();
+                  const existingKeys = Object.keys(
+                    state.persistent.mods[installGameId]?.[modId]?.attributes || {},
+                  );
+                  installContext.beginBatch();
+                  installContext.finishInstallCB("success", _.omit(modInfo, existingKeys));
+                  batchDispatch(api.store, [
+                    ...installContext.flushBatch(),
+                    ...(rules ?? []).map((rule) => addModRule(installGameId, modId, rule)),
+                    setFileOverride(installGameId, modId, overrides),
+                  ]);
+                  if (installProfile !== undefined) {
+                    if (enable) {
+                      setModsEnabled(api, installProfile.id, [modId], true, {
+                        allowAutoDeploy,
+                        installed: true,
+                        // enabling on install completion is implied by the install event.
+                        skipStateChangeEvent: true,
+                      });
+                    }
+                  }
+                  this.setModSize(api, modId, installGameId);
+                  promiseCallback?.(null, modId);
+                  api.events.emit("did-install-mod", installGameId, archiveId, modId, modInfo);
+                  return null;
+                })
+                .catch((err) => {
+                  // TODO: make this nicer. especially: The first check doesn't recognize UserCanceled
+                  //   exceptions from extensions, hence we have to do the string check (last one)
+                  const errObj = unknownToError(err);
+                  const canceled =
+                    err instanceof UserCanceled ||
+                    err instanceof TemporaryError ||
+                    err instanceof ProcessCanceled ||
+                    !truthy(err) ||
+                    errObj.message === "Canceled" ||
+                    (truthy(errObj.stack) &&
+                      errObj.stack.startsWith("UserCanceled: canceled by user"));
+                  if (!canceled && err instanceof Error) {
+                    setError(err);
+                  }
+                  let prom: Promise<void> = Promise.resolve(
+                    destinationPath !== undefined ? fs.removeAsync(destinationPath) : undefined,
+                  )
+                    .then(() => undefined)
+                    .catch((innerErr: unknown) => {
+                      if (innerErr instanceof UserCanceled) {
+                        return;
+                      }
+                      const err = unknownToError(innerErr);
+                      installContext.reportError(
+                        'Failed to clean up installation directory "{{destinationPath}}", ' +
+                          "please close Vortex and remove it manually.",
+                        err,
+                        getErrorCode(err) !== "ENOTEMPTY",
+                        { destinationPath },
+                      );
+                    });
+
+                  if (installContext !== undefined) {
+                    const pretty = prettifyNodeErrorMessage(errObj);
+                    // context doesn't have to be set if we canceled early
+                    prom = prom.then(() =>
+                      installContext.finishInstallCB(
+                        canceled ? "canceled" : "failed",
+                        undefined,
+                        api.translate(pretty.message, {
+                          replace: pretty.replace,
+                        }),
+                        pretty,
+                      ),
+                    );
+                  }
+
+                  if (err === undefined) {
+                    return prom.then(() => {
+                      promiseCallback?.(new Error("unknown error"), null);
+                    });
+                  } else if (canceled) {
+                    return prom.then(() => {
+                      promiseCallback?.(errObj, null);
+                    });
+                  } else if (err instanceof ArchiveBrokenError) {
+                    return prom.then(() => {
+                      if (archiveId) {
+                        api.store.dispatch(
+                          finishDownload(archiveId, "failed", {
+                            message: err.message,
+                          }),
+                        );
+                      }
+                      if (unattended) {
+                        promiseCallback?.(err, null);
+                        return Promise.resolve();
+                      }
+                      if (installContext !== undefined) {
+                        api.sendNotification({
+                          type: "info",
+                          title: "Installation failed, archive is damaged",
+                          message: path.basename(archivePath),
+                          actions: [
+                            {
+                              title: "Delete",
+                              action: (dismiss) => {
+                                api.events.emit("remove-download", archiveId, dismiss, {
+                                  confirmed: true,
+                                });
+                              },
+                            },
+                            {
+                              title: "Delete & Redownload",
+                              action: (dismiss) => {
+                                const state: IState = api.store.getState();
+                                const download = state.persistent.downloads.files[archiveId];
+                                api.events.emit(
+                                  "remove-download",
+                                  archiveId,
+                                  () => {
+                                    dismiss();
+                                    api.events.emit(
+                                      "start-download",
+                                      download.urls,
+                                      info.download,
+                                      path.basename(archivePath),
+                                    );
+                                  },
+                                  { confirmed: true },
+                                );
+                                dismiss();
+                              },
+                            },
+                          ],
+                        });
+                      }
+                    });
+                  } else if (err instanceof SetupError) {
+                    return prom.then(() => {
+                      if (installContext !== undefined) {
+                        installContext.reportError("Installation failed", err, false, {
+                          installerPath: path.basename(archivePath),
+                          message: err.message,
+                        });
+                      }
+                      promiseCallback?.(err, null);
+                    });
+                  } else if (err instanceof DataInvalid) {
+                    return prom.then(() => {
+                      if (installContext !== undefined) {
+                        installContext.reportError(
+                          "Installation failed",
+                          "The installer {{ installerPath }} is invalid and couldn't be " +
+                            "installed:\n{{ message }}\nPlease inform the mod author.\n",
+                          false,
+                          {
+                            installerPath: path.basename(archivePath),
+                            message: err.message,
+                          },
+                        );
+                      }
+                      promiseCallback?.(err, null);
+                    });
+                  } else if (getErrorCode(err) === "MODULE_NOT_FOUND") {
+                    const requireStack = (err as { requireStack?: string[] }).requireStack;
+                    const location = requireStack !== undefined ? ` (at ${requireStack[0]})` : "";
+                    installContext.reportError(
+                      "Installation failed",
+                      "Module failed to load:\n{{message}}{{location}}\n\n" +
+                        "This usually indicates that the Vortex installation has been " +
+                        "corrupted or an external application (like an Anti-Virus) has interfered with " +
+                        "the loading of the module. " +
+                        "Please check whether your AV reported something and try reinstalling Vortex.",
+                      false,
+                      {
+                        location,
+                        message: errObj.message.split("\n")[0],
+                      },
+                    );
+                    promiseCallback?.(errObj, null);
+                  } else if (err instanceof InsufficientDiskSpace) {
+                    return prom.then(() => {
+                      if (installContext !== undefined) {
+                        installContext.reportError(
+                          "Not enough disk space",
+                          "There is not enough free space on the drive to install this mod. " +
+                            "Free up space and try again.",
+                          false,
+                        );
+                      }
+                      promiseCallback?.(err, null);
+                    });
+                  } else {
+                    return prom
+                      .then(() => api.genMd5Hash(archivePath).catch(() => ({})))
+                      .then((hashResult: IHashResult) => {
+                        const id = `${path.basename(archivePath)} (md5: ${hashResult.md5sum})`;
+                        let replace = {};
+                        let errMessage: string;
+                        if (typeof err === "string") {
+                          errMessage = 'The installer "{{ id }}" failed: {{ message }}';
+                          replace = {
+                            id,
+                            message: errMessage,
+                          };
+                        }
+                        if (installContext !== undefined) {
+                          const browserAssistantMsg =
+                            "The installer has failed due to an external 3rd " +
+                            "party application you have installed on your system named " +
+                            '"Browser Assistant". This application inserts itself globally ' +
+                            "and breaks any other application that uses the same libraries as it does.\n\n" +
+                            'To use Vortex, please uninstall "Browser Assistant".';
+                          const errorMessage = typeof err === "string" ? err : errObj.message;
+                          let allowReport: boolean;
+                          if (errObj.message.includes("No compatible .NET installation")) {
+                            allowReport = false;
+                          }
+                          !this.isBrowserAssistantError(errorMessage)
+                            ? installContext.reportError(
+                                "Installation failed",
+                                errObj,
+                                allowReport,
+                                replace,
+                              )
+                            : installContext.reportError(
+                                "Installation failed",
+                                browserAssistantMsg,
+                                false,
+                              );
+                        }
+                        promiseCallback?.(errObj, modId);
+                      });
+                  }
+                })
+                .finally(() => {
+                  if (installContext !== undefined) {
+                    const state = api.store.getState();
+                    const mod: IMod = getSafe(
+                      state,
+                      ["persistent", "mods", installGameId, modId],
+                      undefined,
+                    );
+
+                    try {
+                      installContext.stopIndicator(mod);
+                    } catch (stopError) {
+                      const err = unknownToError(stopError);
+                      log("error", "InstallManager: Error in stopIndicator during cleanup", {
+                        installId,
+                        modId: modId || "unknown",
+                        error: err.message,
+                        stack: err.stack,
+                      });
+                    }
+                  }
+                }),
+            {},
+          );
+
+          // Handle the installationPromise completion/failure
+          installationPromise
+            .then(() => {
+              // Installation completed successfully - the callback should have been called
+              // If we reach here without the callback being called, something went wrong
+              if (this.mActiveInstalls.has(installId)) {
+                log("warn", "Installation completed but callback was not called", {
+                  installId,
+                  modId,
+                });
+
+                if (installContext !== undefined) {
+                  try {
+                    // Force call finishInstallCB if it wasn't called (this can happen with FOMOD installers)
+                    if (installContext?.["mInstallOutcome"] === undefined) {
+                      log(
+                        "info",
+                        "InstallManager: Forcing finishInstallCB call for FOMOD installer",
+                        { installId, modId },
+                      );
+                      installContext.finishInstallCB("success", {});
+                    }
+
+                    // Manually dismiss the notification
+                    const notificationId = "install_" + (installContext?.["mIndicatorId"] || modId);
+                    api.store.dispatch(dismissNotification(notificationId));
+                    log("info", "InstallManager: Manually dismissed notification", {
+                      installId,
+                      notificationId,
+                    });
+                  } catch (cleanupError) {
+                    const message = getErrorMessageOrDefault(cleanupError);
+                    log("error", "InstallManager: Error during manual cleanup", {
+                      installId,
+                      error: message,
+                    });
+                  }
+                }
+                this.mActiveInstalls.delete(installId);
+                resolve(modId);
+              }
+            })
+            .catch((unknownErr) => {
+              const installError = unknownToError(unknownErr);
+              if (this.mActiveInstalls.has(installId)) {
+                log("warn", "Installation failed", {
+                  installId,
+                  error: installError.message,
+                });
+                this.mActiveInstalls.delete(installId);
+                reject(installError);
+              }
+            });
+        });
+      })
+      .catch((err) => {
+        trackedCallback?.(unknownToError(err), null);
+      });
+  }
+
+  public installDependencies(
+    api: IExtensionApi,
+    profile: IProfile,
+    gameId: string,
+    modId: string,
+    silent: boolean,
+    allowAutoDeploy?: boolean,
+  ): Promise<void> {
+    const state: IState = api.store.getState();
+    const mod: IMod = state.persistent.mods[gameId]?.[modId];
+
+    if (mod === undefined) {
+      return Promise.reject(new ProcessCanceled(`Invalid mod specified "${modId}"`));
+    }
+
+    this.repairRules(api, mod, gameId);
+
+    const installPath = this.mGetInstallPath(gameId);
+    log("info", "start installing dependencies", { modId });
+
+    // a fresh round is a fresh attempt: clear the stalled marker so a retry that succeeds
+    // presents as complete (no-op unless modId is the actively-installing collection)
+    api.store.dispatch(markSessionStalled(generateCollectionSessionId(modId, profile.id), false));
+
+    const aggregationId = `install-dependencies-${modId}`;
+    this.mNotificationAggregator.startAggregation(
+      aggregationId,
+      this.mNotificationAggregationTimeoutMS,
+    );
+
+    return withActivityTracking(
+      api,
+      "installing_dependencies",
+      mod.id,
+      this.withDependenciesContext("install-dependencies", profile.id, () =>
+        this.augmentRules(api, gameId, mod).then((rules) =>
+          this.installDependenciesImpl(
+            api,
+            profile,
+            gameId,
+            mod.id,
+            modName(mod),
+            rules,
+            installPath,
+            silent,
+          ),
+        ),
+      ).finally(() => {
+        log("info", "done installing dependencies", { modId });
+        this.mNotificationAggregator.stopAggregation(aggregationId);
+      }),
+    );
+  }
+
+  public installRecommendations(
+    api: IExtensionApi,
+    profile: IProfile,
+    gameId: string,
+    modId: string,
+  ): Promise<void> {
+    const state: IState = api.store.getState();
+    const mod: IMod = getSafe(state, ["persistent", "mods", gameId, modId], undefined);
+
+    if (mod === undefined) {
+      return Promise.reject(new ProcessCanceled(`Invalid mod specified "${modId}"`));
+    }
+
+    this.repairRules(api, mod, gameId);
+
+    const installPath = this.mGetInstallPath(gameId);
+    log("info", "start installing recommendations", { modId });
+
+    return withActivityTracking(
+      api,
+      "installing_dependencies",
+      mod.id,
+      this.withDependenciesContext("install-recommendations", profile.id, () =>
+        this.augmentRules(api, gameId, mod)
+          .then((rules) =>
+            this.installRecommendationsImpl(
+              api,
+              profile,
+              gameId,
+              mod.id,
+              modName(mod),
+              rules,
+              installPath,
+              false,
+            ),
+          )
+          .finally(() => {
+            log("info", "done installing recommendations", { modId });
+          }),
+      ),
+    );
+  }
+
+  private augmentRules(api: IExtensionApi, gameId: string, mod: IMod): Promise<IRule[]> {
+    // const rules = (mod.rules ?? []).slice();
+    //if (mod.attributes === undefined) {
+    return Promise.resolve(mod.rules ?? []);
+    //}
+
+    // return api.lookupModMeta({
+    //   fileMD5: mod.attributes['fileMD5'],
+    //   fileSize: mod.attributes['fileSize'],
+    //   gameId,
+    // })
+    // .then(results => {
+    //   rules.push(...(results[0]?.value?.rules ?? []));
+    //   return Promise.resolve(rules);
+    // });
+  }
+
+  private withDependenciesContext<T>(
+    contextName: string,
+    profileId: string,
+    func: () => PromiseLike<T>,
+  ): Promise<T> {
+    const context = getBatchContext(contextName, "", true);
+    context.set("depth", context.get("depth", 0) + 1);
+    context.set("remember-instructions", null);
+    context.set("profileId", profileId);
+
+    return Promise.resolve(func()).finally(() => {
+      const oldDepth = context.get<number>("depth", 0);
+      context.set("depth", oldDepth - 1);
+      if (oldDepth === 1) {
+        context.set("remember", null);
+      }
+    });
+  }
+
+  private hasFuzzyReference(ref: IModReference): boolean {
+    return (
+      ref.fileExpression !== undefined ||
+      ref.fileMD5 !== undefined ||
+      ref.logicalFileName !== undefined
+    );
+  }
+
+  private setModSize(api: IExtensionApi, modId: string, gameId: string): Promise<void> {
+    const state = api.getState();
+    const stagingFolder = installPathForGame(state, gameId);
+    const mod = state.persistent.mods[gameId]?.[modId];
+    if (mod?.installationPath === undefined) {
+      log("debug", "failed to calculate modSize", "mod is not in state");
+      return Promise.resolve();
+    }
+    const modPath = path.join(stagingFolder, mod.installationPath);
+    return Promise.resolve(calculateFolderSize(modPath))
+      .then((totalSize) => {
+        api.store.dispatch(setModAttribute(gameId, mod.id, "modSize", totalSize));
+        return Promise.resolve();
+      })
+      .catch((err) => {
+        log("debug", "failed to calculate modSize", err);
+        return Promise.resolve();
+      });
+  }
+
+  /**
+   * Clean up pending and active installations for a specific source mod
+   */
+  private cleanupPendingInstalls(sourceModId: string, hard: boolean = false): void {
+    // Clean up pending installs
+    const pendingKeysToRemove = Array.from(this.mPendingInstalls.keys()).filter((key) =>
+      key.includes(sourceModId),
+    );
+    pendingKeysToRemove.forEach((key) => this.mPendingInstalls.delete(key));
+
+    // Clean up active installs (for dependencies that might be installing for this source mod)
+    const activeKeysToRemove = Array.from(this.mActiveInstalls.keys()).filter((key) =>
+      key.includes(sourceModId),
+    );
+    activeKeysToRemove.forEach((key) => this.mActiveInstalls.delete(key));
+
+    // Clean up retry counters for this source mod
+    const retryKeysToRemove = Array.from(this.mDependencyRetryCount.keys()).filter((key) =>
+      key.startsWith(`${sourceModId}:`),
+    );
+    retryKeysToRemove.forEach((key) => this.mDependencyRetryCount.delete(key));
+
+    if (hard) {
+      this.mInstallLimit.clearQueue();
+      this.mDependencyPipelineLimit.clearQueue();
+      this.mPhaseTracker.delete(sourceModId);
+    }
+
+    // Re-derive the collection session from reality. This teardown runs on pause/cancel/stall; a
+    // member that was mid-install keeps a stale "installing" status otherwise (the per-dependency
+    // error path leaves a torn-down install untouched, expecting resume to rebuild it - but a pause
+    // never rebuilds, so the mods tab shows a phantom "installing"). Resyncing drops such a member
+    // back to its real status (downloaded / pending), so it reads as resumable rather than stuck.
+    const state = this.mApi.getState();
+    const session = getCollectionActiveSession(state);
+    if (session?.collectionId === sourceModId) {
+      const rules = (state.persistent.mods[session.gameId]?.[sourceModId]?.rules ?? []).filter(
+        isDependencyRule,
+      );
+      if (rules.length > 0) {
+        resyncCollectionSessionRules(this.mApi, rules);
+      }
+    }
+  }
+
+  /**
+   * Queue an installation to run asynchronously without blocking downloads.
+   * Installers are gated by phase so higher phases won't start until lower phases finish.
+   */
+  private queueInstallation(
+    api: IExtensionApi,
+    dep: IDependency,
+    downloadId: string,
+    gameId: string,
+    sourceModId: string,
+    recommended: boolean,
+    phase: number = 0,
+  ): void {
+    this.mPhaseTracker.ensure(sourceModId);
+    const phaseState = this.mPhaseTracker.get(sourceModId);
+    const phaseNum = phase ?? 0;
+
+    // Check if this installation is already active or pending
+    const installKey = this.generateDependencyInstallKey(sourceModId, downloadId);
+    const alreadyActive = this.mActiveInstalls.has(installKey);
+    const alreadyPending = this.mPendingInstalls.has(installKey);
+
+    if (alreadyActive || alreadyPending) {
+      return;
+    }
+
+    const startTask = () =>
+      this.startQueuedInstallation(
+        api,
+        dep,
+        downloadId,
+        gameId,
+        sourceModId,
+        recommended,
+        phaseNum,
+      );
+
+    const canStartTasks = this.canStartInstallationTasks(sourceModId);
+
+    // Only initialize allowedPhase early if we are allowed to run installers alongside downloads
+    if (canStartTasks && phaseState.allowedPhase === undefined) {
+      phaseState.allowedPhase = phaseNum;
+      // We can't be at this phase without the earlier ones being done, so mark the collection's
+      // real earlier phases finished (the tracker iterates the actual phase set, never integer
+      // 0..phaseNum, so the OPTIONAL_PHASE sentinel never enumerates).
+      const rules = api.getState().persistent.mods[gameId]?.[sourceModId]?.rules ?? [];
+      this.mPhaseTracker.markPhasesBeforeFinished(sourceModId, phaseNum, rules);
+    }
+
+    const downloads = api.getState().persistent.downloads.files;
+    const download = downloads[downloadId];
+    const canStartNow = canStartTasks ? phaseNum <= phaseState.allowedPhase : false;
+
+    // Don't start installations if deployment is in progress
+    const canStartWithoutDeploymentBlock = canStartNow && !phaseState.isDeploying;
+
+    if (canStartWithoutDeploymentBlock && download?.state === "finished" && download?.size > 0) {
+      startTask();
+    } else {
+      if (this.mPendingInstalls.has(installKey)) {
+        return;
+      }
+      this.mPendingInstalls.set(installKey, dep);
+      const pending = phaseState.pendingByPhase.get(phaseNum) ?? [];
+      pending.push(startTask);
+      phaseState.pendingByPhase.set(phaseNum, pending);
+    }
+  }
+
+  private generateDependencyInstallKey(sourceModId: string, downloadId: string): string {
+    return `${sourceModId}:${downloadId}`;
+  }
+
+  // Starts a queued installation task and wires up phase accounting
+  private startQueuedInstallation(
+    api: IExtensionApi,
+    dep: IDependency,
+    downloadId: string,
+    gameId: string,
+    sourceModId: string,
+    recommended: boolean,
+    phase: number,
+  ): void {
+    const phaseState = this.mPhaseTracker.get(sourceModId);
+    const installKey = this.generateDependencyInstallKey(sourceModId, downloadId);
+    this.mPendingInstalls.set(installKey, dep);
+
+    // Track active count for the phase
+    phaseState.activeByPhase.set(phase, (phaseState.activeByPhase.get(phase) ?? 0) + 1);
+
+    // Orchestrate the queued dependency install under mDependencyPipelineLimit. This MUST be a
+    // different limiter from the one the actual install acquires: this callback calls
+    // installModAsync -> this.install(), which takes a slot on mInstallLimit. Gating both on
+    // mInstallLimit nests the same limiter (outer orchestration slot + inner install slot per
+    // dependency), so once every slot is held by an orchestration waiting for an install slot the
+    // whole pipeline deadlocks. The actual install concurrency is already capped at
+    // MAX_SIMULTANEOUS_INSTALLS by that inner mInstallLimit; this outer limiter only bounds
+    // how many downloaded dependencies are orchestrated/queued ahead.
+    this.mDependencyPipelineLimit
+      .do(async () => {
+        const startTime = Date.now();
+
+        // Track this dependency installation
+        const depInstallInfo: IActiveInstallation = {
+          installId: installKey,
+          archiveId: downloadId,
+          archivePath: "", // Will be updated when known
+          modId: renderModReference(dep.reference),
+          gameId,
+          callback: () => {}, // Dependencies use different completion mechanism
+          startTime,
+          baseName: renderModReference(dep.reference),
+        };
+        this.mActiveInstalls.set(installKey, depInstallInfo);
+        try {
+          // Check if installation is still needed
+          if (!this.mPendingInstalls.has(installKey)) {
+            this.mActiveInstalls.delete(installKey);
+            return;
+          }
+
+          const currentDep = this.mPendingInstalls.get(installKey);
+          this.mPendingInstalls.delete(installKey);
+
+          // Verify download is still finished before installing
+          const downloads = api.getState().persistent.downloads.files;
+          if (downloads[downloadId]?.state !== "finished" || downloads[downloadId]?.size === 0) {
+            log("info", "Download no longer finished, skipping installation", {
+              downloadId,
+            });
+            this.mActiveInstalls.delete(installKey);
+            return;
+          }
+
+          // Honour a mid-install ignore: the gathered dependency list is a snapshot from
+          // install start, but the user may have ignored this mod since (flipping the
+          // durable rule.ignored flag). Skip installing it; the phase poller settles the
+          // phase (ignored counts as complete and is excluded from requeue), and the
+          // session already shows it ignored.
+          if (isDependencyRuleIgnored(api.getState(), gameId, sourceModId, currentDep.reference)) {
+            log("info", "skipping install: dependency ignored mid-install", {
+              ref: renderModReference(currentDep.reference),
+            });
+            this.mActiveInstalls.delete(installKey);
+            this.mDependencyRetryCount.delete(installKey);
+            return;
+          }
+
+          const sourceMod = api.getState().persistent.mods[gameId][sourceModId];
+          const mods = api.getState().persistent.mods[gameId];
+
+          // Reuse an already-installed mod only when it matches the dependency by
+          // identity AND was installed with the same install spec (installer choices,
+          // file list, patches). Otherwise (different or absent spec) install it.
+          const existingMod = findModByRef(currentDep.reference, mods, undefined, {
+            installerChoices: currentDep.installerChoices,
+            fileList: currentDep.fileList,
+            patches: currentDep.patches,
+          });
+          if (existingMod == null) {
+            // about to actually install (not reusing an existing mod): mark installing so
+            // the collection session reflects the live install phase
+            this.writeCollectionSession(
+              currentDep.reference,
+              { type: "status", status: "installing" },
+              currentDep.sessionRuleId,
+              sourceModId,
+            );
+          }
+          const modId =
+            existingMod != null
+              ? existingMod.id
+              : await this.withInstructions(
+                  api,
+                  modName(sourceMod),
+                  renderModReference(currentDep.reference),
+                  currentDep.reference?.tag ?? downloadId,
+                  currentDep.extra?.["instructions"],
+                  recommended,
+                  () =>
+                    this.installModAsync(
+                      currentDep.reference,
+                      api,
+                      downloadId,
+                      {
+                        choices: currentDep.installerChoices,
+                        patches: currentDep.patches,
+                      },
+                      currentDep.fileList,
+                      gameId,
+                      true,
+                      sourceModId,
+                    ),
+                );
+
+          if (modId) {
+            this.mActiveInstalls.delete(installKey);
+
+            // record the successful install on the collection session (no-op outside an
+            // active collection session). This is the sole writer of the "installed"
+            // status, covering both a freshly installed mod and a reused existing one.
+            this.writeCollectionSession(
+              currentDep.reference,
+              { type: "installed", modId },
+              currentDep.sessionRuleId,
+              sourceModId,
+            );
+
+            // Apply any extra attributes
+            this.applyExtraFromRule(api, gameId, modId, {
+              ...currentDep.extra,
+              fileList: currentDep.fileList ?? currentDep.extra?.fileList,
+              installerChoices: currentDep.installerChoices,
+              patches: currentDep.patches ?? currentDep.extra?.patches,
+            });
+
+            const state = api.getState();
+
+            const batchedActions = [];
+            // Enable the mod only for the target profile to avoid affecting other profiles
+            const batchContext = getBatchContext(
+              ["install-dependencies", "install-collections", "install-recommendations"],
+              "",
+            );
+            const targetProfileId =
+              batchContext?.get<string>("profileId") ?? activeProfile(state)?.id;
+            const targetProfile = targetProfileId ? profileById(state, targetProfileId) : undefined;
+
+            // Superseded variants disabled here; the same set is disabled in every affected
+            // profile, so it's computed once for both the dispatch and the analytics emit.
+            const supersededVariantIds = this.checkModVariantsExist(api, gameId, downloadId);
+            if (targetProfile) {
+              // Only modify the target profile - disable other variants and enable this one
+              for (const otherModId of supersededVariantIds) {
+                batchedActions.push(setModEnabled(targetProfile.id, otherModId, false));
+              }
+              batchedActions.push(setModEnabled(targetProfile.id, modId, true));
+            } else {
+              // Fallback: enable in profiles where source mod is enabled (original behavior)
+              const profiles = Object.values(api.getState().persistent.profiles).filter(
+                (prof) => prof.gameId === gameId && prof.modState?.[sourceModId]?.enabled,
+              );
+              profiles.forEach((prof) => {
+                for (const otherModId of supersededVariantIds) {
+                  batchedActions.push(setModEnabled(prof.id, otherModId, false));
+                }
+                batchedActions.push(setModEnabled(prof.id, modId, true));
+              });
+            }
+
+            // Mark as installed as dependency
+            batchedActions.push(setModAttribute(gameId, modId, "installedAsDependency", true));
+            batchDispatch(api.store, batchedActions);
+
+            // Disabling superseded variants bypasses the mods-enabled event; emit directly.
+            // checkModVariantsExist includes modId itself (it shares the archive) - exclude it,
+            // since it ends up enabled and its enable is covered by mods_installation_completed.
+            supersededVariantIds
+              .filter((id) => id !== modId)
+              .forEach((id) => emitModStateChanged(api, gameId, id, "disabled", "variant_replace"));
+
+            // Clear retry counter on successful installation
+            this.mDependencyRetryCount.delete(installKey);
+
+            // When the mod was already installed (existingMod found), we still
+            // need to signal completion so session tracking updates its status
+            // from "downloaded" to "installed". Without this, retained mods get
+            // stuck in "downloaded" state and are requeued indefinitely.
+            // Skip for newly-installed mods — installModAsync already emits.
+            if (existingMod != null) {
+              api.events.emit(
+                "did-install-mod",
+                gameId,
+                downloadId,
+                modId,
+                api.getState().persistent.mods[gameId]?.[modId]?.attributes,
+              );
+            }
+          }
+
+          this.mActiveInstalls.delete(installKey);
+        } catch (unknownError) {
+          const err = unknownToError(unknownError);
+          this.mActiveInstalls.delete(installKey);
+          const currentRetryCount = this.mDependencyRetryCount.get(installKey) || 0;
+          // A missing mDependencyInstalls entry means the whole install was torn down
+          // externally (cancel-dependency-install / clearQueued / pause). Treat the late
+          // error as cancellation so it doesn't surface as a notification.
+          const installCanceled = !this.mDependencyInstalls[sourceModId];
+          const isCanceled =
+            installCanceled ||
+            unknownError instanceof UserCanceled ||
+            unknownError instanceof ProcessCanceled;
+          // An explicitly skipped member already carries the durable `ignored` flag (the skip
+          // site sets it before this rejection arrives). It is terminal: never requeue it (that
+          // would re-prompt the download a free user just skipped) and never re-mark it.
+          const ruleIgnored = isDependencyRuleIgnored(
+            api.getState(),
+            gameId,
+            sourceModId,
+            dep.reference,
+          );
+          const hasRetriesLeft = currentRetryCount < InstallManager.MAX_DEPENDENCY_RETRIES;
+          // A disk-full failure will not succeed on retry; settle it now so the member becomes
+          // terminally failed instead of cycling the retry budget while stuck on "installing".
+          // Likewise a ProcessCanceled from the install itself - Vortex rejects an install that
+          // produced no instructions (empty archive / invalid installer output, e.g. an unreadable
+          // manifest) with ProcessCanceled - is deterministic: retrying reruns the same failing
+          // install, and a requeue never re-drives it, so the member sits stuck on "installing" and
+          // stalls the collection. Settle it failed. A whole-install teardown is excluded here
+          // (installCanceled -> "leave", handled first in planDependencyErrorRecovery).
+          const nonRetryable =
+            unknownError instanceof InsufficientDiskSpace ||
+            (unknownError instanceof ProcessCanceled && !installCanceled);
+          // UserCanceled(true) is the "skipped" flavour - the user declined this member at a
+          // prompt (the instructions dialog's Skip), as opposed to cancelling the whole install
+          const userSkipped = unknownError instanceof UserCanceled && unknownError.skipped === true;
+          const recovery = planDependencyErrorRecovery({
+            installCanceled,
+            ruleIgnored,
+            isCanceled,
+            hasRetriesLeft,
+            nonRetryable,
+            userSkipped,
+          });
+          if (recovery.action === "requeue") {
+            // A transient error OR a download cancelled as collateral while the install is still
+            // live. Requeue rather than abandoning the member non-terminal - a dangling member
+            // both blocks completion and gets re-prompted on the next install pass.
+            log("warn", "dependency install failed, requeued for retry", {
+              installKey,
+              error: err.message,
+              retry: currentRetryCount + 1,
+            });
+            this.mPendingInstalls.set(installKey, dep);
+            this.mDependencyRetryCount.set(installKey, currentRetryCount + 1);
+          } else {
+            this.mDependencyRetryCount.delete(installKey);
+            if (recovery.action === "skip") {
+              // same settle the free-user skip performs: durable ignore + session "ignored"
+              markCollectionMemberSkipped(api, { reference: dep.reference });
+            } else if (recovery.action === "fail") {
+              // Retries exhausted: settle the member as failed (terminal) so the collection can
+              // still complete and the member is not re-prompted. writeCollectionSession no-ops
+              // over an already-terminal status, so this only settles a genuinely stuck member.
+              this.writeCollectionSession(
+                dep.reference,
+                { type: "status", status: "failed" },
+                dep.sessionRuleId,
+                sourceModId,
+              );
+              if (recovery.showError) {
+                this.showDependencyError(
+                  api,
+                  sourceModId,
+                  "Failed to install dependency",
+                  err,
+                  renderModReference(dep.reference),
+                );
+              }
+            }
+            // action === "leave": whole-install pause/cancel (resume rebuilds) or an explicitly
+            // skipped member - nothing to recover.
+          }
+          // Don't rethrow to avoid crashing the concurrency limiter
+        } finally {
+          // Always decrement phase active counter
+          phaseState.activeByPhase.set(
+            phase,
+            Math.max(0, (phaseState.activeByPhase.get(phase) ?? 1) - 1),
+          );
+          // Note: Don't call maybeAdvancePhase here - it should only be called when phases are actually complete
+        }
+      })
+      .catch((unknownError) => {
+        const err = unknownToError(unknownError);
+        this.showDependencyError(
+          api,
+          sourceModId,
+          "Critical error in dependency installation",
+          unknownToError(err),
+          renderModReference(dep.reference),
+        );
+        log("error", "Critical error in dependency installation", {
+          downloadId,
+          error: err.message,
+          dependency: renderModReference(dep.reference),
+        });
+      });
+  }
+
+  /**
+   * CRITICAL INVARIANTS for phase-gated installation:
+   *
+   * 1. DEPLOYMENT BLOCKING: The `isDeploying` flag MUST be set during deployment
+   *    and cleared after. Never remove this check - installations must wait for
+   *    deployment to complete to prevent race conditions and file conflicts.
+   *
+   * 2. PHASE COMPLETION: A phase is complete ONLY when BOTH conditions are true:
+   *    - `activeByPhase.get(phase) === 0` (no active installations)
+   *    - `pendingByPhase.get(phase)?.length === 0` (no pending installations)
+   *    Checking only `active === 0` allows deployment during queued installs = BAD.
+   *
+   * 3. PHASE GATING: Even optional/recommended mods must wait for their phase - never bypass it.
+   *    Optionals map to the dedicated trailing OPTIONAL_PHASE (rulePhase) and install through the
+   *    same phase engine as required members, just last. A selected optional un-ignored after the
+   *    initial gather is driven by driveSelectedOptionals (from the completion poll), which downloads
+   *    or imports it so handleDownloadFinished queues its install at OPTIONAL_PHASE.
+   *
+   * 4. POST-DEPLOYMENT: Always call `startPendingForPhase()` after deployment
+   *    completes to resume any installations that were queued during deployment.
+   */
+  // Per-collection phase-gating state (the phase map, its entry shape, and phase-set caching) lives
+  // in InstallPhaseTracker; the orchestration below reaches each collection's entry via
+  // ensure()/get() and drives the sentinel-safe backfill through markPhasesBeforeFinished().
+  private mPhaseTracker = new InstallPhaseTracker();
+
+  // Optional (recommends) members whose download the completion poll has already kicked off this
+  // session, keyed by rule id. Guards driveSelectedOptionals against re-triggering the same
+  // optional every 500ms poll tick while its download is in flight.
+  private mOptionalDownloadsInFlight = new Set<string>();
+
+  private pollAllPhasesComplete(api: IExtensionApi, sourceModId: string): Promise<void> {
+    const POLL_MS = 500;
+    // If no progress (new mods reaching terminal state) is made for this
+    // duration, attempt a rescue (force-clean stuck installs + requeue).
+    const STALL_TIMEOUT_MS = 5 * 60 * 1000;
+
+    return new Promise<void>((resolve) => {
+      let lastProgressTime = Date.now();
+      let lastTerminalCount = this.getTerminalModCount(api, sourceModId);
+      let rescueAttempted = false;
+
+      const poll = () => {
+        const phaseState = this.mPhaseTracker.get(sourceModId);
+        if (!phaseState) {
+          log("debug", "Phase state cleared, all phases considered complete", {
+            sourceModId,
+          });
+          return resolve();
+        }
+
+        // Check if the dependency installation has been cancelled
+        if (!this.mDependencyInstalls[sourceModId]) {
+          log("debug", "Dependency installation cancelled", { sourceModId });
+          return resolve();
+        }
+
+        // ── Stall detection ──
+        const currentTerminalCount = this.getTerminalModCount(api, sourceModId);
+        if (currentTerminalCount > lastTerminalCount) {
+          lastTerminalCount = currentTerminalCount;
+          lastProgressTime = Date.now();
+          rescueAttempted = false;
+        }
+
+        const stallDuration = Date.now() - lastProgressTime;
+        if (stallDuration > STALL_TIMEOUT_MS) {
+          if (!rescueAttempted) {
+            // First timeout: attempt rescue
+            log("warn", "Collection install stalled, attempting rescue", {
+              sourceModId,
+              stallMs: stallDuration,
+              terminalCount: lastTerminalCount,
+              activeInstalls: this.mActiveInstalls.size,
+              pendingInstalls: this.mPendingInstalls.size,
+            });
+            this.forceCleanupStuckInstalls(api, 1);
+            const status = this.checkCollectionPhaseStatus(
+              api,
+              sourceModId,
+              phaseState.allowedPhase ?? 0,
+            );
+            if (status.needsRequeue) {
+              this.reQueueDownloadedMods(
+                api,
+                sourceModId,
+                status.allMods,
+                phaseState.allowedPhase ?? 0,
+              );
+            }
+            rescueAttempted = true;
+            // Give the rescue some time to take effect
+            lastProgressTime = Date.now();
+            setTimeout(poll, POLL_MS);
+            return;
+          } else {
+            // Second timeout after rescue: give up
+            log("warn", "Collection install stalled after rescue attempt, resolving", {
+              sourceModId,
+              terminalCount: lastTerminalCount,
+              activeInstalls: this.mActiveInstalls.size,
+              pendingInstalls: this.mPendingInstalls.size,
+            });
+            // cleanupPendingInstalls resyncs the session from reality, so it must run before the
+            // settle or it would overwrite it
+            this.cleanupPendingInstalls(sourceModId, true);
+            this.failOutstandingMembers(api, sourceModId);
+            return resolve();
+          }
+        }
+
+        const collectionInstallProgress = getCollectionInstallProgress(api.getState());
+        if (!collectionInstallProgress) {
+          const activeCollection = getCollectionActiveSession(api.getState());
+          if (!activeCollection) {
+            // The Redux session may have been cleared by the InstallDriver
+            // (e.g. after required mods finish but optional downloads are
+            // still in flight).  Only tear down engine state if there is
+            // truly nothing left to process for this collection.
+            if (!this.hasActiveOrPendingInstallation(sourceModId)) {
+              log("debug", "No active collection session and no pending work, cleaning up", {
+                sourceModId,
+              });
+              delete this.mDependencyInstalls[sourceModId];
+              this.cleanupPendingInstalls(sourceModId, true);
+              return resolve();
+            }
+            // Still have pending/active installs — keep polling so that
+            // in-flight downloads can still be requeued.
+            setTimeout(poll, POLL_MS);
+            return;
+          }
+        }
+
+        // Check for queued deployments
+        const deploymentPromises =
+          phaseState.deploymentPromises || new Map<number, Promise<void>>();
+        const hasQueuedDeployments = deploymentPromises.size > 0;
+
+        if (
+          collectionInstallProgress?.isComplete &&
+          !this.hasActiveOrPendingInstallation(sourceModId)
+        ) {
+          log("debug", "All phases complete", { sourceModId });
+          return resolve();
+        } else {
+          // Kick off downloads for optionals the user selected after the initial gather (un-ignored
+          // mid-install); handleDownloadFinished then installs them at OPTIONAL_PHASE. Without this
+          // they sit pending and block isComplete forever.
+          this.driveSelectedOptionals(api, sourceModId);
+
+          const collectionStatus = this.checkCollectionPhaseStatus(
+            api,
+            sourceModId,
+            phaseState.allowedPhase ?? 0,
+          );
+
+          const currentPhaseComplete = collectionStatus.phaseComplete;
+          if (
+            !currentPhaseComplete &&
+            collectionStatus.needsRequeue &&
+            !this.hasActiveOrPendingInstallation(sourceModId)
+          ) {
+            // Requeue downloaded mods if phase is not complete and there are no active installations
+            // This handles cases where downloads finish after installations start, or MD5 lookups complete late
+            this.reQueueDownloadedMods(
+              api,
+              sourceModId,
+              collectionStatus.allMods,
+              phaseState.allowedPhase ?? 0,
+            );
+          }
+          if (!hasQueuedDeployments && !this.hasActiveOrPendingInstallation(sourceModId)) {
+            if (phaseState.deployedPhases.has(phaseState.allowedPhase ?? 0)) {
+              // the walk is about to look for somewhere to go - make the trailing optional phase
+              // reachable first if its members need no download
+              this.admitSettledOptionalPhase(sourceModId, api);
+              // Phase already deployed, maybe advance
+              this.maybeAdvancePhase(sourceModId, api);
+            } else {
+              this.scheduleDeployOnPhaseSettled(api, sourceModId, phaseState.allowedPhase ?? 0);
+            }
+          }
+          const canStartTasks = this.canStartInstallationTasks(sourceModId);
+          const active = this.mActiveInstalls.size;
+          const pendingInstalls = this.mPendingInstalls.size;
+          if (canStartTasks) {
+            const pendingTasks = phaseState.pendingByPhase.get(phaseState.allowedPhase ?? 0);
+            const pending = pendingTasks ? pendingTasks.length : 0;
+            if (active === 0 && pending === 0) {
+              if (pendingInstalls > 0) {
+                this.maybeAdvancePhase(sourceModId, api);
+              } else {
+                this.reQueueDownloadedMods(
+                  api,
+                  sourceModId,
+                  collectionStatus.allMods,
+                  phaseState.allowedPhase ?? 0,
+                );
+              }
+            } else if (active === 0 && pendingInstalls > 0) {
+              this.startPendingForPhase(sourceModId, phaseState.allowedPhase ?? 0);
+            }
+          }
+          setTimeout(poll, POLL_MS);
+        }
+      };
+
+      poll();
+    });
+  }
+
+  public pollPhaseSettlement(
+    api: IExtensionApi,
+    sourceModId: string,
+    options: {
+      phase?: number; // Specific phase to poll (for deploy)
+    },
+  ): Promise<void> {
+    const POLL_MS = 500;
+    // If no progress is made for this duration, consider the phase stalled.
+    const STALL_TIMEOUT_MS = 5 * 60 * 1000;
+
+    let hasDeployed = false;
+    return new Promise<void>((resolve) => {
+      let lastProgressTime = Date.now();
+      let lastTerminalCount = this.getTerminalModCount(api, sourceModId);
+
+      const poll = () => {
+        const phaseState = this.mPhaseTracker.get(sourceModId);
+        if (!phaseState) {
+          return resolve();
+        }
+
+        // Check if the dependency installation has been cancelled
+        // If mDependencyInstalls entry is missing, installation was cancelled and cleaned up
+        if (!this.mDependencyInstalls[sourceModId]) {
+          log("debug", "Stopping phase polling - dependency installation cancelled", {
+            sourceModId,
+          });
+          return resolve();
+        }
+
+        // Progress-aware stall detection — reset timer whenever a mod
+        // reaches a terminal state.
+        const currentTerminalCount = this.getTerminalModCount(api, sourceModId);
+        if (currentTerminalCount > lastTerminalCount) {
+          lastTerminalCount = currentTerminalCount;
+          lastProgressTime = Date.now();
+        }
+
+        if (Date.now() - lastProgressTime > STALL_TIMEOUT_MS) {
+          log("warn", "Phase settlement stalled, resolving", {
+            sourceModId,
+            phase: options.phase,
+            stallMs: Date.now() - lastProgressTime,
+            terminalCount: lastTerminalCount,
+          });
+          if (phaseState) {
+            phaseState.isDeploying = false;
+          }
+          return resolve();
+        }
+
+        // Determine which phase we're checking
+        const checkPhase = options.phase ?? phaseState.allowedPhase ?? 0;
+
+        // log('debug', 'Polling phase settlement', {
+        //   sourceModId,
+        //   phase: checkPhase,
+        //   optionsPhase: options.phase,
+        //   allowedPhase: phaseState.allowedPhase,
+        //   activeInstallations: active,
+        //   pendingInstallations: pending,
+        //   deployOnSettle: options.deployOnSettle
+        // });
+
+        // Check collection completion status
+        const collectionStatus = this.checkCollectionPhaseStatus(api, sourceModId, checkPhase);
+        const existing = phaseState?.deploymentPromises.get(checkPhase);
+        if (existing?.deployOnSettle && !hasDeployed) {
+          // CRITICAL: Block new installations during deployment to prevent file conflicts.
+          // Removing this check causes race conditions. See docs/mod-management/collections.md.
+          if (phaseState) {
+            phaseState.isDeploying = true;
+          }
+
+          // Deploy mods for this phase
+          toPromise((cb) => api.events.emit("deploy-mods", cb))
+            .then(() => {
+              if (phaseState) {
+                phaseState.isDeploying = false;
+                phaseState.deployedPhases.add(checkPhase);
+                // Start any installations that were queued during deployment
+                hasDeployed = true;
+                setTimeout(poll, POLL_MS);
+              }
+              resolve();
+            })
+            .catch((err) => {
+              log("warn", "deploy-mods failed after phase settle", {
+                sourceModId,
+                phase: checkPhase,
+                error: err?.message,
+              });
+              if (phaseState) {
+                phaseState.isDeploying = false;
+                // Start any installations that were queued during deployment, even if deployment failed
+                this.startPendingForPhase(sourceModId, checkPhase);
+              }
+              resolve(); // Resolve anyway to avoid hanging
+            });
+        } else {
+          if (collectionStatus.phaseComplete) {
+            if (phaseState) {
+              phaseState.isDeploying = false;
+              // Start any installations that were queued during deployment
+              phaseState.deployedPhases.add(checkPhase);
+              this.startPendingForPhase(sourceModId, checkPhase);
+              this.maybeAdvancePhase(sourceModId, api);
+            }
+            resolve();
+          } else if (
+            !collectionStatus.phaseComplete &&
+            collectionStatus.needsRequeue &&
+            !this.hasActiveOrPendingInstallation(sourceModId)
+          ) {
+            // Requeue downloaded mods if phase is not complete and there are no active installations
+            // This handles cases where downloads finish after installations start, or MD5 lookups complete late
+            this.reQueueDownloadedMods(api, sourceModId, collectionStatus.allMods, checkPhase);
+            // Continue polling after re-queue
+            setTimeout(poll, POLL_MS);
+          } else {
+            if (this.mActiveInstalls.size === 0 && this.mPendingInstalls.size > 0) {
+              // Start any pending installations if none are active
+              this.startPendingForPhase(sourceModId, checkPhase);
+            }
+            setTimeout(poll, POLL_MS);
+          }
+        }
+      };
+
+      // Start polling
+      poll();
+    });
+  }
+
+  // Helper to check collection phase status
+  private checkCollectionPhaseStatus(
+    api: IExtensionApi,
+    sourceModId: string,
+    phase: number,
+  ): {
+    phaseComplete: boolean;
+    needsRequeue: boolean;
+    allMods: any[];
+    downloadedCount: number;
+    modsNeedingRequeue: number;
+  } {
+    const state = api.getState();
+    const batchContext = getBatchContext(["install-dependencies", "install-recommendations"], "");
+    const profileId = batchContext?.get<string>("profileId") ?? activeProfile(state)?.id;
+    const profile = profileById(state, profileId);
+    const sessionId = generateCollectionSessionId(sourceModId, profile?.id);
+    const activeCollectionSession = getCollectionSessionById(state, sessionId);
+
+    if (!activeCollectionSession) {
+      return {
+        phaseComplete: true,
+        needsRequeue: false,
+        allMods: [],
+        downloadedCount: 0,
+        modsNeedingRequeue: 0,
+      };
+    }
+
+    const mods = activeCollectionSession.mods || {};
+    const allMods = Object.values(mods);
+    const currentPhaseMods = getModsByPhase(allMods, phase);
+
+    const phaseComplete = isCollectionPhaseComplete(api.getState(), phase);
+
+    // Only count downloaded mods from the current phase being checked
+    const allDownloadedMods = currentPhaseMods.filter((mod: any) => mod.status === "downloaded");
+    const downloadedCount = allDownloadedMods.length;
+
+    // Debug: Show status distribution
+    const statusCounts = {};
+    allMods.forEach((mod: any) => {
+      const status = mod.status || "unknown";
+      statusCounts[status] = (statusCounts[status] || 0) + 1;
+    });
+
+    // Check if any downloaded mods actually need requeuing (don't have active/pending installations)
+    const downloads = api.getState().persistent.downloads.files;
+    let modsNeedingRequeue = 0;
+
+    const phaseState = this.mPhaseTracker.get(sourceModId);
+    const cache = phaseState?.downloadLookupCache;
+
+    allDownloadedMods.forEach((mod: any) => {
+      const reference = mod.rule?.reference;
+      if (!reference) {
+        return;
+      }
+
+      let downloadId: string;
+      const md5Value = reference.md5Hint ?? reference.fileMD5;
+      if (cache) {
+        // Use cache for fast lookup
+        if (reference.tag && cache.byTag.has(reference.tag)) {
+          downloadId = cache.byTag.get(reference.tag);
+        } else if (md5Value && cache.byMd5.has(md5Value)) {
+          downloadId = cache.byMd5.get(md5Value);
+        } else {
+          // This is probably a bundled mod - use full lookup
+          downloadId = getReadyDownloadId(downloads, reference, (id) =>
+            this.hasActiveOrPendingInstallation(sourceModId, id),
+          );
+        }
+        if (downloadId && !downloads[downloadId]) {
+          // O(n) lookup if cached downloadId is invalid
+          downloadId = getReadyDownloadId(downloads, reference, (id) =>
+            this.hasActiveOrPendingInstallation(sourceModId, id),
+          );
+        }
+        if (downloadId && this.hasActiveOrPendingInstallation(sourceModId, downloadId)) {
+          downloadId = null; // Invalidate if already installing
+        }
+      } else {
+        // Fallback to slow O(n) lookup if cache doesn't exist yet
+        // This shouldn't happen often since cache is built as downloads finish
+        downloadId = getReadyDownloadId(downloads, reference, (id) =>
+          this.hasActiveOrPendingInstallation(sourceModId, id),
+        );
+      }
+
+      // If found, check if it's ready and not being installed
+      if (downloadId) {
+        const download = downloads[downloadId];
+        if (
+          (download?.state === "finished" &&
+            !this.hasActiveOrPendingInstallation(sourceModId, downloadId)) ||
+          (this.mActiveInstalls.size === 0 && this.mPendingInstalls.size > 0)
+        ) {
+          modsNeedingRequeue++;
+        }
+      }
+    });
+
+    const needsRequeue = modsNeedingRequeue > 0;
+    return {
+      phaseComplete,
+      needsRequeue,
+      allMods,
+      downloadedCount,
+      modsNeedingRequeue,
+    };
+  }
+
+  /**
+   * Returns the number of mods in terminal states (installed/failed/skipped)
+   * for the collection session associated with sourceModId.
+   * Used by the stall-detection logic in pollAllPhasesComplete.
+   */
+  private getTerminalModCount(api: IExtensionApi, sourceModId: string): number {
+    const state = api.getState();
+    const batchContext = getBatchContext(["install-dependencies", "install-recommendations"], "");
+    const profileId = batchContext?.get<string>("profileId") ?? activeProfile(state)?.id;
+    const sessionId = generateCollectionSessionId(sourceModId, profileId);
+    const session = getCollectionSessionById(state, sessionId);
+    if (!session?.mods) {
+      return 0;
+    }
+
+    return Object.values(session.mods).filter((mod: any) => isTerminalMemberStatus(mod.status))
+      .length;
+  }
+
+  // Helper to check if an archiveId has pending or active installations
+  private hasActiveOrPendingInstallation(sourceModId: string, archiveId?: string): boolean {
+    let hasPending = false;
+    if (!archiveId) {
+      return this.mPendingInstalls.size > 0 || this.mActiveInstalls.size > 0;
+    }
+    const installKey = this.generateDependencyInstallKey(sourceModId, archiveId);
+    if (this.mPendingInstalls.get(installKey)) {
+      hasPending = true;
+    }
+    let hasActive = false;
+    for (const [, activeInstall] of this.mActiveInstalls.entries()) {
+      if (activeInstall.archiveId === archiveId) {
+        hasActive = true;
+        break;
+      }
+    }
+    return hasPending || hasActive;
+  }
+
+  // Helper to re-queue downloaded mods
+  private reQueueDownloadedMods(
+    api: IExtensionApi,
+    sourceModId: string,
+    allMods: ICollectionModInstallInfo[],
+    currentPhase: number,
+  ): void {
+    const phaseState = this.mPhaseTracker.get(sourceModId);
+    if (!phaseState) {
+      return;
+    }
+
+    const downloads = api.getState().persistent.downloads.files;
+
+    // pure selection, see util/requeueCandidates: 'downloaded' members with a resolvable download at
+    // or before the current phase. 'pending' members are already queued.
+    const allDownloadedMods = selectRequeueCandidates(allMods, currentPhase, (reference) =>
+      this.findDownloadForMod(reference, downloads),
+    );
+
+    const downloadedPhases = new Set<number>();
+    let anyQueued = false;
+    let anyMarkedSkipped = false;
+
+    allDownloadedMods.forEach((mod) => {
+      const modPhase = mod.phase ?? 0;
+      downloadedPhases.add(modPhase);
+
+      const downloadId = mod.downloadId;
+      if (!downloadId) {
+        if (mod.type === "recommends") {
+          anyMarkedSkipped = true;
+        }
+        return; // Skip this mod
+      }
+
+      const downloadState = downloads[downloadId]?.state;
+      log("debug", "Download state check", { downloadId, downloadState });
+      if (downloads[downloadId].state === "finished") {
+        const hasPendingOrActive = this.hasActiveOrPendingInstallation(sourceModId, downloadId);
+
+        // Check if mod is already installed with matching installer choices and patches
+        const gameId = activeGameId(api.getState());
+        const mods = api.getState().persistent.mods[gameId] ?? {};
+        // Identity + install spec: the mod counts as installed only if the wanted
+        // install spec (installer choices / file list / patches) is present, otherwise
+        // it needs (re)installing.
+        const existingMod = mod.rule?.reference
+          ? findModByRef(mod.rule.reference, mods, undefined, ruleInstallSpec(mod.rule))
+          : undefined;
+
+        log("debug", "Requeue check", {
+          downloadId,
+          hasPendingOrActive,
+          modId: existingMod?.id,
+        });
+        if (!hasPendingOrActive && !existingMod) {
+          log("info", "Requeuing download for installation", { downloadId });
+          const success = this.handleDownloadFinished(api, downloadId, sourceModId);
+          if (success) {
+            anyQueued = true;
+          } else {
+            log("debug", "Requeue failed - collection not currently installing", { downloadId });
+          }
+        } else if (!hasPendingOrActive && existingMod) {
+          const installKey = this.generateDependencyInstallKey(sourceModId, downloadId);
+          this.mPendingInstalls.delete(installKey);
+          this.mActiveInstalls.delete(installKey);
+          // the mod exists with the wanted install spec: settle the member on the session's own
+          // rule, or every poll tick selects it again.
+          this.writeCollectionSession(
+            mod.rule.reference,
+            { type: "installed", modId: existingMod.id },
+            modRuleId(mod.rule),
+            sourceModId,
+          );
+          api.events.emit(
+            "did-install-mod",
+            gameId,
+            downloadId,
+            existingMod.id,
+            existingMod.attributes,
+          );
+        } else {
+          log("debug", "Download already has pending/active installation", {
+            downloadId,
+          });
+        }
+      } else {
+        log("debug", "Download not in finished state", {
+          downloadId,
+          state: downloadState,
+        });
+      }
+    });
+
+    // If we marked optional mods as skipped, check if their phases are now complete
+    if (anyMarkedSkipped) {
+      const phasesToCheck = Array.from(downloadedPhases).filter(
+        (p) => p <= (phaseState.allowedPhase ?? 0),
+      );
+      phasesToCheck.forEach((checkPhase) => {
+        const completion = isCollectionPhaseComplete(api.getState(), checkPhase);
+
+        // If all required mods are complete and phase not already deployed, schedule deployment
+        if (completion && !phaseState.deployedPhases.has(checkPhase)) {
+          // Schedule deployment which will mark the phase as deployed when it completes
+          this.scheduleDeployOnPhaseSettled(api, sourceModId, checkPhase);
+        }
+      });
+    }
+
+    // Initialize or advance phase system if needed
+    if (anyQueued) {
+      if (phaseState.allowedPhase === undefined) {
+        const lowestPhase = Math.min(...Array.from(downloadedPhases));
+        phaseState.allowedPhase = lowestPhase;
+        downloadedPhases.forEach((p) => phaseState.downloadsFinished.add(p));
+        this.startPendingForPhase(sourceModId, lowestPhase);
+        this.maybeAdvancePhase(sourceModId, api);
+      } else {
+        // Phase already initialized, just ensure downloads are marked and try to advance
+        downloadedPhases.forEach((p) => {
+          if (!phaseState.downloadsFinished.has(p)) {
+            phaseState.downloadsFinished.add(p);
+          }
+        });
+        // Try to start any pending installations and advance phases
+        this.startPendingForPhase(sourceModId, phaseState.allowedPhase);
+        this.maybeAdvancePhase(sourceModId, api);
+      }
+    }
+  }
+
+  public isPhaseDeployed(sourceModId: string, phase: number): boolean {
+    const phaseState = this.mPhaseTracker.get(sourceModId);
+    return phaseState?.deployedPhases.has(phase) ?? false;
+  }
+
+  public markPhaseDeployed(sourceModId: string, phase: number): void {
+    this.mPhaseTracker.ensure(sourceModId);
+    const phaseState = this.mPhaseTracker.get(sourceModId);
+    phaseState.deployedPhases.add(phase);
+  }
+
+  // Schedule a deploy once all installers for a specific phase have finished
+  public scheduleDeployOnPhaseSettled(
+    api: IExtensionApi,
+    sourceModId: string,
+    phase: number,
+    deployOnSettle?: boolean,
+  ): Promise<void> | undefined {
+    this.mPhaseTracker.ensure(sourceModId);
+    const state = this.mPhaseTracker.get(sourceModId);
+    if (state.deployedPhases.has(phase)) {
+      // Phase already deployed, nothing to do
+      return;
+    }
+
+    // Only schedule deployment for phases that are allowed to be processed
+    if (state.allowedPhase !== undefined && phase > state.allowedPhase) {
+      return;
+    }
+
+    if (state.deploymentPromises?.has(phase)) {
+      const existing = state.deploymentPromises.get(phase);
+      if (deployOnSettle && !existing?.deployOnSettle) {
+        state.deploymentPromises.set(phase, {
+          deploymentPromise: existing.deploymentPromise,
+          deployOnSettle: true,
+        });
+      }
+      // Return the existing promise so callers can await it
+      return existing?.deploymentPromise;
+    }
+
+    // Track deployment promise so we can wait for it before cleanup
+    const deploymentPromise = Promise.resolve(
+      this.pollPhaseSettlement(api, sourceModId, { phase })
+        .catch((err: unknown) => {
+          log("warn", "Error during scheduled phase deployment", {
+            sourceModId,
+            phase,
+            error: unknownToError(err).message,
+          });
+        })
+        .finally(() => {
+          // Remove this promise from the array when it completes
+          const phaseState = this.mPhaseTracker.get(sourceModId);
+          if (phaseState?.deploymentPromises) {
+            phaseState.deploymentPromises.delete(phase);
+          }
+        }),
+    );
+
+    // Add to tracked deployment promises
+    if (!state.deploymentPromises) {
+      state.deploymentPromises = new Map<number, IDeploymentDetails>();
+    }
+    state.deploymentPromises.set(phase, {
+      deploymentPromise,
+      deployOnSettle: deployOnSettle ?? false,
+    });
+    return deploymentPromise;
+  }
+
+  /**
+   * Kick off downloads for optionals the user has SELECTED (ignored:false) that are still sitting
+   * PENDING - i.e. un-ignored AFTER the install's initial dependency gather, so they were never
+   * gathered into the pass and nothing else will download them. Called each completion-poll tick
+   * (sibling of reQueueDownloadedMods, which re-drives already-downloaded members). Only triggers the
+   * download/import (guarded by mOptionalDownloadsInFlight + the "downloading" status write), then
+   * hands the resulting download to handleDownloadFinished, which queues the install at
+   * OPTIONAL_PHASE for maybeAdvancePhase - so the optional flows through the normal phase engine,
+   * not a separate recommendations pass. Handles both nexus downloads and bundled (localPath)
+   * archives. Fire-and-forget; a failure settles the member so it drops out of the completion
+   * denominator instead of stalling.
+   */
+  private driveSelectedOptionals(api: IExtensionApi, sourceModId: string): void {
+    const state = api.getState();
+    const session = getCollectionActiveSession(state);
+    if (session === undefined || session.collectionId !== sourceModId) {
+      return;
+    }
+    const collectionMod = state.persistent.mods[session.gameId]?.[sourceModId];
+    if (collectionMod === undefined) {
+      return;
+    }
+    const parentCollection: IParentCollection | undefined =
+      collectionMod.attributes?.collectionId != null
+        ? {
+            collectionId: String(collectionMod.attributes.collectionId),
+            revisionId:
+              collectionMod.attributes.revisionId != null
+                ? String(collectionMod.attributes.revisionId)
+                : undefined,
+          }
+        : undefined;
+    const stagingPath = installPathForGame(state, session.gameId);
+    const pending = selectedOptionalRules(
+      collectionMod.rules ?? [],
+      state.persistent.mods[session.gameId] ?? {},
+    ).filter((rule) => session.mods[modRuleId(rule)]?.status === "pending");
+
+    for (const rule of pending) {
+      const key = modRuleId(rule);
+      if (this.mOptionalDownloadsInFlight.has(key)) {
+        continue;
+      }
+      this.mOptionalDownloadsInFlight.add(key);
+      // mark downloading up front so a subsequent poll tick doesn't re-select it before the async
+      // gather resolves; the in-flight set is the hard guard, this keeps the session status honest.
+      this.writeCollectionSession(rule.reference, { type: "status", status: "downloading" }, key);
+      gatherDependencies([rule], api, true, undefined, this.addToPhaseStateCache(api))
+        .then((deps: IDependency[]): Promise<string | undefined> => {
+          const dep = deps[0];
+          if (dep === undefined) {
+            return Promise.reject(new ProcessCanceled("no dependency for optional"));
+          }
+          if (dep.extra?.localPath !== undefined) {
+            // bundled archive shipped inside the collection; import it rather than downloading
+            return this.importBundledDependencyAsync(
+              api,
+              collectionMod,
+              session.gameId,
+              stagingPath,
+              dep,
+            );
+          }
+          if (dep.lookupResults?.[0]?.value == null) {
+            return Promise.reject(new ProcessCanceled("no download source for optional"));
+          }
+          return this.downloadDependencyAsync(
+            dep.reference,
+            api,
+            dep.lookupResults[0].value,
+            () => !this.mDependencyInstalls[sourceModId],
+            dep.extra?.fileName,
+            parentCollection,
+          );
+        })
+        .then((downloadId: string | undefined) => {
+          this.mOptionalDownloadsInFlight.delete(key);
+          // Queue the install explicitly: a bundled import does not emit did-finish-download, and
+          // for a nexus download this is idempotent with the event (queueInstallation dedups by
+          // sourceModId:downloadId, and a not-yet-finished download is a no-op here).
+          if (typeof downloadId === "string" && downloadId.length > 0) {
+            this.handleDownloadFinished(api, downloadId, sourceModId);
+          }
+        })
+        .catch((err: unknown) => {
+          this.mOptionalDownloadsInFlight.delete(key);
+          // leave a canceled/torn-down install alone; otherwise settle failed so the member becomes
+          // terminal and stops blocking completion.
+          if (!(err instanceof UserCanceled) && this.mDependencyInstalls[sourceModId]) {
+            this.writeCollectionSession(rule.reference, { type: "status", status: "failed" }, key);
+          }
+        });
+    }
+  }
+
+  /**
+   * Called when downloads for a phase have been queued/processed. NOTE: this also OPENS the gate -
+   * it sets allowedPhase to `phase` when nothing has been allowed yet, bypassing maybeAdvancePhase's
+   * completeness/deployment walk. Callers that could mark a later phase first must establish
+   * ordering themselves (see admitSettledOptionalPhase).
+   */
+  private markPhaseDownloadsFinished(sourceModId: string, phase: number, api: IExtensionApi) {
+    this.mPhaseTracker.ensure(sourceModId);
+    const state = this.mPhaseTracker.get(sourceModId);
+    state.downloadsFinished.add(phase);
+
+    // Initialize allowed phase to the first finished phase if not set
+    if (state.allowedPhase === undefined) {
+      state.allowedPhase = phase;
+      // We can't be at this phase without the earlier ones being done, so mark the collection's
+      // real earlier phases finished (the tracker iterates the actual phase set, never integer
+      // 0..phase, so the OPTIONAL_PHASE sentinel never enumerates).
+      const gameId = activeGameId(api.getState());
+      const rules = api.getState().persistent.mods[gameId]?.[sourceModId]?.rules ?? [];
+      this.mPhaseTracker.markPhasesBeforeFinished(sourceModId, phase, rules);
+      this.startPendingForPhase(sourceModId, phase);
+    }
+
+    this.maybeAdvancePhase(sourceModId, api);
+  }
+
+  private startPendingForPhase(sourceModId: string, phase: number) {
+    const phaseState = this.mPhaseTracker.get(sourceModId);
+    if (!phaseState) {
+      // Phase state was cleaned up, nothing to start
+      return;
+    }
+
+    const tasks = phaseState.pendingByPhase.get(phase) ?? [];
+    if (tasks.length === 0 || !this.canStartInstallationTasks(sourceModId)) {
+      return;
+    }
+    // Drain queue for this phase
+    phaseState.pendingByPhase.set(phase, []);
+    tasks.forEach((run) => run());
+  }
+
+  private canStartInstallationTasks(sourceModId: string, allowOptional?: boolean): boolean {
+    const state = this.mApi.getState();
+    const installWhileDownloading = getSafe(
+      state,
+      ["settings", "downloads", "collectionsInstallWhileDownloading"],
+      false,
+    );
+    if (installWhileDownloading) {
+      return true;
+    }
+    const batchContext = getBatchContext(["install-dependencies", "install-recommendations"], "");
+    const profileId = batchContext?.get<string>("profileId") ?? activeProfile(state)?.id;
+    const sessionId = generateCollectionSessionId(sourceModId, profileId);
+    if (!sessionId) {
+      // No active collection session, allow installations.
+      return true;
+    }
+    const breakdown = getCollectionStatusBreakdown(state, sessionId);
+    const relevant = allowOptional === true ? breakdown.total : breakdown.required;
+    const pending = Object.entries(relevant).reduce((sum, [status, value]) => {
+      if (["pending", "downloading"].includes(status)) {
+        return sum + value;
+      }
+      return sum;
+    }, 0);
+
+    return pending === 0;
+  }
+
+  /**
+   * Make the trailing optional phase reachable when its members need no download - an archive on
+   * disk, or a bundled member. Nothing else marks it for them: they fire no download event, and a
+   * round that gathers no dependencies never initialises phase state at all.
+   *
+   * Called from the completion poll, not maybeAdvancePhase, so the walk stays a pure function of
+   * tracker state. Sibling of driveSelectedOptionals, which covers members that DO need a download.
+   *
+   * Safe to scope to OPTIONAL_PHASE: a non-terminal member absent from the round's dependency list
+   * can only be an optional, since filterDependencyRules drops ignored rules and only optionals are
+   * ignored, while an absent required member was classified "existing" (installed and enabled) and
+   * reconstructs as terminal.
+   */
+  private admitSettledOptionalPhase(sourceModId: string, api: IExtensionApi): void {
+    const phaseState = this.mPhaseTracker.get(sourceModId);
+    // already admitted - skip the scan, which would otherwise repeat on every 500ms tick
+    if (phaseState === undefined || phaseState.downloadsFinished.has(OPTIONAL_PHASE)) {
+      return;
+    }
+    const state = api.getState();
+    const session = getCollectionActiveSession(state);
+    if (session === undefined || session.collectionId !== sourceModId) {
+      return;
+    }
+    const downloads = state.persistent.downloads.files;
+    const members = Object.values(session.mods);
+
+    // Admitting the phase can also initialise allowedPhase (see below), which would let optionals
+    // overtake. Refuse while any required member is outstanding.
+    if (members.some((mod) => isRequiredRule(mod) && !isTerminalMemberStatus(mod.status))) {
+      return;
+    }
+    const ready = members.some(
+      (mod) =>
+        isOutstandingOptionalMember(mod) &&
+        // the only non-terminal status whose archive is already recorded, and what a resume writes
+        // for a member found on disk. Tested first to keep findDownloadForMod - a scan of every
+        // download - off members still fetching or not started.
+        mod.status === "downloaded" &&
+        // a bundled member ships inside the collection archive, so it needs no download either
+        (mod.rule?.extra?.localPath != null ||
+          (mod.rule?.reference != null &&
+            this.findDownloadForMod(mod.rule.reference, downloads) != null)),
+    );
+    if (!ready) {
+      return;
+    }
+
+    log("debug", "phase gating: optional phase has nothing left to download, admitting it", {
+      sourceModId,
+    });
+    // The bookkeeping a download event performs. Going through it rather than adding to
+    // downloadsFinished directly is load-bearing: it also initialises allowedPhase, without which
+    // the walk bails at "awaiting first finished phase" forever when the round gathered nothing.
+    this.markPhaseDownloadsFinished(sourceModId, OPTIONAL_PHASE, api);
+  }
+
+  /**
+   * Stall force-resolve: no driver will ever settle the remaining members, and leaving them
+   * non-terminal wedges completion forever. Settles every still non-terminal member as failed
+   * (terminal, revertible on retry) so the collection completes visibly ("N mods failed").
+   */
+  private failOutstandingMembers(api: IExtensionApi, sourceModId: string): void {
+    const session = getCollectionActiveSession(api.getState());
+    if (session === undefined || session.collectionId !== sourceModId) {
+      return;
+    }
+    // the members below fail by watchdog fiat, not by their own attempts: mark the session so
+    // the finished dialog presents the install as incomplete rather than complete-with-failures
+    api.store.dispatch(markSessionStalled(session.sessionId, true));
+    Object.entries(session.mods).forEach(([ruleId, mod]) => {
+      if (!isTerminalMemberStatus(mod.status) && mod.rule?.reference != null) {
+        this.writeCollectionSession(
+          mod.rule.reference,
+          { type: "status", status: "failed" },
+          ruleId,
+        );
+      }
+    });
+  }
+
+  private maybeAdvancePhase(sourceModId: string, api: IExtensionApi) {
+    const state = this.mApi.getState();
+    const phaseState = this.mPhaseTracker.get(sourceModId);
+    if (!phaseState) {
+      // Phase state was cleaned up, nothing to advance
+      return;
+    }
+
+    if (phaseState.allowedPhase === undefined) {
+      log("debug", "phase gating: awaiting first finished phase", {
+        sourceModId,
+      });
+      return;
+    }
+
+    // Clean up inappropriate phase state - clear re-queue attempts for phases beyond allowed
+    if (phaseState.reQueueAttempted) {
+      Array.from(phaseState.reQueueAttempted.keys()).forEach((phase) => {
+        if (phase > phaseState.allowedPhase) {
+          phaseState.reQueueAttempted.delete(phase);
+          log("debug", "Cleared re-queue attempt for future phase", {
+            sourceModId,
+            phase,
+            allowedPhase: phaseState.allowedPhase,
+          });
+        }
+      });
+    }
+    // Try to advance through finished phases where there are no active installs
+    let curr = phaseState.allowedPhase;
+    while (
+      phaseState.downloadsFinished.has(curr) &&
+      (phaseState.activeByPhase.get(curr) ?? 0) === 0 &&
+      (phaseState.pendingByPhase.get(curr) ?? []).length === 0
+    ) {
+      // Check if the phase is actually complete according to collection session
+      const collectionStatus = this.checkCollectionPhaseStatus(api, sourceModId, curr);
+      if (!collectionStatus.phaseComplete) {
+        this.startPendingForPhase(sourceModId, curr);
+        break;
+      }
+
+      // Determine previous finished phase (by order in downloadsFinished)
+      const finished = Array.from(phaseState.downloadsFinished).sort((a, b) => a - b);
+      const currIdx = finished.findIndex((p) => p === curr);
+      // Only advance past curr if the current phase has been deployed
+      if (!phaseState.deployedPhases.has(curr)) {
+        log("debug", "phase gating: phase complete but not deployed, scheduling deployment", {
+          sourceModId,
+          currPhase: curr,
+        });
+        // Schedule deployment to mark the phase as deployed when it settles
+        this.scheduleDeployOnPhaseSettled(api, sourceModId, curr);
+        // Start any pending installations for this phase to avoid deadlocks
+        this.startPendingForPhase(sourceModId, curr);
+        break;
+      }
+      // Start any pending installs for this phase (if not already started)
+      this.startPendingForPhase(sourceModId, curr);
+      // Move to next finished phase if any
+      const nextIdx = currIdx + 1;
+      if (nextIdx < finished.length) {
+        curr = finished[nextIdx];
+        phaseState.allowedPhase = curr;
+        this.startPendingForPhase(sourceModId, curr);
+
+        // When advancing to a new phase, scan for any finished downloads that should be queued
+        const apiState = api.getState();
+        const batchContext = getBatchContext(
+          ["install-dependencies", "install-recommendations"],
+          "",
+        );
+        const profileId = batchContext?.get<string>("profileId") ?? activeProfile(state)?.id;
+        const gameId = profileById(apiState, profileId)?.gameId;
+        if (!gameId) {
+          continue;
+        }
+        const downloads = apiState.persistent.downloads.files;
+        const mods = apiState.persistent.mods[gameId] || {};
+        const collectionMod = mods[sourceModId];
+
+        // We can't rely on the collection installation tracking for this since
+        // the state might not be accurate if the app was restarted or if the
+        // state has yet to be updated.
+        if (collectionMod?.rules) {
+          collectionMod.rules.forEach((rule: any) => {
+            const phase = rulePhase(rule);
+            if (phase === curr && rule.reference?.tag) {
+              const downloadId = getReadyDownloadId(downloads, rule.reference, (id) =>
+                this.hasActiveOrPendingInstallation(sourceModId, id),
+              );
+
+              if (downloadId) {
+                this.handleDownloadFinished(api, downloadId, sourceModId);
+              }
+            }
+          });
+        }
+
+        continue;
+      }
+      break;
+    }
+  }
+
+  /**
+   * when installing a mod from a dependency rule we store the id of the installed mod
+   * in the rule for quicker and consistent matching but if - at a later time - we
+   * install those same dependencies again we have to unset those ids, otherwise the
+   * dependency installs would fail.
+   */
+  private repairRules(api: IExtensionApi, mod: IMod, gameId: string) {
+    const state: IState = api.store.getState();
+    const mods = state.persistent.mods[gameId];
+
+    (mod.rules || []).forEach((rule) => {
+      if (
+        rule.reference.id !== undefined &&
+        mods[rule.reference.id] === undefined &&
+        this.hasFuzzyReference(rule.reference)
+      ) {
+        const newRule: IModRule = JSON.parse(JSON.stringify(rule));
+        api.store.dispatch(removeModRule(gameId, mod.id, rule));
+        delete newRule.reference.id;
+        api.store.dispatch(addModRule(gameId, mod.id, newRule));
+      }
+    });
+  }
+
+  private isBrowserAssistantError(error: string): boolean {
+    return process.platform === "win32" && error.indexOf("Roaming\\Browser Assistant") !== -1;
+  }
+
+  private isFileInUse(errorMessage: string, errorCode?: string): boolean {
+    if (errorCode && ["EBUSY", "EPERM", "EACCES"].includes(errorCode)) {
+      return true;
+    }
+    const lowered = errorMessage.toLowerCase();
+    const patterns = [
+      "being used by another process",
+      "locked by another process",
+      "denied",
+      "cannot open",
+      "can not open",
+    ];
+    return patterns.some((pattern) => lowered.includes(pattern));
+  }
+
+  private isCritical(errorMessage: string): boolean {
+    // Don't treat file-in-use errors as critical - they can be retried
+    if (this.isFileInUse(errorMessage)) {
+      return false;
+    }
+    const lowered = errorMessage.toLowerCase();
+    const patterns = ["unexpected end of archive", "error: data error"];
+    return patterns.some((pattern) => lowered.includes(pattern));
+  }
+
+  // A disk-full extraction error is a genuine system failure, not archive damage: it must not be
+  // routed through the "archive damaged, continue?" prompt (whose Cancel yields a UserCanceled that
+  // leaves a collection member stuck non-terminal). Detected by message so it can be re-thrown as a
+  // real, ENOSPC-coded failure instead.
+  private isDiskFull(errorMessage: string): boolean {
+    const lowered = errorMessage.toLowerCase();
+    return lowered.includes("not enough space") || lowered.includes("enospc");
+  }
+
+  private extractWithRetry(
+    zip: Zip,
+    archivePath: string,
+    tempPath: string,
+    progress: (files: string[], percent: number) => void,
+    queryPassword: () => PromiseLike<string>,
+    maxRetries: number = 3,
+    retryDelayMs: number = 1000,
+  ): Promise<{ code: number; errors: string[] }> {
+    const attemptExtract = (retriesLeft: number): Promise<{ code: number; errors: string[] }> => {
+      const retryIfFileInUse = (errorMessages: string[]) => {
+        if (retriesLeft > 0 && errorMessages.some((msg) => this.isFileInUse(msg))) {
+          log("info", "archive file in use, retrying extraction", {
+            archivePath: path.basename(archivePath),
+            retriesLeft,
+            retryDelayMs,
+          });
+          return delay(retryDelayMs).then(() => attemptExtract(retriesLeft - 1));
+        }
+        return undefined;
+      };
+
+      // DEBUG: Force random errors at 10% rate for testing
+      // if (Math.random() < 0.1) {
+      //   const errors = [
+      //     () =>
+      //       new ArchiveBrokenError(
+      //         path.basename(archivePath),
+      //         "debug test error",
+      //       ),
+      //     () => { const e = new Error("EPERM: operation not permitted"); (e as any).code = "EPERM"; (e as any).path = archivePath; return e; },
+      //     () => new ProcessCanceled("debug canceled"),
+      //     () => { const e = new Error("ENOENT: no such file or directory"); (e as any).code = "ENOENT"; (e as any).path = archivePath; return e; },
+      //   ];
+      //   return Promise.reject(
+      //     errors[Math.floor(Math.random() * errors.length)](),
+      //   );
+      // }
+      // clean up any stale temp directory from a previous failed attempt
+      return Promise.resolve(fs.removeAsync(tempPath)).then(() =>
+        Promise.resolve(
+          zip
+            .extractFull(archivePath, tempPath, { ssc: false }, progress, queryPassword as any)
+            .then((result: { code: number; errors: string[] }) => {
+              // 7z can resolve (not reject) with a non-zero exit code and
+              // file-in-use errors. Retry in that case instead of proceeding
+              // with a partial extraction.
+              if (result.code !== 0) {
+                return retryIfFileInUse(result.errors ?? []) ?? result;
+              }
+              return result;
+            })
+            .catch((err) => {
+              const error = unknownToError(err);
+              return (
+                retryIfFileInUse([error.message]) ??
+                (this.isCritical(error.message)
+                  ? Promise.reject(
+                      new ArchiveBrokenError(path.basename(archivePath), error.message),
+                    )
+                  : Promise.reject(error))
+              );
+            }),
+        ),
+      );
+    };
+    return attemptExtract(maxRetries);
+  }
+
+  /**
+   * find the right installer for the specified archive, then install
+   */
+  private installInner(
+    api: IExtensionApi,
+    archivePath: string,
+    tempPath: string,
+    destinationPath: string,
+    gameId: string,
+    installContext: IInstallContext,
+    installationZip: Zip,
+    forceInstaller?: string,
+    installChoices?: any,
+    extractList?: IFileListItem[],
+    unattended?: boolean,
+    details?: IInstallationDetails,
+  ): Promise<IInstallResult> {
+    let fileList: string[] = [];
+    let phase = "Extracting";
+
+    const progress = (files: string[], percent: number) => {
+      if (percent !== undefined && installContext !== undefined) {
+        installContext.setProgress(phase, percent);
+      }
+    };
+    log("debug", "extracting mod archive", { archivePath, tempPath });
+    let extractProm: Promise<any>;
+    const extractionStart = Date.now();
+    if (FILETYPES_AVOID.includes(path.extname(archivePath).toLowerCase())) {
+      extractProm = Promise.reject(
+        new ArchiveBrokenError(path.basename(archivePath), "file type on avoidlist"),
+      );
+    } else {
+      extractProm = this.extractWithRetry(installationZip, archivePath, tempPath, progress, () =>
+        this.queryPassword(api.store),
+      );
+      (extractProm as any).startTime = extractionStart;
+    }
+
+    return extractProm
+      .then(async ({ code, errors }: { code: number; errors: string[] }) => {
+        log("debug", "extraction completed", {
+          archivePath: path.basename(archivePath),
+          extractionTimeMs: Date.now() - (extractProm as any).startTime,
+        });
+        phase = "Installing";
+        if (installContext !== undefined) {
+          installContext.setProgress("Installing");
+        }
+        if (code !== 0) {
+          log("warn", "extraction reported error", {
+            code,
+            errors: errors.join("; "),
+          });
+          // 7z exit codes: 0=OK, 1=Warning, 2=Fatal, 7=CLI error, 8=OOM,
+          // 255=User stopped. Note that 2 can also be raised for file-in-use
+          // which is retryable so we can't treat it as critical.
+          const critical = errors.find((err) => this.isCritical(err));
+          if (critical !== undefined) {
+            throw new ArchiveBrokenError(path.basename(archivePath), critical);
+          }
+          if (errors.some((err) => this.isDiskFull(err))) {
+            throw new InsufficientDiskSpace(path.parse(tempPath).root);
+          }
+          await this.queryContinue(api, errors, archivePath);
+        }
+      })
+      .then(async () => {
+        fileList = await buildFileList(tempPath);
+        const hasFomodSegment = (file: string) => {
+          const segments = file.toLowerCase().split(path.sep);
+          return segments.includes("fomod");
+        };
+        const hasCSScripts = fileList.some(
+          (file) =>
+            hasFomodSegment(file) && ["script.cs"].includes(path.basename(file).toLowerCase()),
+        );
+        const hasXmlConfigXML = fileList.some(
+          (file) =>
+            hasFomodSegment(file) &&
+            ["moduleconfig.xml", "script.xml"].includes(path.basename(file).toLowerCase()),
+        );
+        const testDetails: ITestSupportedDetails = {
+          hasCSScripts,
+          hasXmlConfigXML,
+        };
+
+        const allowList = getCSharpScriptAllowListForGame(gameId);
+        if (hasCSScripts && !allowList.has(details?.modReference?.repo?.modId || "")) {
+          const modName =
+            details?.modReference?.id || path.basename(archivePath, path.extname(archivePath));
+          const t = api.translate;
+
+          const no = t("Cancel installation");
+          const yes = t("Install anyway (unsafe)");
+          //const yesForAll = t(`Install anyway (unsafe). Don't ask again for the current session`);
+          const dialogResult = await api.showDialog?.(
+            "question",
+            t(`Unsafe Mod Detected`),
+            {
+              bbcode: t(
+                `"{{modName}}" contains C# scripts that can run code on your computer.[br][/br][br][/br]` +
+                  `These scripts give the mod full access to your system and can cause serious harm, including data loss or security breaches.[br][/br]` +
+                  `Unless you personally reviewed and trust the source, we strongly recommend you do not install this mod.[br][/br][br][/br]` +
+                  `Are you sure you want to continue?`,
+                { replace: { modName: modName } },
+              ),
+            },
+            [{ label: no }, { label: yes } /*{ label: yesForAll }*/],
+          );
+          switch (dialogResult?.action) {
+            case no:
+              throw new UserCanceled();
+            //case yesForAll:
+            //  break;
+          }
+        }
+
+        if (truthy(extractList) && extractList.length > 0) {
+          const supportedInstaller = await makeListInstaller(extractList, tempPath);
+          return { ...supportedInstaller, ...testDetails };
+        } else if (forceInstaller === undefined) {
+          const supportedInstaller = await this.getInstaller(
+            fileList,
+            gameId,
+            archivePath,
+            undefined,
+            testDetails,
+          );
+          return { ...supportedInstaller, ...testDetails };
+        } else {
+          const forced = this.mInstallers.find((inst) => inst.id === forceInstaller);
+          const testResult = await forced.testSupported(fileList, gameId, archivePath, testDetails);
+
+          if (!testResult.supported) {
+            return undefined;
+          } else {
+            return {
+              installer: forced,
+              requiredFiles: testResult.requiredFiles,
+              ...testDetails,
+            };
+          }
+        }
+      })
+      .then(async (supportedInstaller) => {
+        if (supportedInstaller === undefined) {
+          throw new Error("no installer supporting this file");
+        }
+
+        const { installer, requiredFiles } = supportedInstaller;
+        const overrideInstructionsFilePresentInArchive = fileList.some(
+          (file) => path.basename(file) === VORTEX_OVERRIDE_INSTRUCTIONS_FILENAME,
+        );
+        const innerDetails: IInstallationDetails = {
+          hasInstructionsOverrideFile: overrideInstructionsFilePresentInArchive,
+          modReference: details?.modReference,
+          hasCSScripts: supportedInstaller?.hasCSScripts,
+          hasXmlConfigXML: supportedInstaller?.hasXmlConfigXML,
+        };
+        log("debug", "invoking installer", {
+          installer: installer.id,
+          enforced: forceInstaller !== undefined,
+        });
+        const installerResult: IInstallResult & { installerId?: string } = await installer.install(
+          fileList,
+          tempPath,
+          gameId,
+          (perc: number) => {
+            log("info", "progress", perc);
+            progress([], perc);
+          },
+          installChoices,
+          unattended,
+          archivePath,
+          innerDetails,
+        );
+        installerResult.installerId = installer.id;
+        if (!installerResult.instructions) {
+          return installerResult;
+        }
+
+        const overrideCopyInstructionExists = installerResult.instructions.some(
+          (instr) =>
+            instr.type === "copy" && instr.source === VORTEX_OVERRIDE_INSTRUCTIONS_FILENAME,
+        );
+
+        if (overrideInstructionsFilePresentInArchive && !overrideCopyInstructionExists) {
+          installerResult.instructions.push({
+            type: "copy",
+            source: VORTEX_OVERRIDE_INSTRUCTIONS_FILENAME,
+            destination: VORTEX_OVERRIDE_INSTRUCTIONS_FILENAME,
+          });
+        }
+        return installerResult;
+      });
+  }
+
+  private async determineModType(
+    gameId: string,
+    installInstructions: IInstruction[],
+  ): Promise<string> {
+    log("info", "determine mod type", { gameId });
+    const game = getGame(gameId);
+    if (game === undefined) {
+      return Promise.reject(new Error(`Invalid game "${gameId}"`));
+    }
+    const modTypes: IModType[] = game.modTypes;
+    const sorted = modTypes.sort((lhs, rhs) => lhs.priority - rhs.priority);
+    let found = false;
+
+    // sequential: order matters, first match wins
+    for (const type of sorted) {
+      if (found) {
+        continue;
+      }
+      try {
+        const matches = await Promise.resolve(type.test(installInstructions));
+        if (matches) {
+          found = true;
+          return type.typeId;
+        }
+      } catch (err) {
+        log("error", "invalid mod type", {
+          typeId: type.typeId,
+          error: getErrorMessageOrDefault(err),
+        });
+      }
+    }
+    return "";
+  }
+
+  private queryContinue(api: IExtensionApi, errors: string[], archivePath: string): Promise<void> {
+    const terminal = errors.find((err) => err.indexOf("Can not open the file as archive") !== -1);
+
+    return new Promise<void>((resolve, reject) => {
+      const actions = [
+        { label: "Cancel", action: () => reject(new UserCanceled()) },
+        {
+          label: "Delete",
+          action: () => {
+            fs.removeAsync(archivePath)
+              .catch((err) =>
+                api.showErrorNotification("Failed to remove archive", err, {
+                  allowReport: false,
+                }),
+              )
+              .finally(() => {
+                const { files } = api.getState().persistent.downloads;
+                const dlId = Object.keys(files).find(
+                  (iter) => files[iter].localPath === path.basename(archivePath),
+                );
+                if (dlId !== undefined) {
+                  api.store.dispatch(removeDownload(dlId));
+                }
+                reject(new UserCanceled());
+              });
+          },
+        },
+      ];
+
+      if (!terminal) {
+        actions.push({ label: "Continue", action: () => resolve() });
+      }
+
+      const title = api.translate('Archive damaged "{{archiveName}}"', {
+        replace: { archiveName: path.basename(archivePath) },
+      });
+      api.store.dispatch(
+        showDialog(
+          "error",
+          title,
+          {
+            bbcode: api.translate(
+              "Encountered errors extracting this archive. Please verify this " +
+                "file was downloaded correctly.\n[list]{{ errors }}[/list]",
+              {
+                replace: { errors: errors.map((err) => "[*] " + err) },
+              },
+            ),
+            options: { translated: true },
+          },
+          actions,
+        ),
+      );
+    });
+  }
+
+  private queryPassword(store: ThunkStore<any>): Promise<string> {
+    return new Promise<string>((resolve, reject) => {
+      store
+        .dispatch(
+          showDialog(
+            "info",
+            "Password Protected",
+            {
+              input: [
+                {
+                  id: "password",
+                  type: "password",
+                  value: "",
+                  label: "A password is required to extract this archive",
+                },
+              ],
+            },
+            [{ label: "Cancel" }, { label: "Continue" }],
+          ),
+        )
+        .then((result: IDialogResult) => {
+          if (result.action === "Continue") {
+            resolve(result.input["password"]);
+          } else {
+            reject(new UserCanceled());
+          }
+        });
+    });
+  }
+
+  private validateInstructions(instructions: IInstruction[]): IInvalidInstruction[] {
+    const sanitizeSep = new RegExp("/", "g");
+    // Validate the ungrouped instructions and return errors (if any)
+    const invalidDestinationErrors: IInvalidInstruction[] = instructions
+      .filter((instr) => {
+        if (instr.destination) {
+          // This is a temporary hack to avoid invalidating fomod instructions
+          //  which will include a path separator at the beginning of a relative path
+          //  when matching nested stop patterns.
+          const destination =
+            instr.destination.charAt(0) === path.sep
+              ? instr.destination.substr(1)
+              : instr.destination;
+
+          // Ensure we use windows path separators as scripted installers
+          //  will sometime return *nix separators.
+          const sanitized =
+            process.platform === "win32" ? destination.replace(sanitizeSep, path.sep) : destination;
+          return !isPathValid(sanitized, true);
+        }
+
+        return false;
+      })
+      .map((instr) => {
+        return {
+          type: instr.type,
+          error: `invalid destination path: "${instr.destination}"`,
+        };
+      });
+
+    return [].concat(invalidDestinationErrors);
+  }
+
+  private transformInstructions(input: IInstruction[]): InstructionGroups {
+    return input.reduce((prev, value) => {
+      if (truthy(value) && prev[value.type] !== undefined) {
+        prev[value.type].push(value);
+      }
+      return prev;
+    }, new InstructionGroups());
+  }
+
+  private reportUnsupported(api: IExtensionApi, unsupported: IInstruction[], archivePath: string) {
+    if (unsupported.length === 0) {
+      return;
+    }
+    const missing = unsupported.map((instruction) => instruction.source);
+    const makeReport = () =>
+      api
+        .genMd5Hash(archivePath)
+        .catch((err) => ({}))
+        .then((hashResult: IHashResult) =>
+          createErrorReport(
+            "Installer failed",
+            {
+              message: "The installer uses unimplemented functions",
+              details:
+                `Missing instructions: ${missing.join(", ")}\n` +
+                `Installer name: ${path.basename(archivePath)}\n` +
+                `MD5 checksum: ${hashResult.md5sum}\n`,
+            },
+            {},
+            api.store.getState(),
+            "installer",
+          ),
+        );
+    const showUnsupportedDialog = () =>
+      api.store.dispatch(
+        showDialog(
+          "info",
+          "Installer unsupported",
+          {
+            message:
+              "This installer is (partially) unsupported as it's " +
+              "using functionality that hasn't been implemented yet. " +
+              "Please help us fix this by submitting an error report with a link to this mod.",
+          },
+          isOutdated() || didIgnoreError()
+            ? [{ label: "Close" }]
+            : [{ label: "Report", action: makeReport }, { label: "Close" }],
+        ),
+      );
+
+    api.sendNotification({
+      type: "info",
+      message: "Installer unsupported",
+      actions: [{ title: "More", action: showUnsupportedDialog }],
+    });
+  }
+
+  private async processMKDir(instructions: IInstruction[], destinationPath: string): Promise<void> {
+    for (const instruction of instructions) {
+      await fs.ensureDirAsync(path.join(destinationPath, instruction.destination));
+    }
+  }
+
+  private async processGenerateFiles(
+    generatefile: IInstruction[],
+    destinationPath: string,
+  ): Promise<void> {
+    for (const gen of generatefile) {
+      const outputPath = path.join(destinationPath, gen.destination);
+      await fs.ensureDirAsync(path.dirname(outputPath));
+      // data buffers are sent to us base64 encoded
+      await fs.writeFileAsync(outputPath, gen.data);
+    }
+  }
+
+  private async processSubmodule(
+    api: IExtensionApi,
+    installContext: InstallContext,
+    submodule: IInstruction[],
+    destinationPath: string,
+    gameId: string,
+    modId: string,
+    choices: IChoiceType,
+    unattended: boolean,
+    details: IInstallationDetails,
+  ): Promise<void> {
+    for (const mod of submodule) {
+      const tempPath = destinationPath + "." + shortid() + ".installing";
+      log("debug", "install submodule", {
+        modPath: mod.path,
+        tempPath,
+        destinationPath,
+      });
+      const subContext = new InstallContext(gameId, api, unattended);
+      subContext.startIndicator(
+        api.translate("nested: {{modName}}", {
+          replace: { modName: path.basename(mod.path) },
+        }),
+      );
+      const submoduleZip = new Zip();
+      try {
+        const resultInner = await this.installInner(
+          api,
+          mod.path,
+          tempPath,
+          destinationPath,
+          gameId,
+          subContext,
+          submoduleZip,
+          undefined,
+          choices,
+          undefined,
+          unattended,
+          details,
+        );
+        await this.processInstructions(
+          api,
+          installContext,
+          mod.path,
+          tempPath,
+          destinationPath,
+          gameId,
+          modId,
+          resultInner,
+          choices,
+          unattended,
+          details,
+        );
+        if (mod.submoduleType !== undefined) {
+          api.store.dispatch(setModType(gameId, modId, mod.submoduleType));
+        }
+      } finally {
+        subContext.finishInstallCB("ignore");
+        subContext.stopIndicator();
+        fs.removeAsync(tempPath);
+      }
+    }
+  }
+
+  private processAttribute(
+    api: IExtensionApi,
+    attribute: IInstruction[],
+    gameId: string,
+    modId: string,
+  ): Promise<void> {
+    attribute.forEach((attr) => {
+      api.store.dispatch(setModAttribute(gameId, modId, attr.key, attr.value));
+    });
+    return Promise.resolve();
+  }
+
+  private processEnableAllPlugins(
+    api: IExtensionApi,
+    enableAll: IInstruction[],
+    gameId: string,
+    modId: string,
+  ): Promise<void> {
+    if (enableAll.length > 0) {
+      api.store.dispatch(setModAttribute(gameId, modId, "enableallplugins", true));
+    }
+    return Promise.resolve();
+  }
+
+  private processSetModType(
+    api: IExtensionApi,
+    installContext: InstallContext,
+    types: IInstruction[],
+    gameId: string,
+    modId: string,
+  ): Promise<void> {
+    if (types.length > 0) {
+      const type = types[types.length - 1].value;
+      installContext.setModType(modId, type);
+      api.store.dispatch(setModType(gameId, modId, type));
+      if (types.length > 1) {
+        log("error", "got more than one mod type, only the last was used", {
+          types,
+        });
+      }
+    }
+    return Promise.resolve();
+  }
+
+  private processRule(
+    api: IExtensionApi,
+    rules: IInstruction[],
+    gameId: string,
+    modId: string,
+  ): void {
+    const batched = rules.reduce((acc, rule) => {
+      acc.push(addModRule(gameId, modId, rule.rule));
+      return acc;
+    }, []);
+    batchDispatch(api.store, batched);
+  }
+
+  private processIniEdits(
+    api: IExtensionApi,
+    iniEdits: IInstruction[],
+    destinationPath: string,
+    gameId: string,
+    modId: string,
+  ): Promise<void> {
+    if (iniEdits.length === 0) {
+      return Promise.resolve();
+    }
+
+    const byDest: { [dest: string]: IInstruction[] } = iniEdits.reduce(
+      (prev: { [dest: string]: IInstruction[] }, value) => {
+        setdefault(prev, value.destination, []).push(value);
+        return prev;
+      },
+      {},
+    );
+
+    return Promise.resolve(fs.ensureDirAsync(path.join(destinationPath, INI_TWEAKS_PATH)))
+      .then(() =>
+        Promise.all(
+          Object.keys(byDest).map((destination) => {
+            const bySection: { [section: string]: IInstruction[] } = byDest[destination].reduce(
+              (prev: { [section: string]: IInstruction[] }, value) => {
+                setdefault(prev, value.section, []).push(value);
+                return prev;
+              },
+              {},
+            );
+
+            const renderKV = (instruction: IInstruction): string =>
+              `${instruction.key} = ${instruction.value}`;
+
+            const renderSection = (section: string) =>
+              [`[${section}]`].concat(bySection[section].map(renderKV)).join(os.EOL);
+
+            const content = Object.keys(bySection).map(renderSection).join(os.EOL);
+
+            const basename = path.basename(destination, path.extname(destination));
+            const tweakId = `From Installer [${basename}].ini`;
+            api.store.dispatch(setINITweakEnabled(gameId, modId, tweakId, true));
+
+            return fs.writeFileAsync(path.join(destinationPath, INI_TWEAKS_PATH, tweakId), content);
+          }),
+        ),
+      )
+      .then(() => undefined);
+  }
+
+  private modTypeExists = (gameId: string, modType: string): boolean => {
+    if (!modType || !gameId) {
+      return false;
+    }
+    const game = getGame(gameId);
+    if (game === undefined) {
+      return false;
+    }
+    return game.modTypes.some((type) => type.typeId === modType);
+  };
+  private processInstructions(
+    api: IExtensionApi,
+    installContext: InstallContext,
+    archivePath: string,
+    tempPath: string,
+    destinationPath: string,
+    gameId: string,
+    modId: string,
+    result: {
+      instructions: IInstruction[];
+      overrideInstructions?: IInstruction[];
+    },
+    choices: IChoiceType,
+    unattended: boolean,
+    details: IInstallationDetails,
+  ) {
+    if (result.instructions === null) {
+      // this is the signal that the installer has already reported what went
+      // wrong. Not necessarily a "user canceled" but the error handling happened
+      // in the installer so we don't know what happened.
+      return Promise.reject(new UserCanceled());
+    }
+
+    if (result.instructions === undefined || result.instructions.length === 0) {
+      return Promise.reject(new ProcessCanceled("Empty archive or no options selected"));
+    }
+
+    const isActivityRunning = (activity: string) =>
+      getSafe(api.getState(), ["session", "base", "activity", "mods"], []).includes(activity); // purge/deploy
+    if (isActivityRunning("installing_dependencies")) {
+      // we don't want to override any instructions when installing as part of a collection!
+      //  this will just add extra complexity to an already complex process.
+      result.overrideInstructions = [];
+    }
+    const overrideMap = new Map<string, IInstruction>();
+    result.overrideInstructions?.forEach((instr) => {
+      let key = instr.source ?? instr.type;
+      if (key == null) {
+        return;
+      }
+      key = key.toUpperCase();
+      if (instr.type !== "setmodtype" || this.modTypeExists(gameId, instr?.value)) {
+        overrideMap.set(key, instr);
+      } else {
+        log("warn", "mod type does not exist", instr);
+      }
+    });
+
+    const finalInstructions = result.instructions
+      .filter((instr) => (instr.source ?? instr.type) != null)
+      .map((instr) => {
+        const key = (instr.source ?? instr.type).toUpperCase();
+        const overrideEntry = overrideMap.get(key);
+        if (overrideEntry) {
+          log("debug", "overriding instruction", {
+            key,
+            type: instr.type,
+            override: JSON.stringify(overrideEntry),
+          });
+        }
+        return overrideEntry ?? instr;
+      });
+
+    // Add instructions from result.overrideInstructions that are not already present in finalInstructions
+    if (Array.isArray(result.overrideInstructions)) {
+      const existingKeys = new Set(
+        finalInstructions.map((instr) => (instr.source ?? instr.type).toUpperCase()),
+      );
+      for (const instr of result.overrideInstructions) {
+        let key = instr.source ?? instr.type;
+        if (key == null) {
+          continue;
+        }
+        key = key.toUpperCase();
+        // For copy instructions, ensure no duplicate destinations
+        if (instr.type === "copy") {
+          const isDuplicate = finalInstructions.some(
+            (existingInstr) =>
+              existingInstr.type === "copy" && existingInstr.destination === instr.destination,
+          );
+          if (isDuplicate) {
+            // The assumption here is that the override instruction does not contain
+            //  the correct source information so we use the original instruction
+            continue;
+          }
+        }
+        if (
+          !existingKeys.has(key) &&
+          (instr.type !== "setmodtype" || this.modTypeExists(gameId, instr?.value))
+        ) {
+          finalInstructions.push(instr);
+        }
+      }
+    }
+
+    const invalidInstructions = this.validateInstructions(finalInstructions);
+    if (invalidInstructions.length > 0) {
+      const game = getGame(gameId);
+      // we can also get here with invalid instructions from scripted installers
+      // so even if the game is not contributed, this is still probably not a bug
+      // const allowReport = (game.contributed === undefined);
+      const allowReport = false;
+      const error = allowReport
+        ? 'Invalid installer instructions found for "{{ modId }}".'
+        : 'Invalid installer instructions found for "{{ modId }}". Please inform ' +
+          'the game extension\'s developer - "{{ contributor }}", or the mod author.';
+      api.showErrorNotification(
+        "Invalid mod installer instructions",
+        {
+          invalid:
+            "\n" +
+            invalidInstructions.map((inval) => `(${inval.type}) - ${inval.error}`).join("\n"),
+          message: error,
+        },
+        {
+          replace: {
+            modId,
+            contributor: game.contributed,
+          },
+          allowReport,
+        },
+      );
+      return Promise.reject(new ProcessCanceled("Invalid installer instructions"));
+    }
+
+    const instructionGroups = this.transformInstructions(finalInstructions);
+
+    if (instructionGroups.error.length > 0) {
+      const fatal = instructionGroups.error.find((err) => err.value === "fatal");
+      let error = 'Errors were reported processing the installer for "{{ modId }}". ';
+
+      if (fatal === undefined) {
+        error +=
+          "It's possible the mod works (partially) anyway. " +
+          "Please note that NMM tends to ignore errors so just because NMM doesn't " +
+          "report a problem with this installer doesn't mean it doesn't have any.";
+      }
+
+      api.showErrorNotification("Installer reported errors", error + "\n{{ errors }}", {
+        replace: {
+          errors: instructionGroups.error.map((err) => err.source).join("\n"),
+          modId,
+        },
+        allowReport: false,
+        message: modId,
+      });
+      if (fatal !== undefined) {
+        const errorMessages = instructionGroups.error.map((err) => err.source);
+        const errorSummary = errorMessages.join("; ");
+        return Promise.reject(
+          new ProcessCanceled(`Installer script failed: ${errorSummary}`, {
+            modId,
+            errors: instructionGroups.error.map((err) => ({
+              severity: err.value,
+              message: err.source,
+            })),
+          }),
+        );
+      }
+    }
+
+    // log('debug', 'installer instructions',
+    //     JSON.stringify(result.instructions.map(instr => _.omit(instr, ['data']))));
+    this.reportUnsupported(api, instructionGroups.unsupported, archivePath);
+
+    return this.processMKDir(instructionGroups.mkdir, destinationPath)
+      .then(() =>
+        this.extractArchive(
+          api,
+          archivePath,
+          tempPath,
+          destinationPath,
+          instructionGroups.copy,
+          gameId,
+        ),
+      )
+      .then(() => this.processGenerateFiles(instructionGroups.generatefile, destinationPath))
+      .then(() =>
+        this.processIniEdits(api, instructionGroups.iniedit, destinationPath, gameId, modId),
+      )
+      .then(() =>
+        this.processSubmodule(
+          api,
+          installContext,
+          instructionGroups.submodule,
+          destinationPath,
+          gameId,
+          modId,
+          choices,
+          unattended,
+          details,
+        ),
+      )
+      .then(() => this.processAttribute(api, instructionGroups.attribute, gameId, modId))
+      .then(() =>
+        this.processEnableAllPlugins(api, instructionGroups.enableallplugins, gameId, modId),
+      )
+      .then(() =>
+        this.processSetModType(api, installContext, instructionGroups.setmodtype, gameId, modId),
+      )
+      .then(() => {
+        this.processRule(api, instructionGroups.rule, gameId, modId);
+        return Promise.resolve();
+      });
+  }
+
+  private checkModVariantsExist(api: IExtensionApi, gameMode: string, archiveId: string): string[] {
+    if (archiveId == null) {
+      return [];
+    }
+    const state = api.getState();
+    const mods = Object.values(state.persistent.mods[gameMode] || []);
+    return mods.filter((mod) => mod.archiveId === archiveId).map((mod) => mod.id);
+  }
+
+  private checkModNameExists(installName: string, api: IExtensionApi, gameMode: string): string[] {
+    const state = api.getState();
+    const mods = Object.values(state.persistent.mods[gameMode] || []);
+    // Yes I know that only 1 mod id can ever match the install name, but it's more consistent
+    //  with the variant check as we don't have to check for undefined too.
+    return mods.filter((mod) => mod.id === installName).map((mod) => mod.id);
+  }
+
+  private findPreviousVersionMod(
+    fileId: number,
+    store: Redux.Store<IState>,
+    gameMode: string,
+    nexusModId?: number,
+    logicalFileName?: string,
+  ): IMod | undefined {
+    const mods = (store.getState().persistent.mods[gameMode] || {}) as Record<string, IMod>;
+
+    const candidates: IMod[] = Object.values(mods).filter((m: IMod) => m.type !== "collection");
+
+    // Primary: the update check already told us which fileId is newest
+    const byNewestId: IMod | undefined = candidates.find((m: IMod) => {
+      const newestFileId: number | undefined = m.attributes?.newestFileId;
+      const currentFileId: number | undefined = m.attributes?.fileId;
+      return newestFileId !== currentFileId && newestFileId === fileId;
+    });
+    if (byNewestId !== undefined) {
+      return byNewestId;
+    }
+
+    // Fallback: same Nexus mod page, different file. Use logicalFileName as a
+    // tiebreaker when available to avoid false positives on pages that host
+    // multiple unrelated files.
+    if (nexusModId != null) {
+      return candidates.find(
+        (m: IMod) =>
+          m.attributes?.modId === nexusModId &&
+          (logicalFileName == null || m.attributes?.logicalFileName === logicalFileName) &&
+          m.attributes?.fileId !== fileId,
+      );
+    }
+
+    return undefined;
+  }
+
+  private queryIgnoreDependent(
+    store: ThunkStore<IState>,
+    gameId: string,
+    dependents: Array<{ owner: string; rule: IModRule }>,
+  ): Promise<void> {
+    const batchKey = "remember-ignore-dependent-action";
+    let context = getBatchContext("install-mod", "", false);
+    const handleAction = (action: string, remember: boolean) => {
+      if (remember) {
+        context = getBatchContext("install-mod", "", true);
+        context?.set?.(batchKey, action);
+      }
+      if (action === "Cancel") {
+        return Promise.reject(new UserCanceled());
+      } else {
+        const ruleActions = dependents.reduce((prev, dep) => {
+          prev.push(removeModRule(gameId, dep.owner, dep.rule));
+          prev.push(
+            addModRule(gameId, dep.owner, {
+              ...dep.rule,
+              ignored: true,
+            }),
+          );
+          return prev;
+        }, []);
+        batchDispatch(store, ruleActions);
+        return Promise.resolve();
+      }
+    };
+    return new Promise<void>((resolve, reject) => {
+      const rememberAction = context?.get?.(batchKey, false);
+      if (rememberAction) {
+        // if we already have a remembered action, just resolve
+        return handleAction(rememberAction, true)
+          .then(() => resolve())
+          .catch((err) => reject(err));
+      }
+      store
+        .dispatch(
+          showDialog(
+            "question",
+            "Updating may break dependencies",
+            {
+              text:
+                "You're updating a mod that others depend upon and the update doesn't seem to " +
+                "be compatible (according to the dependency information). " +
+                "If you continue we have to disable these dependencies, otherwise you'll " +
+                "continually get warnings about it.",
+              options: { wrap: true },
+              checkboxes: [
+                {
+                  id: "remember",
+                  value: false,
+                  text: "Remember my choice",
+                },
+              ],
+            },
+            [{ label: "Cancel" }, { label: "Ignore" }],
+          ),
+        )
+        .then((result: IDialogResult) =>
+          handleAction(result.action, result.input.remember)
+            .then(() => resolve())
+            .catch((err) => reject(err)),
+        );
+    });
+  }
+
+  private queryProfileCount(store: ThunkStore<IState>): number {
+    const state = store.getState();
+    const profiles = gameProfiles(state);
+    return profiles.length;
+  }
+
+  private userVersionChoice(oldMod: IMod, store: ThunkStore<IState>): Promise<string> {
+    const totalProfiles = this.queryProfileCount(store);
+    const batchAction = "remember-user-version-choice-action";
+    const handleAction = (action: string, remember: boolean) => {
+      if (remember) {
+        const context = getBatchContext("install-mod", "", true);
+        context?.set?.(batchAction, action);
+      }
+      if (action === "Cancel") {
+        return Promise.reject(new UserCanceled());
+      } else if (action === REPLACE_ACTION) {
+        return Promise.resolve(REPLACE_ACTION);
+      } else if (action === INSTALL_ACTION) {
+        return Promise.resolve(INSTALL_ACTION);
+      }
+    };
+
+    const context = getBatchContext("install-mod", "", false);
+    const rememberAction = context?.get?.(batchAction);
+    return rememberAction
+      ? Promise.resolve(rememberAction)
+      : totalProfiles === 1 && oldMod.type !== "collection"
+        ? Promise.resolve(REPLACE_ACTION)
+        : new Promise<string>((resolve, reject) => {
+            store
+              .dispatch(
+                showDialog(
+                  "question",
+                  modName(oldMod),
+                  {
+                    text:
+                      "An older version of this mod is already installed. " +
+                      "You can replace the existing one - which will update all profiles - " +
+                      "or install this one alongside it. In the latter case both versions " +
+                      "will be available and only the active profile will be updated. ",
+                    options: { wrap: true },
+                    checkboxes: [
+                      {
+                        id: "remember",
+                        value: false,
+                        text: "Remember my choice",
+                      },
+                    ],
+                  },
+                  [{ label: "Cancel" }, { label: REPLACE_ACTION }, { label: INSTALL_ACTION }],
+                ),
+              )
+              .then((result: IDialogResult) => handleAction(result.action, result.input.remember))
+              .then(resolve)
+              .catch(reject);
+          });
+  }
+
+  private queryUserReplace(
+    api: IExtensionApi,
+    modIds: string[],
+    gameId: string,
+    installOptions: IInstallOptions,
+  ) {
+    return new Promise<IReplaceChoice>((resolve, reject) => {
+      const state: IState = api.store.getState();
+      const mods: IMod[] = Object.values(state.persistent.mods[gameId]).filter(
+        (mod) => modIds.includes(mod.id) && mod.state === "installed",
+      );
+      const batchContext = getBatchContext(["install-dependencies", "install-recommendations"], "");
+      const profileId = batchContext?.get<string>("profileId") ?? activeProfile(state)?.id;
+      const currentProfile = profileById(api.store.getState(), profileId);
+      if (mods.length === 0) {
+        // Technically for this to happen the timing must be *perfect*,
+        //  the replace query dialog will only show if we manage to confirm that
+        //  the modId is indeed stored persistently - but if somehow the user
+        //  was able to finish removing the mod right as the replace dialog
+        //  appears the mod could be potentially missing from the state.
+        // In this case we resolve using the existing modId.
+        // https://github.com/Nexus-Mods/Vortex/issues/7972
+        return resolve({
+          id: modIds[0],
+          variant: "",
+          enable: getSafe(currentProfile, ["modState", modIds[0], "enabled"], false),
+          attributes: {},
+          rules: [],
+          replaceChoice: "replace",
+        });
+      }
+
+      const context = getBatchContext("install-mod", mods[0].archiveId);
+
+      const queryVariantNameDialog = (remember: boolean) => {
+        const checkVariantRemember: ICheckbox[] = [];
+        if (truthy(context)) {
+          const itemsCompleted = context.get("items-completed", 0);
+          const itemsLeft = context.itemCount - itemsCompleted;
+          if (itemsLeft > 1 && remember) {
+            checkVariantRemember.push({
+              id: "remember",
+              value: false,
+              text: api.translate("Use this name for all remaining variants ({{count}} more)", {
+                count: itemsLeft - 1,
+              }),
+            });
+          }
+        }
+
+        return api
+          .showDialog(
+            "question",
+            "Install options - Name mod variant",
+            {
+              text: 'Enter a variant name for "{{modName}}" to differentiate it from the original',
+              input: [
+                {
+                  id: "variant",
+                  value:
+                    installOptions.variantNumber > 2
+                      ? installOptions.variantNumber.toString()
+                      : "2",
+                  label: "Variant",
+                },
+              ],
+              checkboxes: checkVariantRemember,
+              md:
+                "**Remember:** You can switch between variants by clicking in the version " +
+                "column in your mod list and selecting from the dropdown.",
+              parameters: {
+                modName: modName(mods[0], { version: false }),
+              },
+              condition: (content: IDialogContent) => validateVariantName(api.translate, content),
+              options: {
+                order: ["text", "input", "md", "checkboxes"],
+              },
+            },
+            [{ label: "Cancel" }, { label: "Continue" }],
+          )
+          .then((result) => {
+            if (result.action === "Cancel") {
+              context?.set?.("canceled", true);
+              return Promise.reject(new UserCanceled());
+            } else {
+              if (result.input.remember) {
+                context.set("variant-name", result.input.variant);
+              }
+              return Promise.resolve(result.input.variant);
+            }
+          });
+      };
+
+      const mod = mods[0];
+      // An unattended reinstall of an already-present mod with a different install spec
+      // (installer choices / file list / patches) means it's being pulled in as a
+      // dependency by another mod or collection.
+      const isDependency =
+        installOptions?.unattended === true &&
+        !modMatchesInstallSpec(mod, {
+          installerChoices: installOptions?.choices,
+          fileList: installOptions?.fileList,
+          patches: installOptions?.patches,
+        });
+      const addendum = isDependency
+        ? " and is trying to be reinstalled as a dependency by another mod or collection."
+        : ".";
+
+      const queryDialog = () =>
+        api
+          .showDialog(
+            "question",
+            "Install options",
+            {
+              bbcode: api.translate(
+                `"{{modName}}" is already installed on your system${addendum}` +
+                  "[br][/br][br][/br]Would you like to:",
+                { replace: { modName: modName(mods[0], { version: false }) } },
+              ),
+              choices: [
+                {
+                  id: "replace",
+                  value: true,
+                  text: "Replace the existing mod" + (isDependency ? " (recommended)" : ""),
+                  subText: "This will replace the existing mod on all your profiles.",
+                },
+                {
+                  id: "variant",
+                  value: false,
+                  text: "Install as variant of the existing mod",
+                  subText:
+                    "This will allow you to install variants of the same mod and easily " +
+                    "switch between them from the version drop-down in the mods table. " +
+                    "This can be useful if you want to install the same mod but with " +
+                    "different options in different profiles.",
+                },
+              ],
+              checkboxes: checkRoVRemember,
+              options: {
+                wrap: true,
+                order: ["choices", "checkboxes"],
+              },
+              parameters: {
+                modName: modName(mods[0], { version: false }),
+              },
+            },
+            [{ label: "Cancel" }, { label: "Continue" }],
+          )
+          .then((result) => {
+            if (result.action === "Cancel") {
+              context?.set?.("canceled", true);
+              return Promise.reject(new UserCanceled());
+            } else if (result.input.variant) {
+              return queryVariantNameDialog(result.input.remember).then((variant) => ({
+                action: "variant",
+                variant,
+                remember: result.input.remember,
+                preserveChoices: result.input.preserveChoices ?? true,
+              }));
+            } else if (result.input.replace) {
+              return {
+                action: "replace",
+                remember: result.input.remember,
+                preserveChoices: result.input.preserveChoices ?? true,
+              };
+            }
+          });
+
+      const queryVariantReplacement = () =>
+        api.showDialog(
+          "question",
+          "Select Variant to Replace",
+          {
+            text: '"{{modName}}" has several variants installed - please choose which one to replace:',
+            choices: mods.map((mod, idx) => {
+              const modAttributes = mod.attributes;
+              const variant = getSafe(modAttributes, ["variant"], "");
+              return {
+                id: mod.id,
+                value: idx === 0,
+                text: `modId: ${mod.id}`,
+                subText: api.translate(
+                  "Version: {{version}}; InstallTime: {{installTime}}; Variant: {{variant}}",
+                  {
+                    replace: {
+                      version: getSafe(modAttributes, ["version"], "Unknown"),
+                      installTime: new Date(getSafe(modAttributes, ["installTime"], 0)),
+                      variant: truthy(variant) ? variant : "Not set",
+                    },
+                  },
+                ),
+              };
+            }),
+            parameters: {
+              modName: modName(mods[0], { version: false }),
+            },
+          },
+          [{ label: "Cancel" }, { label: "Continue" }],
+        );
+
+      let choices: Promise<{
+        action: string;
+        variant?: string;
+        remember: boolean;
+        preserveChoices?: boolean;
+      }>;
+
+      const checkRoVRemember: ICheckbox[] = [];
+      if (context !== undefined) {
+        if (context.get("canceled", false)) {
+          return reject(new UserCanceled());
+        }
+
+        const action = context.get("replace-or-variant");
+        const itemsCompleted = context.get("items-completed", 0);
+        const itemsLeft = context.itemCount - itemsCompleted;
+        if (itemsLeft > 1) {
+          if (action === undefined) {
+            checkRoVRemember.push({
+              id: "remember",
+              value: false,
+              text: api.translate("Do this for all remaining reinstalls ({{count}} more)", {
+                count: itemsLeft - 1,
+              }),
+            });
+          }
+        }
+
+        if (action !== undefined) {
+          let variant: string = context.get("variant-name");
+          const preserveChoices: boolean = context.get("preserve-choices", true);
+          if (action === "variant" && variant === undefined) {
+            choices = Promise.resolve(
+              queryVariantNameDialog(context.get("replace-or-variant") !== undefined),
+            ).then((variantName) => ({
+              action,
+              variant: variantName,
+              remember: true,
+              preserveChoices,
+            }));
+          } else {
+            if (variant !== undefined && installOptions.variantNumber > 1) {
+              variant += `.${installOptions.variantNumber}`;
+            }
+            choices = Promise.resolve({
+              action,
+              variant,
+              remember: true,
+              preserveChoices,
+            });
+          }
+        }
+      }
+
+      const hasInstallerChoices = mods.some((m) => m.attributes?.installerChoices?.options != null);
+      if (hasInstallerChoices) {
+        checkRoVRemember.push({
+          id: "preserveChoices",
+          value: true,
+          text: api.translate("Pre-populate installer options from existing mod"),
+        });
+      }
+
+      // When installing as a dependency, check if the existing mod is enabled in a different profile.
+      // If so, create a variant so each profile can have its own version of the mod.
+      if (!choices && isDependency) {
+        const activeSession = getCollectionActiveSession(api.getState());
+        const targetProfileId = currentProfile?.id;
+
+        // Check if any existing mod variant is enabled in a profile OTHER than the target profile
+        const profiles = Object.values(state.persistent.profiles).filter(
+          (prof) => prof.gameId === gameId && prof.id !== targetProfileId,
+        );
+        const isEnabledInOtherProfile = modIds.some((modId) =>
+          profiles.some((prof) => getSafe(prof.modState, [modId, "enabled"], false)),
+        );
+
+        if (isEnabledInOtherProfile && activeSession?.collectionId != null) {
+          // Create a variant so the other profile keeps its version
+          const collectionMod =
+            api.getState().persistent.mods?.[gameId]?.[activeSession.collectionId];
+          const variantNum = installOptions.variantNumber?.toString() ?? "1";
+          const maxLength = MAX_VARIANT_NAME - variantNum.length + 1;
+          const rawName = collectionMod?.attributes?.customFileName?.trim() ?? "";
+          const autoVariant =
+            rawName.length > maxLength
+              ? `${rawName.substring(0, maxLength)}.${variantNum}`
+              : `${rawName}.${variantNum}`;
+          choices = Promise.resolve({
+            action: "variant",
+            variant: autoVariant,
+            remember: false,
+            preserveChoices: true,
+          });
+        } else {
+          // No other profile uses this mod, safe to replace
+          choices = Promise.resolve({
+            action: "replace",
+            remember: false,
+            preserveChoices: true,
+          });
+        }
+      } else {
+        choices = choices ?? Promise.resolve(queryDialog());
+      }
+
+      choices
+        .then(
+          (result: {
+            action: string;
+            variant: string;
+            remember: boolean;
+            preserveChoices?: boolean;
+          }) => {
+            const wasEnabled = (modId: string) => {
+              return currentProfile?.gameId === gameId
+                ? getSafe(currentProfile.modState, [modId, "enabled"], false)
+                : false;
+            };
+
+            const replaceMod = (modId: string) => {
+              const mod = mods.find((m) => m.id === modId);
+              const variant = mod !== undefined ? getSafe(mod.attributes, ["variant"], "") : "";
+              api.events.emit(
+                "remove-mod",
+                gameId,
+                modId,
+                (err) => {
+                  if (err != null) {
+                    const error = unknownToError(err);
+                    reject(error);
+                  } else {
+                    const omittedAttributes = ["version", "fileName", "fileVersion"];
+                    if (!result.preserveChoices) {
+                      omittedAttributes.push("installerChoices");
+                    }
+                    resolve({
+                      id: modId,
+                      variant,
+                      enable: wasEnabled(modId),
+                      attributes: _.omit(mod.attributes, omittedAttributes),
+                      rules: mod.rules,
+                      replaceChoice: "replace",
+                    });
+                  }
+                },
+                { willBeReplaced: true, reason: "profile_replace" },
+              );
+            };
+
+            if (result.action === "variant") {
+              if (result.remember === true) {
+                context?.set?.("replace-or-variant", "variant");
+                context?.set?.("preserve-choices", result.preserveChoices ?? true);
+              }
+              if (currentProfile !== undefined) {
+                const actions = modIds.map((id) => setModEnabled(currentProfile.id, id, false));
+                batchDispatch(api.store.dispatch, actions);
+                // this disable bypasses the mods-enabled event; emit the state change directly.
+                unique(modIds).forEach((id) =>
+                  emitModStateChanged(api, gameId, id, "disabled", "variant_replace"),
+                );
+              }
+              // We want the shortest possible modId paired against this archive
+              //  before adding the variant name to it.
+              const archiveId = mods[0].archiveId;
+              const relevantIds = Object.keys(state.persistent.mods[gameId]).filter(
+                (id) => state.persistent.mods[gameId][id]?.archiveId === archiveId,
+              );
+              const modId = relevantIds.reduce(
+                (prev, iter) => (iter.length < prev.length ? iter : prev),
+                relevantIds[0],
+              );
+              // We just disabled all variants - if any of the variants was enabled previously
+              //  it's safe to assume that the user wants this new variant enabled.
+              const enable = modIds.reduce((prev, iter) => (wasEnabled(iter) ? true : prev), false);
+              resolve({
+                id: modId + "+" + result.variant,
+                variant: result.variant,
+                enable,
+                attributes: result.preserveChoices
+                  ? _.pick(mod.attributes, ["modId", "fileId", "installerChoices"])
+                  : {},
+                rules: [],
+                replaceChoice: "variant",
+              });
+            } else if (result.action === "replace") {
+              if (result.remember === true) {
+                context?.set?.("replace-or-variant", "replace");
+                context?.set?.("preserve-choices", result.preserveChoices ?? true);
+              }
+              if (modIds.length > 1) {
+                queryVariantReplacement().then((res: IDialogResult) => {
+                  if (res.action === "Cancel") {
+                    context?.set?.("canceled", true);
+                    reject(new UserCanceled());
+                  } else {
+                    const selected = Object.keys(res.input).find((iter) => res.input[iter]);
+                    replaceMod(selected);
+                  }
+                });
+              } else {
+                replaceMod(modIds[0]);
+              }
+            } else {
+              if (result.action === "Cancel") {
+                log("error", 'invalid action in "queryUserReplace"', {
+                  action: result.action,
+                });
+              }
+              context?.set?.("canceled", true);
+              reject(new UserCanceled());
+            }
+          },
+        )
+        .then((result) => {
+          if (context !== undefined) {
+            context.set("items-completed", context.get("items-completed", 0) + 1);
+          }
+          return result;
+        })
+        .catch((err) => {
+          return reject(err);
+        });
+    });
+  }
+
+  private getInstaller(
+    fileList: string[],
+    gameId: string,
+    archivePath: string,
+    offsetIn?: number,
+    details?: ITestSupportedDetails,
+  ): Promise<ISupportedInstaller> {
+    const offset = offsetIn || 0;
+    if (offset >= this.mInstallers.length) {
+      return Promise.resolve(undefined);
+    }
+    return Promise.resolve(
+      this.mInstallers[offset].testSupported(fileList, gameId, archivePath, details),
+    ).then((testResult: ISupportedResult) => {
+      if (testResult === undefined) {
+        log("error", "Buggy installer", this.mInstallers[offset].id);
+      }
+      return testResult?.supported === true
+        ? Promise.resolve({
+            installer: this.mInstallers[offset],
+            requiredFiles: testResult.requiredFiles,
+          })
+        : this.getInstaller(fileList, gameId, archivePath, offset + 1, details);
+    });
+  }
+
+  /**
+   * determine the mod name (on disk) from the archive path
+   * TODO: this currently simply uses the archive name which should be fine
+   *   for downloads from nexus but in general we need the path to encode the
+   *   mod, the specific "component" and the version. And then we need to avoid
+   *   collisions.
+   *   Finally, the way I know users they will want to customize this.
+   *
+   * @param {string} archiveName
+   * @param {*} info
+   * @returns
+   */
+  private deriveInstallName(archiveName: string, info: any) {
+    return deriveModInstallName(archiveName, info);
+  }
+
+  private downloadURL(
+    api: IExtensionApi,
+    lookupResult: IModInfoEx,
+    wasCanceled: () => boolean,
+    referenceTag?: string,
+    campaign?: string,
+    fileName?: string,
+    parentCollection?: IParentCollection,
+  ): Promise<string> {
+    const call = (input: string | (() => PromiseLike<string>)): Promise<string> =>
+      input !== undefined && typeof input === "function"
+        ? Promise.resolve(input())
+        : Promise.resolve(input as string);
+
+    let resolvedSource: string;
+    let resolvedReferer: string;
+
+    return call(lookupResult.sourceURI)
+      .then((res) => (resolvedSource = res))
+      .then(() => call(lookupResult.referer).then((res) => (resolvedReferer = res)))
+      .then(
+        () =>
+          new Promise<string>((resolve, reject) => {
+            if (wasCanceled()) {
+              return reject(new UserCanceled(false));
+            } else if (!truthy(resolvedSource)) {
+              return reject(new UserCanceled(true));
+            }
+            const parsedUrl = new URL(resolvedSource);
+            if (campaign !== undefined && parsedUrl.protocol === "nxm:") {
+              parsedUrl.searchParams.set("campaign", campaign);
+            }
+
+            const startDownloadModInfo: any = {
+              game: convertGameIdReverse(knownGames(api.store.getState()), lookupResult.domainName),
+              source: lookupResult.source,
+              name: lookupResult.logicalFileName,
+              referer: resolvedReferer,
+              referenceTag,
+              meta: lookupResult,
+            };
+            if (parentCollection !== undefined) {
+              // Tag the download with the parent collection's id and revision for analytics only.
+              // Kept off `nexus.ids.collectionId` because the install attribute
+              // extractor copies that field onto the installed mod, which would
+              // make a regular mod look like a collection downstream.
+              startDownloadModInfo.nexus = {
+                parentCollectionId: parentCollection.collectionId,
+                parentRevisionId: parentCollection.revisionId,
+              };
+            }
+
+            if (
+              !api.events.emit(
+                "start-download",
+                [parsedUrl],
+                startDownloadModInfo,
+                fileName,
+                async (error, id) => {
+                  if (error == null) {
+                    return resolve(id);
+                  } else if (error instanceof AlreadyDownloaded) {
+                    return resolve(error.downloadId);
+                  } else if (parseError(error).data.kind === "download:is-html") {
+                    // If this is a google drive link and the file exceeds the
+                    //  virus testing limit, Google will return an HTML page asking
+                    //  the user for consent to download the file. Lets try this using
+                    //  the browser extension.
+                    const instructions =
+                      `You are trying to download "${lookupResult.fileName}" from "${resolvedSource}".\n` +
+                      "Depending on the portal, you may be re-directed several times.";
+                    const result: string[] = await api.emitAndAwait(
+                      "browse-for-download",
+                      resolvedSource,
+                      instructions,
+                    );
+                    if (result.length > 0) {
+                      const newLookupRes = {
+                        ...lookupResult,
+                        sourceURI: result[0],
+                      };
+                      const id = await this.downloadURL(
+                        api,
+                        newLookupRes,
+                        wasCanceled,
+                        referenceTag,
+                        campaign,
+                        fileName,
+                        parentCollection,
+                      );
+                      return resolve(id);
+                    } else {
+                      return reject(new UserCanceled());
+                    }
+                  } else {
+                    return reject(error);
+                  }
+                },
+                "never",
+                { allowInstall: false, allowOpenHTML: false },
+              )
+            ) {
+              return reject(new Error("download manager not installed?"));
+            }
+          }),
+      );
+  }
+
+  private downloadMatching(
+    api: IExtensionApi,
+    lookupResult: IModInfoEx,
+    pattern: string,
+    referenceTag: string,
+    wasCanceled: () => boolean,
+    campaign: string,
+    fileName?: string,
+    parentCollection?: IParentCollection,
+  ): Promise<string> {
+    const modId: string = getSafe(lookupResult, ["details", "modId"], undefined);
+    const fileId: string = getSafe(lookupResult, ["details", "fileId"], undefined);
+    if (modId === undefined && fileId === undefined) {
+      return this.downloadURL(
+        api,
+        lookupResult,
+        wasCanceled,
+        referenceTag,
+        fileName,
+        undefined,
+        parentCollection,
+      );
+    }
+
+    const gameId = convertGameIdReverse(
+      knownGames(api.getState()),
+      lookupResult.domainName || lookupResult.gameId,
+    );
+
+    return Promise.resolve(
+      api
+        .emitAndAwait(
+          "start-download-update",
+          lookupResult.source,
+          gameId,
+          modId,
+          fileId,
+          pattern,
+          campaign,
+          referenceTag,
+        )
+        .then((results: Array<{ error: Error; dlId: string }>) => {
+          if (results === undefined || results.length === 0) {
+            return Promise.reject(new NotFound(`source not supported "${lookupResult.source}"`));
+          } else {
+            if (!truthy(results[0])) {
+              return Promise.reject(
+                new ProcessCanceled("Download failed", {
+                  alreadyReported: true,
+                }),
+              );
+            } else {
+              const successResult = results.find((iter) => iter.error == null);
+              if (successResult === undefined) {
+                return Promise.reject(results[0].error);
+              } else {
+                // the resolved download may be one another collection already fetched, so the tag
+                // is added to its set rather than replacing what it carries
+                batchDispatch(
+                  api.store,
+                  appendReferenceTagActions(
+                    results[0].dlId,
+                    api.getState().persistent.downloads.files[results[0].dlId],
+                    referenceTag,
+                  ),
+                );
+                if (parentCollection !== undefined) {
+                  // See downloadURL: kept off nexus.ids.collectionId to avoid the
+                  // install attribute extractor copying it onto the installed mod.
+                  api.store.dispatch(
+                    setDownloadModInfo(
+                      results[0].dlId,
+                      "nexus.parentCollectionId",
+                      parentCollection.collectionId,
+                    ),
+                  );
+                  if (parentCollection.revisionId !== undefined) {
+                    api.store.dispatch(
+                      setDownloadModInfo(
+                        results[0].dlId,
+                        "nexus.parentRevisionId",
+                        parentCollection.revisionId,
+                      ),
+                    );
+                  }
+                }
+                return Promise.resolve(results[0].dlId);
+              }
+            }
+          }
+        }),
+    );
+  }
+
+  private downloadDependencyAsync(
+    requirement: IModReference,
+    api: IExtensionApi,
+    lookupResult: IModInfoEx,
+    wasCanceled: () => boolean,
+    fileName: string,
+    parentCollection?: IParentCollection,
+  ): Promise<string> {
+    const referenceTag = requirement["tag"];
+    const { campaign } = requirement["repo"] ?? {};
+
+    if (
+      requirement.versionMatch !== undefined &&
+      (!requirement.versionMatch.endsWith("+prefer") || lookupResult.archived) &&
+      isFuzzyVersion(requirement.versionMatch)
+    ) {
+      // seems to be a fuzzy matcher so we may have to look for an update
+      return this.downloadMatching(
+        api,
+        lookupResult,
+        requirement.versionMatch,
+        referenceTag,
+        wasCanceled,
+        campaign,
+        fileName,
+        parentCollection,
+      )
+        .catch((err) => {
+          if (err instanceof HTTPError) {
+            // assuming the api failed because the mod had been archive, can still download
+            // the exact file specified by the curator
+            return undefined;
+          } else {
+            return Promise.reject(err);
+          }
+        })
+        .then((res) =>
+          res === undefined
+            ? this.downloadURL(
+                api,
+                lookupResult,
+                wasCanceled,
+                referenceTag,
+                campaign,
+                fileName,
+                parentCollection,
+              )
+            : res,
+        );
+    } else {
+      return this.downloadURL(
+        api,
+        lookupResult,
+        wasCanceled,
+        referenceTag,
+        campaign,
+        fileName,
+        parentCollection,
+      ).catch((err) => {
+        if (err instanceof UserCanceled || err instanceof ProcessCanceled) {
+          return Promise.reject(err);
+        }
+        // with +prefer versions, if the exact version isn't available, an update is acceptable
+        if (requirement.versionMatch?.endsWith?.("+prefer")) {
+          return this.downloadMatching(
+            api,
+            lookupResult,
+            requirement.versionMatch,
+            referenceTag,
+            wasCanceled,
+            campaign,
+            fileName,
+            parentCollection,
+          );
+        } else {
+          return Promise.reject(err);
+        }
+      });
+    }
+  }
+
+  /**
+   * Resolve a bundled (localPath) dependency's archive into a download id. The archive ships inside
+   * the collection's staging folder; if it isn't already registered as a download it is imported via
+   * the "import-downloads" event and tagged with the rule's referenceTag so it matches the member.
+   * Shared by the in-engine doDownload closure and driveSelectedOptionals so both handle bundled
+   * optionals identically. Resolves undefined when the import produced no download.
+   */
+  private importBundledDependencyAsync(
+    api: IExtensionApi,
+    sourceMod: IMod,
+    gameId: string,
+    stagingPath: string,
+    dep: IDependency,
+  ): Promise<string | undefined> {
+    const state = api.getState();
+    const downloads = state.persistent.downloads.files;
+    const downloadPath = downloadPathForGame(state, gameId);
+    const fileName = path.basename(dep.extra.localPath);
+    let targetPath = path.join(downloadPath, fileName);
+    // backwards compatibility: during alpha testing the bundles were 7zipped inside the collection
+    if (path.extname(fileName) !== ".7z") {
+      targetPath += ".7z";
+    }
+    return Promise.resolve(fs.statAsync(targetPath))
+      .then(() => Object.keys(downloads).find((dlId) => downloads[dlId].localPath === fileName))
+      .catch(
+        () =>
+          new Promise<string | undefined>((resolve) => {
+            api.events.emit(
+              "import-downloads",
+              [path.join(stagingPath, sourceMod.installationPath, dep.extra.localPath)],
+              (dlIds: string[]) => {
+                if (dlIds.length > 0) {
+                  batchDispatch(
+                    api.store,
+                    appendReferenceTagActions(
+                      dlIds[0],
+                      api.getState().persistent.downloads.files[dlIds[0]],
+                      dep.reference.tag,
+                    ),
+                  );
+                  resolve(dlIds[0]);
+                } else {
+                  resolve(undefined);
+                }
+              },
+              true,
+            );
+          }),
+      );
+  }
+
+  private applyExtraFromRule(
+    api: IExtensionApi,
+    gameId: string,
+    modId: string,
+    extra?: { [key: string]: any },
+  ) {
+    if (extra === undefined) {
+      return;
+    }
+
+    if (extra.type !== undefined) {
+      api.store.dispatch(setModType(gameId, modId, extra.type));
+    }
+
+    const attributes = {};
+
+    if (extra.name !== undefined) {
+      attributes["customFileName"] = extra.name;
+    }
+
+    if (extra.url !== undefined) {
+      attributes["source"] = "website";
+      attributes["url"] = extra.url;
+    }
+
+    if (extra.category !== undefined) {
+      const categoryId = resolveCategoryId(extra.category, api.getState());
+      if (categoryId !== undefined) {
+        attributes["category"] = categoryId;
+      }
+    }
+
+    if (extra.author !== undefined) {
+      attributes["author"] = extra.author;
+    }
+
+    if (extra.version !== undefined) {
+      attributes["version"] = extra.version;
+    }
+
+    if (extra.patches !== undefined) {
+      attributes["patches"] = extra.patches;
+    }
+
+    if (extra.fileList !== undefined) {
+      attributes["fileList"] = extra.fileList;
+    }
+
+    if (extra.installerChoices !== undefined) {
+      attributes["installerChoices"] = extra.installerChoices;
+    }
+
+    api.store.dispatch(setModAttributes(gameId, modId, attributes));
+  }
+
+  private dropUnfulfilled(
+    api: IExtensionApi,
+    dep: IDependency,
+    gameId: string,
+    sourceModId: string,
+    recommended: boolean,
+  ) {
+    log("info", "ignoring unfulfillable rule", { gameId, sourceModId, dep });
+    if (recommended) {
+      // not ignoring recommended dependencies because what would be the point?
+      return;
+    }
+    const refName = renderModReference(dep.reference, undefined);
+    api.store.dispatch(
+      addModRule(gameId, sourceModId, {
+        type: recommended ? "recommends" : "requires",
+        ..._.pick(dep, ["reference", "extra", "fileList", "installerChoices"]),
+        ignored: true,
+      }),
+    );
+    api.sendNotification({
+      type: "warning",
+      title: "Unfulfillable rule dropped",
+      group: "unfulfillable-rule-dropped",
+      message: refName,
+      actions: [
+        {
+          title: "More",
+          action: () => {
+            const sourceMod = api.getState().persistent.mods[gameId]?.[sourceModId];
+            api.showDialog(
+              "info",
+              "Unfulfillable rule disabled",
+              {
+                text:
+                  'The mod "{{modName}}" has a dependency on "{{refName}}" which ' +
+                  "Vortex is not able to fulfill automatically.\n\n" +
+                  "Very likely Vortex would also not recognize the rule as " +
+                  "fulfilled even if you did install it manually. Therefore the rule " +
+                  "has been disabled.\n\n" +
+                  "Please consult the mod instructions on if and how to solve this dependency.",
+                parameters: {
+                  modName: modName(sourceMod),
+                  refName,
+                },
+              },
+              [{ label: "Close" }],
+            );
+          },
+        },
+      ],
+    });
+  }
+
+  private async doInstallDependenciesPhase(
+    api: IExtensionApi,
+    dependencies: IDependency[],
+    gameId: string,
+    sourceModId: string,
+    recommended: boolean,
+    doDownload: (dep: IDependency) => PromiseLike<{ updatedDep: IDependency; downloadId: string }>,
+    abort: AbortController,
+    silent: boolean,
+  ): Promise<IDependency[]> {
+    let res: IDependency[];
+    try {
+      res = await mapWithConcurrency(
+        dependencies,
+        async (dep: IDependency): Promise<IDependency | undefined> => {
+          if (abort.signal.aborted) {
+            throw new UserCanceled();
+          }
+          const alreadyInstalled = dep.mod !== undefined;
+
+          try {
+            const { updatedDep, downloadId } = await doDownload(dep);
+            const modId = updatedDep.mod?.id;
+            if (modId == null) {
+              // installation has been queued within doDownload, return
+              //  the updated dependency so that the downloads can keep going.
+              return updatedDep;
+            }
+            log("info", "installed as dependency", { modId });
+            if (!alreadyInstalled) {
+              api.store.dispatch(setModAttribute(gameId, modId, "installedAsDependency", true));
+            }
+
+            const state = api.getState();
+            const batchedActions = [];
+            // Enable the mod only for the target profile to avoid affecting other profiles
+            const batchContext = getBatchContext(
+              ["install-dependencies", "install-collections", "install-recommendations"],
+              "",
+            );
+            const targetProfileId =
+              batchContext?.get<string>("profileId") ?? activeProfile(state)?.id;
+            const targetProfile = targetProfileId ? profileById(state, targetProfileId) : undefined;
+
+            // Superseded variants disabled here; the same set is disabled in every affected
+            // profile, so it's computed once for both the dispatch and the analytics emit.
+            const supersededVariantIds = this.checkModVariantsExist(api, gameId, downloadId);
+            if (targetProfile) {
+              // Only modify the target profile - disable other variants and enable this one
+              for (const otherModId of supersededVariantIds) {
+                batchedActions.push(setModEnabled(targetProfile.id, otherModId, false));
+              }
+              batchedActions.push(setModEnabled(targetProfile.id, modId, true));
+            } else {
+              // Fallback: enable in profiles where source mod is enabled (original behavior)
+              const profiles = Object.values(api.getState().persistent.profiles).filter(
+                (prof) => prof.gameId === gameId && prof.modState?.[sourceModId]?.enabled,
+              );
+              profiles.forEach((prof) => {
+                for (const otherModId of supersededVariantIds) {
+                  batchedActions.push(setModEnabled(prof.id, otherModId, false));
+                }
+                batchedActions.push(setModEnabled(prof.id, modId, true));
+              });
+            }
+
+            batchDispatch(api.store, batchedActions);
+
+            // Disabling superseded variants bypasses the mods-enabled event; emit directly.
+            // checkModVariantsExist includes modId itself (it shares the archive) - exclude it,
+            // since it ends up enabled and its enable is covered by mods_installation_completed.
+            supersededVariantIds
+              .filter((id) => id !== modId)
+              .forEach((id) => emitModStateChanged(api, gameId, id, "disabled", "variant_replace"));
+
+            this.applyExtraFromRule(api, gameId, modId, {
+              ...dep.extra,
+              fileList: dep.fileList ?? dep.extra?.fileList,
+              installerChoices: dep.installerChoices,
+              patches: dep.patches ?? dep.extra?.patches,
+            });
+
+            const mods = api.store.getState().persistent.mods[gameId];
+            const updatedDependency = { ...dep, mod: mods[modId] };
+            return updatedDependency;
+          } catch (innerErr: unknown) {
+            // After abort, doDownload's promise can still settle later (e.g.
+            // when a pending download:resolve IPC times out). Drop those so
+            // canceled downloads don't get reported as install failures.
+            if (abort.signal.aborted) {
+              return undefined;
+            }
+            if (dep.extra?.onlyIfFulfillable) {
+              this.dropUnfulfilled(api, dep, gameId, sourceModId, recommended);
+              return undefined;
+            }
+            // Settle the member as failed, addressed by its own session key so it does not depend
+            // on matching the failed download back to a rule. No-ops outside an active session
+            // and over an already-terminal status.
+            const settleMemberFailed = () =>
+              this.writeCollectionSession(
+                dep.reference,
+                { type: "status", status: "failed" },
+                dep.sessionRuleId,
+                sourceModId,
+              );
+            // don't cancel the whole process if one dependency fails to install
+            if (innerErr instanceof ProcessCanceled) {
+              if (
+                typeof innerErr.extraInfo === "object" &&
+                innerErr.extraInfo !== null &&
+                "alreadyReported" in innerErr.extraInfo &&
+                innerErr.extraInfo.alreadyReported
+              ) {
+                return undefined;
+              }
+              settleMemberFailed();
+              const refName = renderModReference(dep.reference, undefined);
+              const message =
+                innerErr.message +
+                "\nA common cause for issues here is that the file may no longer " +
+                "be available. You may want to install a current version of the specified mod " +
+                "and update or remove the dependency for the old one.";
+              this.showDependencyError(
+                api,
+                sourceModId,
+                "Failed to install dependency",
+                message,
+                refName,
+                {
+                  allowReport: false,
+                  silent,
+                },
+              );
+              return undefined;
+            }
+            if (parseError(innerErr).data.kind === "download:is-html") {
+              settleMemberFailed();
+              const refName = renderModReference(dep.reference, undefined);
+              const message =
+                "The direct download URL for this file is not valid or didn't lead to a file. " +
+                "This may be a setup error in the dependency or the file has been moved.";
+              this.showDependencyError(
+                api,
+                sourceModId,
+                "Failed to install dependency",
+                message,
+                refName,
+                {
+                  allowReport: false,
+                  silent,
+                },
+              );
+              return undefined;
+            }
+            if (innerErr instanceof NotFound) {
+              settleMemberFailed();
+              const refName = renderModReference(dep.reference, undefined);
+              this.showDependencyError(
+                api,
+                sourceModId,
+                "Failed to install dependency",
+                innerErr,
+                refName,
+                {
+                  allowReport: false,
+                  silent,
+                },
+              );
+              return undefined;
+            }
+            if (innerErr instanceof UserCanceled) {
+              if (innerErr.skipped) {
+                return undefined;
+              } else {
+                abort.abort();
+                throw innerErr;
+              }
+            }
+            settleMemberFailed();
+            const err = unknownToError(innerErr);
+            const errCode = getErrorCode(err);
+            const refName =
+              dep.reference !== undefined
+                ? renderModReference(dep.reference, undefined)
+                : "undefined";
+            if (errCode === "Z_BUF_ERROR") {
+              this.showDependencyError(
+                api,
+                sourceModId,
+                "Download failed",
+                "The download ended prematurely or was corrupted. You'll have to restart it.",
+                refName,
+                {
+                  allowReport: false,
+                  silent,
+                },
+              );
+            } else if (
+              [403, 404, 410].includes((innerErr as { statusCode?: number })?.statusCode)
+            ) {
+              const message = `${err.message}\n\nThis error is usually caused by an invalid request, maybe you followed a link that has expired or you lack permission to access it.`;
+              this.showDependencyError(
+                api,
+                sourceModId,
+                "Failed to install dependency",
+                message,
+                refName,
+                {
+                  allowReport: false,
+                  silent,
+                },
+              );
+            } else if (errCode === "ERR_INVALID_PROTOCOL") {
+              const msg = err.message.replace(/ Expected .*/, "");
+              const message =
+                "The URL protocol used in the dependency is not supported, " +
+                "you may be missing an extension required to handle it:\n" +
+                msg;
+              this.showDependencyError(
+                api,
+                sourceModId,
+                "Failed to install dependency",
+                message,
+                refName,
+                {
+                  allowReport: false,
+                  silent,
+                },
+              );
+            } else if (err.name === "HTTPError") {
+              (err as { attachLogOnReport?: boolean }).attachLogOnReport = true;
+              this.showDependencyError(
+                api,
+                sourceModId,
+                "Failed to install dependency",
+                err,
+                refName,
+                {
+                  allowReport: true,
+                  silent,
+                },
+              );
+            } else {
+              const pretty = prettifyNodeErrorMessage(err);
+              this.showDependencyError(
+                api,
+                sourceModId,
+                "Failed to install dependency",
+                err,
+                refName,
+                {
+                  allowReport: pretty.allowReport,
+                  silent,
+                },
+              );
+            }
+            return undefined;
+          }
+        },
+        10,
+        abort.signal,
+      );
+    } catch (outerErr: unknown) {
+      if (outerErr instanceof ProcessCanceled) {
+        // This indicates an error in the dependency rules so it's
+        // adequate to show an error but not as a bug in Vortex
+
+        // Clean up phase state and dependency tracking when process is canceled
+        delete this.mDependencyInstalls[sourceModId];
+        this.cleanupPendingInstalls(sourceModId, true);
+
+        api.showErrorNotification("Failed to install dependencies", outerErr.message, {
+          allowReport: false,
+        });
+        return [];
+      }
+      if (outerErr instanceof UserCanceled) {
+        log("info", "canceled out of dependency install");
+        // Cancel all remaining operations when user cancels
+        abort.abort();
+
+        // Clean up phase state and dependency tracking when canceled
+        delete this.mDependencyInstalls[sourceModId];
+        this.cleanupPendingInstalls(sourceModId, true);
+
+        api.sendNotification({
+          id: "dependency-installation-canceled",
+          type: "info",
+          message: "Installation of dependencies canceled",
+        });
+        return [];
+      }
+      api.showErrorNotification("Failed to install dependencies", outerErr);
+      return [];
+    } finally {
+      // Process any pending installations that were queued during dependency installation
+      const phaseState = this.mPhaseTracker.get(sourceModId);
+      if (phaseState && phaseState.allowedPhase !== undefined) {
+        this.startPendingForPhase(sourceModId, phaseState.allowedPhase);
+
+        // Scan for any finished downloads that haven't been queued yet
+        // This handles downloads that were imported/finished before the collection started installing
+        const state = api.getState();
+        const downloads = state.persistent.downloads.files;
+        let foundCount = 0;
+        dependencies.forEach((dep: IDependency) => {
+          const downloadId = getReadyDownloadId(downloads, dep.reference, (id) =>
+            this.hasActiveOrPendingInstallation(sourceModId, id),
+          );
+
+          if (downloadId) {
+            const depPhase = dep.phase ?? 0;
+            // Only process downloads for the current allowed phase or earlier
+            if (depPhase <= phaseState.allowedPhase) {
+              this.handleDownloadFinished(api, downloadId, sourceModId);
+              foundCount++;
+            }
+          }
+        });
+        this.maybeAdvancePhase(sourceModId, api);
+      }
+
+      log("info", "done installing dependencies");
+    }
+
+    return res.filter((dep) => dep !== undefined);
+  }
+
+  private async doInstallDependencies(
+    api: IExtensionApi,
+    gameId: string,
+    sourceModId: string,
+    dependencies: IDependency[],
+    recommended: boolean,
+    silent: boolean,
+  ): Promise<IDependency[]> {
+    const state: IState = api.getState();
+    let downloads: { [id: string]: IDownload } = state.persistent.downloads.files;
+
+    const sourceMod = state.persistent.mods[gameId][sourceModId];
+    const stagingPath = installPathForGame(state, gameId);
+
+    if (sourceMod?.installationPath === undefined) {
+      return Promise.resolve([]);
+    }
+
+    // When installing a collection, tag each dependency download with the parent
+    // collection id and revision so the Mixpanel mod download events can carry them.
+    const parentCollection: IParentCollection | undefined =
+      sourceMod.type === "collection" && sourceMod.attributes?.collectionId !== undefined
+        ? {
+            collectionId: String(sourceMod.attributes.collectionId),
+            revisionId:
+              sourceMod.attributes.revisionId !== undefined
+                ? String(sourceMod.attributes.revisionId)
+                : undefined,
+          }
+        : undefined;
+
+    let queuedDownloads: IModReference[] = [];
+
+    const clearQueued = () => {
+      const downloadsNow = api.getState().persistent.downloads.files;
+      // cancel in reverse order so that canceling a running download doesn't
+      // trigger a previously pending download to start just to then be canceled too.
+      // Obviously this is probably not a robust way of achieving that but what is?
+      queuedDownloads.reverse().forEach((ref) => {
+        const dlId = findDownloadByRef(ref, downloadsNow);
+        log("info", "cancel dependency dl", {
+          name: renderModReference(ref),
+          dlId,
+        });
+        if (dlId !== undefined) {
+          api.events.emit("pause-download", dlId);
+        } else {
+          api.events.emit("intercept-download", ref.tag);
+        }
+      });
+      queuedDownloads = [];
+
+      delete this.mDependencyInstalls[sourceModId];
+      this.cleanupPendingInstalls(sourceModId, true);
+    };
+
+    const queueDownload = (dep: IDependency): Promise<string> => {
+      // mark the dependency as downloading on the collection session (no-op outside an
+      // active collection session). Bundled mods are imported, not queued here, so they
+      // are naturally excluded - matching the old driver's bundled skip.
+      this.writeCollectionSession(
+        dep.reference,
+        { type: "status", status: "downloading" },
+        dep.sessionRuleId,
+        sourceModId,
+      );
+      if (dep.reference.tag !== undefined) {
+        queuedDownloads.push(dep.reference);
+      }
+      return abort.signal.aborted
+        ? Promise.reject(new UserCanceled(false))
+        : reconcileOrphanedArchive(api, gameId, dep.extra?.fileName)
+            .then(() =>
+              this.downloadDependencyAsync(
+                dep.reference,
+                api,
+                dep.lookupResults[0].value,
+                () => abort.signal.aborted,
+                dep.extra?.fileName,
+                parentCollection,
+              ),
+            )
+            .then((dlId) => {
+              const idx = queuedDownloads.indexOf(dep.reference);
+              queuedDownloads.splice(idx, 1);
+              return dlId;
+            })
+            .catch((err: unknown) => {
+              const idx = queuedDownloads.indexOf(dep.reference);
+              queuedDownloads.splice(idx, 1);
+
+              const errMsg = unknownToError(err).message;
+              const errCode = getErrorCode(err);
+
+              // Check if this is a network error that might have caused the download to be paused
+              const isNetworkError =
+                errMsg?.includes("socket hang up") ||
+                errMsg?.includes("ECONNRESET") ||
+                errMsg?.includes("ETIMEDOUT") ||
+                errCode === "ECONNRESET" ||
+                errCode === "ETIMEDOUT";
+
+              // Check if this is a "File already downloaded" error (for cases where we get a generic error message)
+              const isAlreadyDownloaded =
+                err instanceof AlreadyDownloaded ||
+                errMsg?.includes("File already downloaded") ||
+                errMsg?.includes("already downloaded");
+
+              if (isAlreadyDownloaded) {
+                if (err instanceof AlreadyDownloaded && err.downloadId !== undefined) {
+                  log("info", "File already downloaded, using existing download ID", {
+                    downloadId: err.downloadId,
+                  });
+                  return Promise.resolve(err.downloadId);
+                }
+                // If file is already downloaded, check if we can find the download
+                // Try to find the download by filename
+                const alreadyDlErr = err instanceof AlreadyDownloaded ? err : undefined;
+                const currentDownloads = api.getState().persistent.downloads.files;
+                const downloadId = Object.keys(currentDownloads).find(
+                  (dlId) =>
+                    currentDownloads[dlId].localPath === alreadyDlErr?.fileName ||
+                    downloadHasReferenceTag(currentDownloads[dlId], dep.reference?.tag),
+                );
+
+                if (downloadId) {
+                  log("info", "Download already completed, using existing download", {
+                    downloadId,
+                  });
+                  return Promise.resolve(downloadId);
+                } else {
+                  // The download file exists but we can't find its record - refresh downloads and try again
+                  return new Promise((resolve) => {
+                    api.events.emit("refresh-downloads", gameId, () => {
+                      const currentDownloads = api.getState().persistent.downloads.files;
+                      const downloadId = Object.keys(currentDownloads).find(
+                        (dlId) => currentDownloads[dlId].localPath === alreadyDlErr?.fileName,
+                      );
+                      return downloadId ? resolve(downloadId) : resolve(null);
+                    });
+                  });
+                }
+              }
+
+              if (isNetworkError) {
+                // For network errors, check if the download ended up in paused state
+                // and if so, try to resume it through the concurrent queue
+                setTimeout(() => {
+                  const currentDownloads = api.getState().persistent.downloads.files;
+                  const downloadId = Object.keys(currentDownloads).find((dlId) =>
+                    downloadHasReferenceTag(currentDownloads[dlId], dep.reference?.tag),
+                  );
+
+                  if (downloadId && currentDownloads[downloadId].state === "paused") {
+                    log("info", "Network error resulted in paused download, will attempt resume", {
+                      downloadId,
+                      error: errMsg,
+                    });
+                    // The download will be caught by the paused download check in doDownload
+                    return;
+                  }
+                }, 1000);
+              }
+
+              return Promise.reject(err);
+            });
+    };
+
+    const resumeDownload = (dep: IDependency): Promise<string> =>
+      abort.signal.aborted
+        ? Promise.reject(new UserCanceled(false))
+        : new Promise((resolve, reject) => {
+            // First check current download state to avoid unnecessary resume attempts
+            const currentDownloads = api.getState().persistent.downloads.files;
+            let resolvedId: string = dep.download;
+            let currentDownload = currentDownloads[resolvedId];
+
+            if (!currentDownload) {
+              // Try to resolve the download by referenceTag if possible
+              const tag = dep.reference?.tag;
+              if (truthy(tag)) {
+                const foundId = Object.keys(currentDownloads).find((dlId) =>
+                  downloadHasReferenceTag(currentDownloads[dlId], tag),
+                );
+                if (foundId) {
+                  log("info", "Resolved missing download id from referenceTag", {
+                    from: dep.download,
+                    to: foundId,
+                    tag,
+                  });
+                  resolvedId = foundId;
+                  currentDownload = currentDownloads[resolvedId];
+                }
+              }
+            }
+
+            if (!currentDownload) {
+              const readableRef = renderModReference(dep.reference);
+              log("warn", "Download not found when trying to resume", {
+                intendedId: dep.download,
+                ref: readableRef,
+              });
+              return reject(new NotFound(`download for ${readableRef}`));
+            }
+
+            if (currentDownload.state === "finished") {
+              log("info", "Download already finished, no need to resume", {
+                downloadId: resolvedId,
+              });
+              return resolve(resolvedId);
+            }
+
+            if (currentDownload.state !== "paused") {
+              log("info", "Download not in paused state", {
+                downloadId: resolvedId,
+                state: currentDownload.state,
+              });
+              return resolve(resolvedId);
+            }
+
+            log("info", "Resuming paused download", {
+              downloadId: resolvedId,
+              tag: dep.reference?.tag,
+            });
+
+            api.events.emit(
+              "resume-download",
+              resolvedId,
+              (err) => {
+                if (err != null) {
+                  // Handle "File already downloaded" error gracefully
+                  if (
+                    err.message?.includes("File already downloaded") ||
+                    err.message?.includes("already downloaded")
+                  ) {
+                    log("info", "Download already completed during resume attempt", {
+                      downloadId: resolvedId,
+                    });
+                    return resolve(resolvedId);
+                  }
+                  reject(err);
+                } else {
+                  resolve(resolvedId);
+                }
+              },
+              { allowInstall: false },
+            );
+          });
+
+    const installDownload = (dep: IDependency, downloadId: string): Promise<string> => {
+      return new Promise<string>((resolve, reject) => {
+        return this.mDependencyPipelineLimit.do(async () => {
+          return abort.signal.aborted
+            ? reject(new UserCanceled(false))
+            : this.withInstructions(
+                api,
+                modName(sourceMod),
+                renderModReference(dep.reference),
+                dep.reference?.tag ?? downloadId,
+                dep.extra?.["instructions"],
+                recommended,
+                () =>
+                  this.installModAsync(
+                    dep.reference,
+                    api,
+                    downloadId,
+                    { choices: dep.installerChoices, patches: dep.patches },
+                    dep.fileList,
+                    gameId,
+                    silent,
+                    sourceModId,
+                  ),
+              )
+                .then((res) => resolve(res))
+                .catch((err) => {
+                  if (err instanceof UserCanceled) {
+                    err.skipped = true;
+                  }
+                  return reject(err);
+                });
+        });
+      });
+    };
+
+    const doDownload = (
+      dep: IDependency,
+    ): Promise<{ updatedDep: IDependency; downloadId: string }> => {
+      let dlPromise = Promise.resolve(dep.download);
+      // Alternate between ProcessCanceled and NotFound for failed download URL
+      // if (Math.random() < 0.5) {
+      //   return Promise.reject(new ProcessCanceled('Failed to determine download url'));
+      // } else {
+      //   return Promise.reject(new NotFound('Failed to determine download url'));
+      // }
+      if (dep.download === undefined || downloads[dep.download] === undefined) {
+        if (dep.extra?.localPath !== undefined) {
+          // the archive is shipped with the mod that has the dependency
+          dlPromise = this.importBundledDependencyAsync(api, sourceMod, gameId, stagingPath, dep);
+        } else {
+          // Always allow downloads to be queued - installations will be deferred if needed
+          dlPromise =
+            (dep.lookupResults[0]?.value?.sourceURI ?? "") === ""
+              ? Promise.reject(new ProcessCanceled("Failed to determine download url"))
+              : queueDownload(dep);
+        }
+      } else if (dep.download == null) {
+        dlPromise = Promise.reject(new ProcessCanceled("Failed to determine download url"));
+      } else if (downloads[dep.download]?.state === "paused") {
+        // Get fresh state to ensure accurate paused detection
+        const freshDownloads = api.getState().persistent.downloads.files;
+        if (freshDownloads[dep.download]?.state === "paused") {
+          dlPromise = resumeDownload(dep);
+        } else {
+          dlPromise = Promise.resolve(dep.download);
+        }
+      }
+      return dlPromise
+        .catch((err: unknown) => {
+          if (err instanceof UserCanceled) {
+            if ((err as UserCanceled & { skipped?: boolean }).skipped) {
+              this.handleDownloadSkipped(api, sourceModId, dep);
+            }
+            return Promise.reject(err);
+          }
+          if (err instanceof AlreadyDownloaded) {
+            if (err.downloadId !== undefined) {
+              return Promise.resolve(err.downloadId);
+            } else {
+              const downloadId = Object.keys(downloads).find(
+                (dlId) => downloads[dlId].localPath === err.fileName,
+              );
+              if (downloadId !== undefined) {
+                return Promise.resolve(downloadId);
+              }
+            }
+            return Promise.reject(
+              new NotFound(`download for ${renderModReference(dep.reference)}`),
+            );
+          }
+          return Promise.reject(err);
+        })
+        .then((downloadId: string) => {
+          // Get fresh state before checking if download is paused
+          const freshDownloads = api.getState().persistent.downloads.files;
+          if (downloadId !== undefined && freshDownloads[downloadId]?.state === "paused") {
+            return resumeDownload(dep);
+          } else {
+            return Promise.resolve(downloadId);
+          }
+        })
+        .then((downloadId: string) => {
+          downloads = api.getState().persistent.downloads.files;
+
+          if (downloadId === undefined || downloads[downloadId] === undefined) {
+            return Promise.reject(
+              new NotFound(`download for ${renderModReference(dep.reference)}`),
+            );
+          }
+          if (downloads[downloadId].state !== "finished") {
+            // download not actually finished, may be paused
+            return Promise.reject(new UserCanceled(true));
+          }
+
+          if (
+            dep.reference.tag !== undefined &&
+            !downloadHasReferenceTag(downloads[downloadId], dep.reference.tag)
+          ) {
+            // the archive satisfies this rule too: record this rule's tag alongside the tags it
+            // carries. The rule and dep.reference stay as they are - the session is keyed from
+            // them, and other collections resolve the archive by their own tag.
+            batchDispatch(
+              api.store,
+              appendReferenceTagActions(downloadId, downloads[downloadId], dep.reference.tag),
+            );
+            this.mPhaseTracker
+              .get(sourceModId)
+              ?.downloadLookupCache?.byTag?.set(dep.reference.tag, downloadId);
+          } else {
+            log("info", "downloaded as dependency", {
+              dependency: dep.reference.logicalFileName,
+              downloadId,
+            });
+          }
+
+          // Mods with patches are always reinstalled as variants so the
+          // correct diffs are applied to clean files. Clear any existing mod
+          // match so they flow through to queueInstallation regardless of
+          // whether the tag matched above.
+          if (dep.patches != null && Object.keys(dep.patches).length > 0) {
+            dep.mod = undefined;
+          }
+
+          return dep.mod == null
+            ? Promise.resolve()
+                .then(() => {
+                  // Queue installation for already-finished downloads that aren't installed yet.
+                  // Without this, mods whose archives already exist (e.g. from a prior cancelled
+                  // install) would never be queued, because the did-finish-download event only
+                  // fires for NEW downloads. queueInstallation deduplicates internally.
+                  //
+                  // Deliberately does NOT write the "downloaded" status. That status is already
+                  // owned elsewhere - handleDownloadFinished writes it for event-driven (fresh /
+                  // resumed) downloads, and the session reconstruction (reconstructSessionMods) seeds
+                  // it for already-present and bundled archives at install start. Writing it here
+                  // as well duplicated it and, arriving after the installer had already advanced
+                  // the member to "installing", regressed the row back to "downloaded" (it read
+                  // "Waiting to install" for the whole install).
+                  const freshDownloads = api.getState().persistent.downloads.files;
+                  if (
+                    downloadId &&
+                    freshDownloads[downloadId]?.state === "finished" &&
+                    freshDownloads[downloadId]?.size > 0
+                  ) {
+                    this.queueInstallation(
+                      api,
+                      dep,
+                      downloadId,
+                      gameId,
+                      sourceModId,
+                      recommended,
+                      dep.phase ?? 0,
+                    );
+                  }
+                  return Promise.resolve({ updatedDep: dep, downloadId });
+                })
+                .catch((err) => {
+                  if (dep["reresolveDownloadHint"] === undefined) {
+                    return Promise.reject(err);
+                  }
+                  const newState = api.getState();
+                  const download = newState.persistent.downloads.files[downloadId];
+
+                  let removeProm = Promise.resolve();
+                  if (download !== undefined) {
+                    // Convert download game ID from Nexus domain ID to internal ID for path resolution
+                    const games = knownGames(newState);
+                    const convertedGameId = convertGameIdReverse(games, download.game[0]);
+                    const pathGameId = convertedGameId || download.game[0];
+
+                    const fullPath: string = path.join(
+                      downloadPathForGame(newState, pathGameId),
+                      download.localPath,
+                    );
+                    removeProm = Promise.resolve(fs.removeAsync(fullPath));
+                  }
+
+                  return removeProm
+                    .then(() => dep["reresolveDownloadHint"]())
+                    .then(() => doDownload(dep));
+                })
+            : Promise.resolve({ updatedDep: dep, downloadId });
+        });
+    };
+
+    const phases: { [phase: number]: IDependency[] } = {};
+
+    dependencies.forEach((dep) => setdefault(phases, dep.phase ?? 0, []).push(dep));
+
+    // Initialize phase state immediately after determining what phases we have
+    if (dependencies.length > 0) {
+      this.mPhaseTracker.ensure(sourceModId);
+      const phaseState = this.mPhaseTracker.get(sourceModId);
+
+      const phaseNumbers = Object.keys(phases)
+        .map((p) => parseInt(p, 10))
+        .sort((a, b) => a - b);
+      const lowestPhase = phaseNumbers[0];
+
+      // Session ids are collectionId_profileId, resolved the same way the completion poll
+      // resolves them.
+      const phaseBatchContext = getBatchContext(
+        ["install-dependencies", "install-recommendations"],
+        "",
+      );
+      const phaseProfileId =
+        phaseBatchContext?.get<string>("profileId") ?? activeProfile(api.getState())?.id;
+      // The ACTIVE session only: phase completion below reads it, and a finished install of this
+      // collection carries the same id in history, where every phase reads complete.
+      const collectionSession = getCollectionActiveSession(api.getState());
+      const activeCollectionSession =
+        collectionSession?.sessionId === generateCollectionSessionId(sourceModId, phaseProfileId)
+          ? collectionSession
+          : undefined;
+
+      if (activeCollectionSession) {
+        // Determine the highest completed phase from the collection session
+        const mods = activeCollectionSession.mods || {};
+        const allMods = Object.values(mods);
+
+        // Find all phases that exist in the collection
+        const allPhases = new Set<number>();
+        allMods.forEach((mod: any) => {
+          allPhases.add(mod.phase ?? 0);
+        });
+
+        // The highest phase whose COMPLETE PREFIX is unbroken.
+        // A failed required member breaks the prefix and its retry runs at its own phase.
+        let highestCompletedPhase = -1;
+        for (const phase of Array.from(allPhases).sort((a, b) => a - b)) {
+          if (!isCollectionPhaseSettledSuccessfully(api.getState(), phase)) {
+            break;
+          }
+          highestCompletedPhase = phase;
+        }
+
+        // Start at the next real phase after the highest completed one (never +1, which would step
+        // into a non-existent phase and overshoot the OPTIONAL_PHASE sentinel), or the lowest phase
+        // in the current dependencies if that is higher.
+        const rules = api.getState().persistent.mods[gameId]?.[sourceModId]?.rules ?? [];
+        const nextPhaseAfterCompleted =
+          this.mPhaseTracker.phaseSet(sourceModId, rules).find((p) => p > highestCompletedPhase) ??
+          highestCompletedPhase;
+        const effectiveStartPhase = Math.max(lowestPhase, nextPhaseAfterCompleted);
+
+        if (
+          phaseState.allowedPhase === undefined ||
+          phaseState.allowedPhase < effectiveStartPhase
+        ) {
+          phaseState.allowedPhase = effectiveStartPhase;
+          // Mark the collection's real earlier phases finished (the tracker iterates the actual
+          // phase set, never integer 0..effectiveStartPhase, so the sentinel never enumerates).
+          this.mPhaseTracker.markPhasesBeforeFinished(sourceModId, effectiveStartPhase, rules);
+        }
+      } else if (phaseState.allowedPhase === undefined) {
+        // No active session, use the lowest phase from dependencies
+        phaseState.allowedPhase = lowestPhase;
+        const rules = api.getState().persistent.mods[gameId]?.[sourceModId]?.rules ?? [];
+        this.mPhaseTracker.markPhasesBeforeFinished(sourceModId, lowestPhase, rules);
+        log("info", "Set initial allowed phase", {
+          sourceModId,
+          allowedPhase: lowestPhase,
+        });
+      }
+
+      // Mark all phases as having downloads (they will be processed)
+      phaseNumbers.forEach((phase) => {
+        phaseState.downloadsFinished.add(phase);
+      });
+    }
+
+    const abort = new AbortController();
+
+    abort.signal.onabort = () => clearQueued();
+
+    const phaseList = Object.values(phases);
+
+    this.mDependencyInstalls[sourceModId] = () => {
+      abort.abort();
+    };
+
+    let res: IDependency[] = [];
+    try {
+      for (const depList of phaseList) {
+        if (depList.length === 0) {
+          continue;
+        }
+        const updated = await this.doInstallDependenciesPhase(
+          api,
+          depList,
+          gameId,
+          sourceModId,
+          recommended,
+          doDownload,
+          abort,
+          silent,
+        );
+        // Mark this phase's downloads as finished to allow its installers to run,
+        // but do not wait for installations to complete before proceeding to next phase.
+        const phaseNum = depList[0]?.phase ?? 0;
+        this.markPhaseDownloadsFinished(sourceModId, phaseNum, api);
+        res = res.concat(updated);
+      }
+
+      await this.pollAllPhasesComplete(api, sourceModId);
+    } finally {
+      this.mPhaseTracker.delete(sourceModId);
+    }
+
+    return res;
+  }
+
+  private updateModRule(
+    api: IExtensionApi,
+    gameId: string,
+    sourceModId: string,
+    dep: IDependency,
+    reference: IModReference,
+    recommended: boolean,
+  ): IModRule | undefined {
+    const state: IState = api.store.getState();
+    const rules: IModRule[] = getSafe(state.persistent.mods, [gameId, sourceModId, "rules"], []);
+    const oldRule = rules.find((iter) => referenceEqual(iter.reference, dep.reference));
+
+    const type = recommended ? "recommends" : "requires";
+
+    if (oldRule === undefined) {
+      return undefined;
+    }
+
+    if (oldRule.type === type && referenceEqual(oldRule.reference, reference)) {
+      return oldRule;
+    }
+
+    const updatedRule: IModRule = { ...oldRule, type, reference };
+
+    api.store.dispatch(removeModRule(gameId, sourceModId, oldRule));
+    api.store.dispatch(addModRule(gameId, sourceModId, updatedRule));
+    return updatedRule;
+  }
+
+  private updateRules(
+    api: IExtensionApi,
+    gameId: string,
+    sourceModId: string,
+    dependencies: IDependency[],
+    recommended: boolean,
+  ): Promise<void> {
+    dependencies.forEach((dep) => {
+      const updatedRef: IModReference = { ...dep.reference };
+      updatedRef.idHint = dep.mod?.id;
+      this.updateModRule(api, gameId, sourceModId, dep, updatedRef, recommended);
+    });
+    return Promise.resolve();
+  }
+
+  private doInstallDependencyList(
+    api: IExtensionApi,
+    profile: IProfile,
+    gameId: string,
+    modId: string,
+    name: string,
+    dependencies: IDependency[],
+    silent: boolean,
+  ) {
+    if (dependencies.length === 0) {
+      return Promise.resolve();
+    }
+
+    interface IDependencySplit {
+      success: IDependency[];
+      existing: IDependency[];
+      error: IDependencyError[];
+    }
+
+    // get updated mod state
+    const modState =
+      profile !== undefined ? (api.getState().persistent.profiles[profile.id]?.modState ?? {}) : {};
+
+    const mods = api.getState().persistent.mods?.[gameId] ?? {};
+
+    const { success, existing, error } = dependencies.reduce(
+      (prev: IDependencySplit, dep: Dependency) => {
+        if (dep["error"] !== undefined) {
+          prev.error.push(dep as IDependencyError);
+        } else {
+          const { mod, reference } = dep as IDependency;
+          const modReference: IModReference = {
+            ...(dep as IDependency),
+            ...reference,
+          };
+          if (
+            mod === undefined ||
+            !(modState[mod.id]?.enabled ?? false) ||
+            (!!mods[mod.id] && testModReference(mods[mod.id], modReference) !== true)
+          ) {
+            prev.success.push(dep as IDependency);
+          } else {
+            prev.existing.push(dep as IDependency);
+          }
+        }
+        return prev;
+      },
+      { success: [], existing: [], error: [] },
+    );
+
+    log("debug", "determined unfulfilled dependencies", {
+      count: success.length,
+      errors: error.length,
+    });
+
+    if (silent && error.length === 0) {
+      return this.doInstallDependencies(api, gameId, modId, success, false, silent).then(
+        (updated) => this.updateRules(api, gameId, modId, [].concat(existing, updated), false),
+      );
+    }
+
+    if (success.length === 0) {
+      return Promise.resolve();
+    }
+
+    const context = getBatchContext("install-dependencies", "", true);
+
+    return this.showMemoDialog(api, context, name, success, error).then((result) => {
+      if (result.action === "Install") {
+        return this.doInstallDependencies(api, gameId, modId, success, false, silent).then(
+          (updated) => this.updateRules(api, gameId, modId, [].concat(existing, updated), false),
+        );
+      } else {
+        return Promise.resolve();
+      }
+    });
+  }
+
+  private showMemoDialog(
+    api: IExtensionApi,
+    context: IBatchContext,
+    name: string,
+    success: IDependency[],
+    error: IDependencyError[],
+  ): Promise<IDialogResult> {
+    const remember = context.get<boolean>("remember", null);
+
+    if (truthy(remember)) {
+      return Promise.resolve<IDialogResult>({
+        action: remember ? "Install" : "Don't Install",
+        input: {},
+      });
+    } else {
+      const downloads = api.getState().persistent.downloads.files;
+
+      const t = api.translate;
+
+      const requiredInstalls = success.filter((dep) => dep.mod === undefined);
+      const requiredDownloads = requiredInstalls.filter(
+        (dep) =>
+          dep.download === undefined ||
+          [undefined, "paused"].includes(downloads[dep.download]?.state),
+      );
+      const requireEnableOnly = success.filter((dep) => dep.mod !== undefined);
+
+      let bbcode = "";
+
+      let list: string = "";
+      if (requiredDownloads.length > 0) {
+        list +=
+          `[h4]${t("Require Download & Install")}[/h4]<br/>[list]` +
+          requiredDownloads.map((mod) => "[*]" + renderModReference(mod.reference)).join("\n") +
+          "[/list]<br/>";
+      }
+      const requireInstallOnly = requiredInstalls.filter((mod) => !requiredDownloads.includes(mod));
+      if (requireInstallOnly.length > 0) {
+        list +=
+          `[h4]${t("Require Install")}[/h4]<br/>[list]` +
+          requireInstallOnly.map((mod) => "[*]" + renderModReference(mod.reference)).join("\n") +
+          "[/list]<br/>";
+      }
+      if (requireEnableOnly.length > 0) {
+        list +=
+          `[h4]${t("Will be enabled")}[/h4]<br/>[list]` +
+          requireEnableOnly.map((mod) => "[*]" + modName(mod.mod)).join("\n") +
+          "[/list]";
+      }
+
+      if (success.length > 0) {
+        bbcode += t("{{modName}} requires the following dependencies:", {
+          replace: { modName: name },
+        });
+      }
+
+      if (error.length > 0) {
+        bbcode +=
+          "[color=red]" +
+          t("{{modName}} has unsolved dependencies that could not be found automatically. ", {
+            replace: { modName: name },
+          }) +
+          t("Please install them manually") +
+          ":<br/>" +
+          "{{errors}}" +
+          "[/color]";
+      }
+
+      if (list.length > 0) {
+        bbcode += "<br/>" + list;
+      }
+
+      const actions =
+        success.length > 0
+          ? [{ label: "Don't install" }, { label: "Install" }]
+          : [{ label: "Close" }];
+
+      return Promise.resolve(
+        api.store
+          .dispatch(
+            showDialog(
+              "question",
+              t("Install Dependencies"),
+              {
+                bbcode,
+                parameters: {
+                  modName: name,
+                  count: success.length,
+                  instCount: requiredInstalls.length,
+                  dlCount: requiredDownloads.length,
+                  errors: error.map((err) => err.error).join("<br/>"),
+                },
+                checkboxes: [
+                  {
+                    id: "remember",
+                    text: "Do this for all dependencies",
+                    value: false,
+                  },
+                ],
+                options: {
+                  translated: true,
+                },
+              },
+              actions,
+            ),
+          )
+          .then((result) => {
+            if (result.input["remember"]) {
+              context.set("remember", result.action === "Install");
+            }
+            return result;
+          }),
+      );
+    }
+  }
+
+  private addToPhaseStateCache = (api: IExtensionApi) => {
+    return (download: IDownload) => {
+      const activeCollectionSession = getCollectionActiveSession(api.getState());
+      if (activeCollectionSession == null) {
+        return;
+      }
+      this.mPhaseTracker.ensure(activeCollectionSession.collectionId);
+      const phaseState = this.mPhaseTracker.get(activeCollectionSession.collectionId);
+      if (phaseState === undefined) {
+        return;
+      }
+      const cache = phaseState?.downloadLookupCache;
+      if (cache === undefined) {
+        return;
+      }
+      for (const tag of downloadReferenceTags(download)) {
+        cache.byTag.set(tag, download.id);
+      }
+      if (download.fileMD5 !== undefined) {
+        cache.byMd5.set(download.fileMD5, download.id);
+      }
+    };
+  };
+
+  private installDependenciesImpl(
+    api: IExtensionApi,
+    profile: IProfile,
+    gameId: string,
+    modId: string,
+    name: string,
+    rules: IModRule[],
+    installPath: string,
+    silent: boolean,
+  ): Promise<void> {
+    const filteredRules = filterDependencyRules(rules);
+
+    if (filteredRules.length === 0) {
+      api.events.emit("did-install-dependencies", gameId, modId, false);
+      return Promise.resolve();
+    }
+
+    const notificationId = `${installPath}_activity`;
+
+    if (!checkAndEmitDependencyInstallStart(api, gameId, modId, false)) {
+      return Promise.resolve();
+    }
+
+    let lastProgress = -1;
+
+    const progress = silent
+      ? nop
+      : (perc: number) => {
+          // rounded to steps of 5%
+          const newProgress = Math.round(perc * 20) * 5;
+          if (newProgress !== lastProgress) {
+            lastProgress = newProgress;
+            api.sendNotification({
+              id: notificationId,
+              type: "activity",
+              title: "Checking dependencies",
+              message: "Resolving dependencies",
+              progress: newProgress,
+            });
+          }
+        };
+
+    progress(0);
+    api.store.dispatch(startActivity("dependencies", "gathering"));
+
+    log("debug", "installing dependencies", { modId, name });
+    return gatherDependencies(filteredRules, api, false, progress, this.addToPhaseStateCache(api))
+      .then((dependencies: IDependency[]) => {
+        api.store.dispatch(stopActivity("dependencies", "gathering"));
+        api.dismissNotification(notificationId);
+        return this.doInstallDependencyList(
+          api,
+          profile,
+          gameId,
+          modId,
+          name,
+          dependencies,
+          silent,
+        );
+      })
+      .catch((err) => {
+        api.dismissNotification(notificationId);
+        api.store.dispatch(stopActivity("dependencies", "gathering"));
+        if (!(err instanceof UserCanceled) && !(err instanceof NotFound)) {
+          api.showErrorNotification("Failed to check dependencies", err);
+        } else if (err instanceof NotFound) {
+          api.showErrorNotification(
+            "Failed to check dependencies",
+            "A mod dependency could not be found. This is usually caused by " +
+              "a temporary networking issue. Please try again later.",
+            { allowReport: false },
+          );
+        }
+      })
+      .finally(() => {
+        log("debug", "done installing dependencies", { gameId, modId });
+        api.events.emit("did-install-dependencies", gameId, modId, false);
+      });
+  }
+
+  private installRecommendationsQueryMain(
+    api: IExtensionApi,
+    modName: string,
+    success: IDependency[],
+    error: IDependencyError[],
+    remember: boolean | null,
+  ): Promise<IDialogResult> {
+    if (remember === true) {
+      return Promise.resolve({ action: "Install All", input: {} });
+    } else if (remember === false) {
+      return Promise.resolve({ action: "Skip", input: {} });
+    }
+    let bbcode: string = "";
+    if (success.length > 0) {
+      bbcode +=
+        "{{modName}} recommends the installation of additional mods. " +
+        "Please use the checkboxes below to select which to install.<br/><br/>[list]";
+      for (const item of success) {
+        bbcode += `[*] ${renderModReference(item.reference, undefined)}`;
+      }
+
+      bbcode += "[/list]";
+    }
+
+    if (error.length > 0) {
+      bbcode +=
+        "[color=red]" +
+        "{{modName}} has unsolved dependencies that could not be found automatically. " +
+        "Please install them manually." +
+        "[/color][list]";
+      for (const item of error) {
+        bbcode += `[*] ${item.error}`;
+      }
+      bbcode += "[/list]";
+    }
+
+    return Promise.resolve(
+      api.store.dispatch(
+        showDialog(
+          "question",
+          "Install Recommendations",
+          {
+            bbcode,
+            checkboxes: [
+              {
+                id: "remember",
+                text: "Do this for all recommendations",
+                value: false,
+              },
+            ],
+            parameters: {
+              modName,
+            },
+          },
+          [{ label: "Skip" }, { label: "Manually Select" }, { label: "Install All" }],
+        ),
+      ),
+    );
+  }
+
+  private installRecommendationsQuerySelect(
+    api: IExtensionApi,
+    modName: string,
+    success: IDependency[],
+  ): Promise<IDialogResult> {
+    let bbcode: string = "";
+    if (success.length > 0) {
+      bbcode +=
+        "{{modName}} recommends the installation of additional mods. " +
+        "Please use the checkboxes below to select which to install.<br/><br/>";
+    }
+
+    const checkboxes: ICheckbox[] = success.map((dep, idx) => {
+      let depName: string;
+      if (dep.lookupResults.length > 0) {
+        depName = dep.lookupResults[0].value.fileName;
+      }
+      if (depName === undefined) {
+        depName = renderModReference(dep.reference, undefined);
+      }
+
+      let desc = depName;
+      if (dep.download === undefined) {
+        desc += " (" + api.translate("Not downloaded yet") + ")";
+      }
+      return {
+        id: idx.toString(),
+        text: desc,
+        value: true,
+      };
+    });
+
+    return Promise.resolve(
+      api.store.dispatch(
+        showDialog(
+          "question",
+          "Install Recommendations",
+          {
+            bbcode,
+            checkboxes,
+            parameters: {
+              modName,
+            },
+          },
+          [{ label: "Don't install" }, { label: "Continue" }],
+        ),
+      ),
+    );
+  }
+
+  private installRecommendationsImpl(
+    api: IExtensionApi,
+    profile: IProfile,
+    gameId: string,
+    modId: string,
+    name: string,
+    rules: IRule[],
+    installPath: string,
+    silent: boolean,
+  ): Promise<void> {
+    const filteredRules = filterDependencyRules(rules);
+
+    if (filteredRules.length === 0) {
+      return Promise.resolve();
+    }
+
+    const notificationId = `${installPath}_activity`;
+
+    if (!checkAndEmitDependencyInstallStart(api, gameId, modId, true)) {
+      return Promise.resolve();
+    }
+
+    api.sendNotification({
+      id: notificationId,
+      type: "activity",
+      message: "Checking dependencies",
+    });
+    api.store.dispatch(startActivity("dependencies", "gathering"));
+    return gatherDependencies(filteredRules, api, true, undefined, this.addToPhaseStateCache(api))
+      .then((dependencies: Dependency[]) => {
+        api.store.dispatch(stopActivity("dependencies", "gathering"));
+        if (dependencies.length === 0) {
+          return Promise.resolve();
+        }
+
+        interface IDependencySplit {
+          success: IDependency[];
+          existing: IDependency[];
+          error: IDependencyError[];
+        }
+        const { success, existing, error } = dependencies.reduce(
+          (prev: IDependencySplit, dep: Dependency) => {
+            if (dep["error"] !== undefined) {
+              prev.error.push(dep as IDependencyError);
+            } else {
+              const { mod } = dep as IDependency;
+              if (mod === undefined || !getSafe(profile?.modState, [mod.id, "enabled"], false)) {
+                prev.success.push(dep as IDependency);
+              } else {
+                prev.existing.push(dep as IDependency);
+              }
+            }
+            return prev;
+          },
+          { success: [], existing: [], error: [] },
+        );
+
+        // all recommendations already installed
+        if (success.length === 0 && error.length === 0) {
+          return Promise.resolve();
+        }
+        const context = getBatchContext("install-recommendations", "", true);
+        context.set<number>(
+          "num-instructions",
+          success.filter((succ) => succ.extra?.["instructions"] !== undefined).length,
+        );
+        const remember = context.get<boolean>("remember", null);
+        let queryProm: Promise<IDependency[]> = Promise.resolve(success);
+        context.set("sourceModId", modId);
+
+        if (!silent || error.length > 0) {
+          queryProm = this.installRecommendationsQueryMain(
+            api,
+            name,
+            success,
+            error,
+            remember,
+          ).then((result) => {
+            if (result.action === "Skip") {
+              if (result.input?.remember) {
+                context.set("remember", false);
+              }
+              return [];
+            } else if (result.action === "Install All") {
+              if (result.input?.remember) {
+                context.set("remember", true);
+              }
+              return success;
+            } else {
+              return this.installRecommendationsQuerySelect(api, name, success).then(
+                (selectResult) => {
+                  if (selectResult.action === "Continue") {
+                    return Object.keys(selectResult.input)
+                      .filter((key) => selectResult.input[key])
+                      .map((key) => success[parseInt(key, 10)]);
+                  } else {
+                    return [];
+                  }
+                },
+              );
+            }
+          });
+        }
+
+        return queryProm.then((result) => {
+          return this.doInstallDependencies(api, gameId, modId, result, true, silent).then(
+            (updated) => this.updateRules(api, gameId, modId, [].concat(existing, updated), true),
+          );
+        });
+      })
+      .catch((err) => {
+        api.store.dispatch(stopActivity("dependencies", "gathering"));
+        if (!(err instanceof UserCanceled)) {
+          api.showErrorNotification("Failed to check dependencies", err);
+        }
+      })
+      .finally(() => {
+        api.dismissNotification(notificationId);
+        api.events.emit("did-install-dependencies", gameId, modId, true);
+      });
+  }
+
+  private withInstructions<T>(
+    api: IExtensionApi,
+    sourceName: string,
+    title: string,
+    id: string,
+    instructions: string,
+    recommendations: boolean,
+    cb: () => PromiseLike<T>,
+  ): Promise<T> {
+    if (!truthy(instructions)) {
+      return Promise.resolve(cb());
+    }
+
+    if (recommendations) {
+      return Promise.resolve(
+        (async () => {
+          // The batch context exists only while installRecommendations drives a whole pass; a
+          // single optional re-driven from the required pass (requeue, driveSelectedOptionals) has
+          // none, so every context access must tolerate undefined.
+          const context = getBatchContext("install-recommendations", "");
+          let action = context?.get<string>("remember-instructions");
+          const remaining = (context?.get<number>("num-instructions") ?? 1) - 1;
+
+          if (action == null) {
+            let checkboxes: ICheckbox[];
+            if (remaining > 0) {
+              checkboxes = [
+                {
+                  id: "remember",
+                  value: false,
+                  text: "Do this for all remaining instructions ({{remaining}} more)",
+                },
+              ];
+            }
+            const result = await api.showDialog(
+              "info",
+              title,
+              {
+                md: instructions,
+                checkboxes,
+                parameters: {
+                  remaining,
+                },
+              },
+              [{ label: "Skip" }, { label: "Install" }],
+            );
+
+            if (result.input["remember"]) {
+              context?.set("remember-instructions", result.action);
+            }
+            action = result.action;
+          }
+
+          context?.set<number>("num-instructions", remaining);
+
+          if (action === "Install") {
+            return cb();
+          } else {
+            return Promise.reject(new UserCanceled(true));
+          }
+        })(),
+      );
+    } else {
+      api.ext.showOverlay?.(`install-instructions-${id}`, title, instructions, undefined, {
+        id,
+      });
+
+      return Promise.resolve(cb());
+    }
+  }
+
+  private async installModAsync(
+    requirement: IModReference,
+    api: IExtensionApi,
+    downloadId: string,
+    modInfo?: any,
+    fileList?: IFileListItem[],
+    forceGameId?: string,
+    silent?: boolean,
+    sourceModId?: string,
+  ): Promise<string> {
+    const state = api.store.getState();
+    const download: IDownload = state.persistent.downloads.files[downloadId];
+    if (download === undefined) {
+      return Promise.reject(new NotFound(renderModReference(requirement)));
+    }
+    const downloadGame: string[] = getDownloadGames(download);
+
+    // Handle race condition: downloads may still be in Nexus domain ID folder while
+    // installation expects internal ID folder. Try converted path first, fall back to original.
+    const games = knownGames(state);
+    const convertedGameId = convertGameIdReverse(games, downloadGame[0]);
+    const pathGameId = convertedGameId || downloadGame[0];
+
+    let fullPath: string = path.join(downloadPathForGame(state, pathGameId), download.localPath);
+
+    // If converted path doesn't exist and we have a different original ID, try original path
+    if (convertedGameId && convertedGameId !== downloadGame[0]) {
+      try {
+        await fs.statAsync(fullPath).catch(async () => {
+          const originalPath = path.join(
+            downloadPathForGame(state, downloadGame[0]),
+            download.localPath,
+          );
+          try {
+            await fs.statAsync(originalPath);
+            fullPath = originalPath;
+          } catch {
+            // Keep converted path if neither exists
+          }
+        });
+      } catch {
+        // Continue with converted path if check fails
+      }
+    }
+
+    return new Promise<string>((resolve, reject) => {
+      this.install(
+        downloadId,
+        fullPath,
+        downloadGame,
+        api,
+        { ...modInfo, download },
+        false,
+        silent,
+        (error, id) => {
+          if (error == null) {
+            return resolve(id);
+          } else {
+            return reject(error);
+          }
+        },
+        forceGameId,
+        fileList,
+        silent,
+        undefined,
+        false,
+        sourceModId,
+        requirement,
+      );
+    });
+  }
+
+  /**
+   * extract an archive
+   *
+   * @export
+   * @param {string} archivePath path to the archive file
+   * @param {string} destinationPath path to install to
+   */
+  private async extractArchive(
+    api: IExtensionApi,
+    archivePath: string,
+    tempPath: string,
+    destinationPath: string,
+    copies: IInstruction[],
+    gameId: string,
+  ): Promise<void> {
+    const now = Date.now();
+    // Strategy:
+    //  - dedupe and pre-create parent directories once
+    //  - link files in parallel with a bounded concurrency
+    //  - if link fails (different fs, permission) fallback to copying
+    //  - unlink sources in parallel after successful transfers
+    const sorted = copies.slice().sort((a, b) => a.destination.length - b.destination.length);
+    const dirs = new Set<string>();
+    const jobs: Array<{ src: string; dst: string; rel: string }> = [];
+    const missingFiles = new Set<string>();
+
+    const copyAsyncWrap = async (src: string, dst: string) => {
+      try {
+        await fs.copyAsync(src, dst);
+      } catch (err) {
+        if (
+          err instanceof SelfCopyCheckError ||
+          getErrorMessage(err)?.includes("and destination must")
+        ) {
+          // File is already there - don't care
+          return;
+        }
+      }
+    };
+
+    const folderCopies: string[] = [];
+    for (const copy of sorted) {
+      if (copy.source.endsWith("/") || copy.source.endsWith("\\")) {
+        folderCopies.push(copy.source);
+        continue;
+      }
+      const src = path.join(tempPath, copy.source);
+      const dst = path.join(destinationPath, copy.destination);
+      dirs.add(path.dirname(dst));
+      jobs.push({ src, dst, rel: copy.destination });
+    }
+    if (folderCopies.length > 0) {
+      log("warn", "installer generated copy instructions for directories, these will be skipped", {
+        directories: folderCopies,
+      });
+    }
+
+    const cpuCount = os && os.cpus ? Math.max(1, os.cpus().length) : 1;
+    const dirConcurrency = Math.min(64, Math.max(4, cpuCount * 2));
+    const ioConcurrency = Math.min(256, Math.max(8, cpuCount * 8));
+
+    try {
+      // create parent directories
+      await mapWithConcurrency(Array.from(dirs), (d) => fs.ensureDirAsync(d), dirConcurrency);
+
+      // perform hard links in parallel; fallback to copy on failure
+      await mapWithConcurrency(
+        jobs,
+        async (job) => {
+          try {
+            await fs.linkAsync(job.src, job.dst);
+          } catch (err) {
+            const code = getErrorCode(err);
+            if (code === "ENOENT") {
+              // source file does not exist; skip
+              missingFiles.add(job.src);
+              return;
+            }
+            if (["EISDIR", "EEXIST"].includes(code)) {
+              // destination exists (stale from a previous
+              // failed install?) - remove it and fall back to copy
+              await fs.removeAsync(job.dst);
+              await copyAsyncWrap(job.src, job.dst);
+            } else if (code && ["EXDEV", "EPERM", "EACCES", "ENOTSUP"].includes(code)) {
+              await copyAsyncWrap(job.src, job.dst);
+            } else {
+              throw err;
+            }
+          }
+        },
+        ioConcurrency,
+      );
+
+      if (missingFiles.size > 0) {
+        api.showErrorNotification(
+          api.translate("Invalid installer"),
+          api.translate(
+            'The installer in "{{name}}" tried to install files that were ' +
+              "not part of the archive.\n This can be due to an invalid mod or an invalid game extension installer.\n" +
+              "Please report this to the mod author and/or the game extension developer.",
+            { replace: { name: path.basename(archivePath) } },
+          ) +
+            "\n\n" +
+            Array.from(missingFiles)
+              .map((name) => "- " + name)
+              .join("\n"),
+          { allowReport: false },
+        );
+      }
+      return Promise.resolve();
+    } catch (err) {
+      return Promise.reject(err);
+    } finally {
+      log("debug", "extraction completed", {
+        duration: Date.now() - now,
+        archivePath,
+        instructions: copies.length,
+      });
+    }
+  }
+
+  /**
+   * Find any download that matches the given mod reference using all available methods
+   */
+  private findDownloadForMod(
+    reference: IModReference,
+    downloads: { [id: string]: IDownload },
+  ): string | null {
+    const relevantDownloads = Object.fromEntries(
+      Object.entries(downloads).filter(
+        ([dlId, dl]) => dl.state === "finished" && dl.game.includes(reference.gameId),
+      ),
+    );
+    // Try the primary lookup first
+    const downloadId = findDownloadByRef(reference, relevantDownloads);
+    if (downloadId) {
+      return downloadId;
+    }
+
+    // Try filename match
+    const targetFilename = reference?.logicalFileName;
+    if (targetFilename) {
+      const altDownloadId = Object.keys(relevantDownloads).find((dlId) => {
+        const download = relevantDownloads[dlId];
+        return (
+          download.localPath &&
+          download.localPath.endsWith(targetFilename) &&
+          download.state === "finished"
+        );
+      });
+      if (altDownloadId) {
+        return altDownloadId;
+      }
+    }
+
+    // Try modId/fileId match
+    if (reference?.repo) {
+      const { modId, fileId } = reference.repo;
+      if (modId && fileId) {
+        const altDownloadId = Object.keys(relevantDownloads).find((dlId) => {
+          const download = relevantDownloads[dlId];
+          return (
+            download.modInfo?.nexus?.ids?.modId?.toString() === modId.toString() &&
+            download.modInfo?.nexus?.ids?.fileId?.toString() === fileId.toString() &&
+            download.state === "finished"
+          );
+        });
+        if (altDownloadId) {
+          return altDownloadId;
+        }
+      }
+
+      // Try modId only
+      if (modId) {
+        const altDownloadId = Object.keys(relevantDownloads).find((dlId) => {
+          const download = relevantDownloads[dlId];
+          return (
+            download.modInfo?.nexus?.ids?.modId?.toString() === modId.toString() &&
+            download.state === "finished"
+          );
+        });
+        if (altDownloadId) {
+          return altDownloadId;
+        }
+      }
+    }
+
+    // Try testRefByIdentifiers
+    if (reference) {
+      const altDownloadId = Object.keys(relevantDownloads).find((dlId) => {
+        const download = relevantDownloads[dlId];
+        if (download.state !== "finished") {
+          return false;
+        }
+
+        const nameSet = new Set<string>();
+        const fileIdsSet = new Set<string>();
+        fileIdsSet.add(download.modInfo?.nexus?.ids?.fileId?.toString?.());
+        nameSet.add(
+          download.localPath
+            ? path.basename(download.localPath, path.extname(download.localPath))
+            : undefined,
+        );
+        const identifiers = {
+          fileNames: Array.from(nameSet).filter((x) => x != null),
+          fileIds: Array.from(fileIdsSet).filter((x) => x != null),
+          gameId: download.modInfo?.nexus?.ids?.gameId || download.modInfo?.gameId,
+          modId: download.modInfo?.nexus?.ids?.modId,
+          fileId: download.modInfo?.nexus?.ids?.fileId,
+        };
+
+        if (identifiers.modId && identifiers.fileId && identifiers.gameId) {
+          return testRefByIdentifiers(identifiers, reference);
+        }
+
+        return false;
+      });
+      if (altDownloadId) {
+        return altDownloadId;
+      }
+    }
+
+    return null;
+  }
+
+  /**
+   * Record a dependency install outcome on the active collection session. A no-op when there is
+   * no active session, no rule matches, or the write is redundant.
+   *
+   * Pass the dependency's `sessionRuleId` wherever it is in scope, so the member is addressed by
+   * the key it is tracked under rather than by its reference identity. `sourceModId` scopes the
+   * unmatched-write warning: the dependency pipeline also runs for mods outside the session's
+   * collection, whose writes are expected no-ops.
+   */
+  private writeCollectionSession(
+    reference: IModReference,
+    outcome: CollectionInstallOutcome,
+    ruleId?: string,
+    sourceModId?: string,
+  ): void {
+    const plan = sessionWriteForDependency(this.mApi.getState(), reference, outcome, ruleId);
+    if (plan === null) {
+      this.warnUnmatchedSessionWrite(reference, outcome, ruleId, sourceModId);
+      return;
+    }
+    const action =
+      plan.write.kind === "markInstalled"
+        ? markModInstalled(plan.sessionId, plan.ruleId, plan.write.modId)
+        : updateModStatus(plan.sessionId, plan.ruleId, plan.write.status);
+    this.mApi.store.dispatch(action);
+  }
+
+  /**
+   * Report a lifecycle outcome that named no session member.
+   */
+  private warnUnmatchedSessionWrite(
+    reference: IModReference,
+    outcome: CollectionInstallOutcome,
+    ruleId?: string,
+    sourceModId?: string,
+  ): void {
+    if (ruleId === undefined) {
+      return;
+    }
+    const session = getCollectionActiveSession(this.mApi.getState());
+    if (session === undefined) {
+      return;
+    }
+    if (sourceModId !== undefined && sourceModId !== session.collectionId) {
+      return;
+    }
+    if (session.mods[ruleId] !== undefined) {
+      return;
+    }
+    if (matchSessionRuleEntry(session, reference) !== undefined) {
+      return;
+    }
+    log("warn", "collection session write matched no member", {
+      ruleId,
+      referenceId: referenceId(reference),
+      outcome: outcome.type,
+    });
+  }
+
+  /**
+   * Helper method to show aggregated error notification for dependency installation failures
+   */
+  private showDependencyError(
+    api: IExtensionApi,
+    sourceModId: string,
+    title: string,
+    details: string | Error,
+    dependencyRef: string,
+    options: { allowReport?: boolean; replace?: any; silent?: boolean } = {},
+  ): void {
+    const aggregationId = `install-dependencies-${sourceModId}`;
+
+    // Don't allow reporting for user-initiated cancellations
+    const isCanceled =
+      details instanceof UserCanceled ||
+      (details instanceof String &&
+        ["usercanceled", "canceled", "cancelled"].some((term) =>
+          details.toLowerCase().includes(term),
+        ));
+    const allowReport = isCanceled ? false : options.allowReport;
+
+    if (this.mNotificationAggregator.isAggregating(aggregationId)) {
+      this.mNotificationAggregator.addNotification(
+        aggregationId,
+        "error",
+        title,
+        details,
+        dependencyRef,
+        { allowReport },
+      );
+    } else {
+      api.showErrorNotification(title, details, {
+        id: `failed-install-dependency-${dependencyRef}`,
+        message: dependencyRef,
+        allowReport,
+        replace: options.replace,
+      });
+    }
+  }
+}
+
+export default InstallManager;

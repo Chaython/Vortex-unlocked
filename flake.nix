@@ -1,0 +1,103 @@
+{
+  description = "Vortex development environment";
+
+  inputs = {
+    nixpkgs.url = "github:NixOS/nixpkgs/master";
+    flake-utils.url = "github:numtide/flake-utils";
+    flake-compat = {
+      url = "github:NixOS/flake-compat";
+      flake = false;
+    };
+  };
+
+  outputs = { nixpkgs, flake-utils, ... }:
+    flake-utils.lib.eachDefaultSystem (system:
+      let
+        pkgs = nixpkgs.legacyPackages.${system};
+      in {
+        devShells.default = pkgs.mkShell {
+          packages = with pkgs; [
+            # Node.js and package managers
+            nodejs_24
+            pnpm
+            yarn
+
+            # Flatpak tooling
+            flatpak
+            flatpak-builder
+            appstream
+
+            # Python with setuptools for node-gyp (distutils removed in Python 3.12+)
+            (python3.withPackages (ps: [ ps.setuptools ]))
+
+            # Build tools
+            gitMinimal
+            gnumake
+            pkg-config
+
+            # C/C++ toolchain
+            clang
+            llvmPackages.libcxx
+
+            # Dotnet
+            dotnetCorePackages.sdk_9_0
+
+            # Electron (wrapped with GTK dependencies)
+            electron_42-bin
+
+            # Playwright on NixOS uses Nix-provided Chromium instead of
+            # downloaded browser binaries, which are not patched for NixOS.
+            chromium
+
+            # GTK dependencies for Electron runtime
+            gtk3
+            gtk4
+            glib
+            gsettings-desktop-schemas
+            dconf
+            librsvg
+          ];
+
+          env = {
+            # Compiler settings for node-gyp
+            CC = "${pkgs.clang}/bin/clang";
+            CXX = "${pkgs.clang}/bin/clang++";
+
+            # Ignore strict node engine version checks for legacy yarn tasks
+            YARN_IGNORE_ENGINES = "true";
+
+            # Prevent yarn from downloading Electron binaries
+            ELECTRON_SKIP_BINARY_DOWNLOAD = "1";
+
+            # Point to Nix-provided Electron
+            ELECTRON_OVERRIDE_DIST_PATH = "${pkgs.electron_42-bin.dist}";
+
+            # Point E2E auth-browser launches at Nix-provided Chromium.
+            # Do not use `playwright install --with-deps` on NixOS; it tries apt-get.
+            E2E_PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH = "${pkgs.chromium}/bin/chromium";
+
+            # Avoid Playwright host dependency checks. Nix supplies runtime deps.
+            PLAYWRIGHT_SKIP_VALIDATE_HOST_REQUIREMENTS = "true";
+
+            # Make the dotnet runtime available
+            DOTNET_ROOT = "${pkgs.dotnetCorePackages.runtime_9_0}/share/dotnet";
+          };
+
+          # Set up GTK environment (mimics wrapGAppsHook3)
+          shellHook = ''
+            # GSettings schemas
+            export XDG_DATA_DIRS="${pkgs.gsettings-desktop-schemas}/share/gsettings-schemas/${pkgs.gsettings-desktop-schemas.name}:${pkgs.gtk3}/share/gsettings-schemas/${pkgs.gtk3.name}:${pkgs.gtk4}/share/gsettings-schemas/${pkgs.gtk4.name}:${pkgs.glib}/share:$XDG_DATA_DIRS"
+
+            # GIO modules (for dconf)
+            export GIO_EXTRA_MODULES="${pkgs.dconf.lib}/lib/gio/modules"
+
+            # GDK pixbuf loaders (for image loading)
+            export GDK_PIXBUF_MODULE_FILE="${pkgs.librsvg}/lib/gdk-pixbuf-2.0/2.10.0/loaders.cache"
+
+            # Chromium sandbox
+            export CHROME_DEVEL_SANDBOX="${pkgs.electron_42-bin}/libexec/electron/chrome-sandbox"
+
+          '';
+        };
+      });
+}

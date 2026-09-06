@@ -1,0 +1,43 @@
+import { type ComponentType } from "react";
+
+import { useExtensionObjects } from "../ExtensionProvider";
+import type { IRegisteredExtension } from "../types/extensions";
+import type { IMainPageOptions } from "../types/IExtensionContext";
+import type { IMainPage } from "../types/IMainPage";
+
+const trueFunc = () => true;
+
+const emptyFunc = () => ({});
+
+const registerMainPage = (
+  _instanceGroup: undefined,
+  extInfo: Partial<IRegisteredExtension>,
+  icon: string,
+  title: string,
+  component: ComponentType<React.PropsWithChildren<unknown>>,
+  options: IMainPageOptions,
+): IMainPage => {
+  return {
+    id: options.id || title,
+    icon,
+    mdi: options.mdi,
+    title,
+    component,
+    propsFunc: options.props || emptyFunc,
+    visible: options.visible || trueFunc,
+    group: options.group,
+    isClassicOnly: options.isClassicOnly,
+    isModernOnly: options.isModernOnly,
+    newLayout: options.newLayout,
+    badge: options.badge,
+    activity: options.activity,
+    menuBadge: options.menuBadge,
+    priority: options.priority !== undefined ? options.priority : 100,
+    onReset: options.onReset,
+    namespace: extInfo.namespace,
+  };
+};
+
+export const useMainPages = (): IMainPage[] => {
+  return useExtensionObjects<IMainPage>(registerMainPage, undefined, undefined, true);
+};

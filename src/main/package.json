@@ -1,0 +1,399 @@
+{
+  "$schema": "https://www.schemastore.org/package.json",
+  "name": "@vortex/main",
+  "author": "Black Tree Gaming Ltd.",
+  "license": "GPL-3.0-only",
+  "version": "1.0.0",
+  "private": true,
+  "type": "commonjs",
+  "main": "build/main.cjs",
+  "scripts": {
+    "start": "pnpm electron .",
+    "start:debug": "pnpm electron . --inspect=9229 --remote-debugging-port=9222",
+    "postinstall": "node ./postinstall.mjs",
+    "build": "node ./build.mjs",
+    "typecheck": "pnpm tsc",
+    "lint": "pnpm eslint --quiet --concurrency auto .",
+    "lint:verbose": "pnpm eslint --concurrency auto .",
+    "test": "pnpm vitest run --config ./vitest.config.ts",
+    "test:integration": "pnpm exec vitest run --config ./vitest.integration.config.ts",
+    "publish": "pnpm exec rimraf ./dist && pnpm cross-env pnpm_config_inject_workspace_packages=true pnpm_config_node_linker=hoisted pnpm -F @vortex/main deploy ./dist && node ./dist/prepare-dist-package.mjs",
+    "package": "cd ./dist && pnpm electron-builder --config ./electron-builder.config.json --config.win.forceCodeSigning=true --config.win.sign=./sign.cjs --publish never",
+    "package:nosign": "cd ./dist && pnpm electron-builder --config ./electron-builder.config.json --publish never",
+    "sbom": "pnpm node ./sbom.mjs",
+    "download-duckdb-extensions": "pnpm tsx ./download-duckdb-extensions.ts",
+    "generate:unleash": "pnpm node src/unleash/trim-spec.mjs && pnpm exec openapi-typescript src/unleash/openapi-slim.json --immutable --output src/unleash/schema.d.ts && pnpm exec oxfmt ./src/unleash/*.json ./src/unleash/schema.d.ts"
+  },
+  "nx": {
+    "targets": {
+      "dev": {
+        "cache": false,
+        "continuous": true,
+        "executor": "nx:noop",
+        "dependsOn": [
+          {
+            "projects": "@vortex/stylesheets",
+            "target": "tailwind:watch"
+          },
+          {
+            "projects": "@vortex/renderer",
+            "target": "watch"
+          }
+        ]
+      },
+      "start": {
+        "continuous": true,
+        "cache": false,
+        "dependsOn": [
+          "build"
+        ]
+      },
+      "start:debug": {
+        "continuous": true,
+        "cache": false,
+        "dependsOn": [
+          "build"
+        ]
+      },
+      "build": {
+        "dependsOn": [
+          "copy-assets",
+          "copy-extensions",
+          "download-duckdb-extensions",
+          "generate:unleash",
+          "^build",
+          {
+            "target": "build",
+            "projects": "@vortex/renderer"
+          },
+          {
+            "target": "build",
+            "projects": "@vortex/preload"
+          }
+        ],
+        "cache": true,
+        "outputs": [
+          "{projectRoot}/build/main.cjs",
+          "{projectRoot}/build/main.cjs.map",
+          "{projectRoot}/build/bsdiff-worker.cjs",
+          "{projectRoot}/build/bsdiff-worker.cjs.map",
+          "{projectRoot}/build/hdiff.wasm"
+        ]
+      },
+      "publish": {
+        "cache": false,
+        "dependsOn": [
+          "build"
+        ]
+      },
+      "package": {
+        "cache": false,
+        "dependsOn": [
+          "publish"
+        ],
+        "executor": "nx:run-script",
+        "options": {
+          "script": "package"
+        }
+      },
+      "package:nosign": {
+        "cache": false,
+        "dependsOn": [
+          "publish"
+        ],
+        "executor": "nx:run-script",
+        "options": {
+          "script": "package:nosign"
+        }
+      },
+      "copy-assets": {
+        "executor": "nx:run-commands",
+        "options": {
+          "command": "node ./copy-assets.mjs",
+          "cwd": "{projectRoot}"
+        },
+        "dependsOn": [
+          {
+            "target": "sass",
+            "projects": "@vortex/stylesheets"
+          },
+          {
+            "target": "tailwind",
+            "projects": "@vortex/stylesheets"
+          },
+          {
+            "target": "build",
+            "projects": "@tools/dotnetprobe"
+          },
+          "sbom"
+        ],
+        "cache": true,
+        "inputs": [
+          "default",
+          {
+            "dependentTasksOutputFiles": "**/dist/**"
+          },
+          "{projectRoot}/copy-assets.mjs",
+          "{workspaceRoot}/src/stylesheets/**/*.scss",
+          "{workspaceRoot}/src/renderer/src/index.html",
+          "{workspaceRoot}/src/renderer/src/splash.html",
+          "{workspaceRoot}/src/queries/",
+          "{workspaceRoot}/assets/",
+          "{workspaceRoot}/locales/",
+          "{workspaceRoot}/LICENSE.md"
+        ],
+        "outputs": [
+          "{projectRoot}/build/assets/",
+          "{projectRoot}/build/locales/",
+          "{projectRoot}/build/queries/",
+          "{projectRoot}/build/index.html",
+          "{projectRoot}/build/splash.html",
+          "{projectRoot}/build/LICENSE.md"
+        ]
+      },
+      "sbom": {
+        "executor": "nx:run-script",
+        "options": {
+          "script": "sbom"
+        },
+        "cache": true,
+        "inputs": [
+          "default",
+          "{projectRoot}/sbom.mjs"
+        ],
+        "outputs": [
+          "{workspaceRoot}/assets/bom.json"
+        ]
+      },
+      "download-duckdb-extensions": {
+        "cache": true,
+        "inputs": [
+          "default",
+          "{projectRoot}/download-duckdb-extensions.ts",
+          "{projectRoot}/duckdb-extensions.json"
+        ],
+        "outputs": [
+          "{projectRoot}/build/duckdb-extensions/"
+        ]
+      },
+      "copy-extensions": {
+        "executor": "nx:run-commands",
+        "options": {
+          "command": "node ./copy-extensions.mjs",
+          "cwd": "{projectRoot}"
+        },
+        "dependsOn": [
+          {
+            "target": "build",
+            "projects": "tag:vortex:extension"
+          }
+        ],
+        "cache": true,
+        "inputs": [
+          "default",
+          {
+            "dependentTasksOutputFiles": "**/dist/**"
+          },
+          "{projectRoot}/copy-extensions.mjs"
+        ],
+        "outputs": [
+          "{projectRoot}/build/bundledPlugins/"
+        ]
+      },
+      "test:integration": {
+        "dependsOn": [
+          "build"
+        ]
+      },
+      "generate:unleash": {
+        "cache": true,
+        "inputs": [
+          "default",
+          "{projectRoot}/src/unleash/openapi.json",
+          "{projectRoot}/src/unleash/trim-spec.mjs"
+        ],
+        "outputs": [
+          "{projectRoot}/src/unleash/schema.d.ts"
+        ]
+      }
+    }
+  },
+  "files": [
+    "./build",
+    "./nsis/",
+    "./electron-builder.config.json",
+    "./postinstall.mjs",
+    "./prepare-dist-package.mjs",
+    "./sign.cjs"
+  ],
+  "dependencies": {
+    "@duckdb/node-api": "catalog:",
+    "@electron/remote": "catalog:",
+    "@floating-ui/react": "catalog:",
+    "@headlessui/react": "catalog:",
+    "@hot-updater/bsdiff": "catalog:",
+    "@mdi/js": "catalog:",
+    "@msgpack/msgpack": "catalog:",
+    "@nexusmods/adaptor-api": "workspace:*",
+    "@nexusmods/file-dependency-resolver": "workspace:*",
+    "@nexusmods/fomod-installer-ipc": "catalog:",
+    "@nexusmods/fomod-installer-native": "catalog:",
+    "@nexusmods/nexus-api": "catalog:",
+    "@nosferatu500/react-sortable-tree": "catalog:",
+    "@nosferatu500/theme-file-explorer": "catalog:",
+    "@opentelemetry/api": "catalog:",
+    "@opentelemetry/context-async-hooks": "catalog:",
+    "@opentelemetry/context-zone": "catalog:",
+    "@opentelemetry/exporter-trace-otlp-http": "catalog:",
+    "@opentelemetry/resources": "catalog:",
+    "@opentelemetry/sdk-trace-base": "catalog:",
+    "@opentelemetry/semantic-conventions": "catalog:",
+    "@tailwindcss/cli": "catalog:",
+    "@types/bluebird": "catalog:",
+    "@types/uuid": "catalog:",
+    "@vortex/nexus-api-v3": "workspace:*",
+    "@vortex/shared": "workspace:*",
+    "bbcode-to-react": "catalog:",
+    "big.js": "catalog:",
+    "bluebird": "catalog:",
+    "bootstrap-sass": "catalog:",
+    "classnames": "catalog:",
+    "commander": "catalog:",
+    "content-disposition": "catalog:",
+    "content-type": "catalog:",
+    "crc-32": "catalog:",
+    "d3": "catalog:",
+    "date-fns": "catalog:",
+    "dayjs": "catalog:",
+    "dequal": "catalog:",
+    "dnd-core": "catalog:",
+    "draggabilly": "catalog:",
+    "drivelist": "catalog:",
+    "electron-context-menu": "catalog:",
+    "electron-redux": "catalog:",
+    "electron-updater": "catalog:",
+    "encoding-down": "catalog:",
+    "exe-version": "workspace:*",
+    "feedparser": "catalog:",
+    "fs-extra": "catalog:",
+    "fuzzball": "catalog:",
+    "glob": "catalog:",
+    "got": "catalog:",
+    "graphlib": "catalog:",
+    "i18next": "catalog:",
+    "i18next-fs-backend": "catalog:",
+    "icon-extract": "workspace:*",
+    "iconv-lite": "catalog:",
+    "immutability-helper": "catalog:",
+    "ini": "catalog:",
+    "interweave": "catalog:",
+    "is-admin": "catalog:",
+    "json-socket": "catalog:",
+    "jsonwebtoken": "catalog:",
+    "leveldown": "catalog:",
+    "levelup": "catalog:",
+    "limiter": "catalog:",
+    "lodash": "catalog:",
+    "memoize-one": "catalog:",
+    "minimatch": "catalog:",
+    "mixpanel-browser": "catalog:",
+    "modmeta-db": "catalog:",
+    "node-7z": "catalog:",
+    "normalize-url": "catalog:",
+    "numeral": "catalog:",
+    "openapi-fetch": "catalog:",
+    "p-queue": "catalog:",
+    "packery": "catalog:",
+    "permissions": "catalog:",
+    "prop-types": "catalog:",
+    "ps-list": "catalog:",
+    "re-reselect": "catalog:",
+    "re-resizable": "catalog:",
+    "react": "catalog:",
+    "react-bootstrap": "catalog:",
+    "react-datepicker": "catalog:",
+    "react-dnd": "catalog:",
+    "react-dnd-html5-backend": "catalog:",
+    "react-dom": "catalog:",
+    "react-hot-toast": "catalog:",
+    "react-i18next": "catalog:",
+    "react-markdown": "catalog:",
+    "react-overlays": "catalog:",
+    "react-redux": "catalog:",
+    "react-select": "catalog:",
+    "recharts": "catalog:",
+    "redux": "catalog:",
+    "redux-act": "catalog:",
+    "redux-batched-actions": "catalog:",
+    "redux-thunk": "catalog:",
+    "relaxed-json": "catalog:",
+    "reselect": "catalog:",
+    "resolve": "catalog:",
+    "rimraf": "catalog:",
+    "sass": "catalog:",
+    "semver": "catalog:",
+    "shortid": "catalog:",
+    "simple-vdf": "catalog:",
+    "source-map-support": "catalog:",
+    "string-template": "catalog:",
+    "tailwindcss": "catalog:",
+    "tmp": "catalog:",
+    "tough-cookie": "catalog:",
+    "turbowalk": "catalog:",
+    "universal-analytics": "catalog:",
+    "uuid": "catalog:",
+    "vortex-parse-ini": "catalog:",
+    "wholocks": "catalog:",
+    "winapi-bindings": "catalog:",
+    "winston": "catalog:",
+    "write-file-atomic": "catalog:",
+    "ws": "catalog:",
+    "xml2js": "catalog:",
+    "xxhash-addon": "catalog:",
+    "zod": "catalog:"
+  },
+  "devDependencies": {
+    "@electron/rebuild": "catalog:",
+    "@pmmmwh/react-refresh-webpack-plugin": "catalog:",
+    "@types/bbcode-to-react": "catalog:",
+    "@types/big.js": "catalog:",
+    "@types/content-disposition": "catalog:",
+    "@types/content-type": "catalog:",
+    "@types/d3": "catalog:",
+    "@types/draggabilly": "catalog:",
+    "@types/feedparser": "catalog:",
+    "@types/fs-extra": "catalog:",
+    "@types/graphlib": "catalog:",
+    "@types/json-socket": "catalog:",
+    "@types/jsonwebtoken": "catalog:",
+    "@types/lodash": "catalog:",
+    "@types/node": "catalog:",
+    "@types/node-7z": "catalog:",
+    "@types/numeral": "catalog:",
+    "@types/packery": "catalog:",
+    "@types/prop-types": "catalog:",
+    "@types/react": "catalog:",
+    "@types/react-dom": "catalog:",
+    "@types/react-redux": "catalog:",
+    "@types/relaxed-json": "catalog:",
+    "@types/resolve": "catalog:",
+    "@types/semver": "catalog:",
+    "@types/shortid": "catalog:",
+    "@types/source-map-support": "catalog:",
+    "@types/string-template": "catalog:",
+    "@types/tmp": "catalog:",
+    "@types/universal-analytics": "catalog:",
+    "@types/write-file-atomic": "catalog:",
+    "@types/ws": "catalog:",
+    "@types/xml2js": "catalog:",
+    "@welldone-software/why-did-you-render": "catalog:",
+    "cross-env": "catalog:",
+    "electron": "catalog:",
+    "electron-builder": "catalog:",
+    "electron-extension-installer": "catalog:",
+    "openapi-typescript": "catalog:",
+    "react-refresh": "catalog:",
+    "redux-freeze": "catalog:",
+    "vitest-fetch-mock": "catalog:"
+  }
+}

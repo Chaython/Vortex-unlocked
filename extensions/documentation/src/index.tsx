@@ -1,0 +1,126 @@
+import * as path from "path";
+
+import { types, util } from "@nexusmods/vortex-api";
+import * as React from "react";
+
+import { closeTutorials, setTutorialOpen } from "./actions/session";
+import TutorialButton from "./controls/TutorialButton";
+import TutorialDropdown from "./controls/TutorialDropdown";
+import sessionReducer from "./reducers/session";
+import { getTutorialData, TODO_GROUP } from "./tutorialManager";
+import DocumentationView from "./views/DocumentationView";
+
+const WIKI_TOPICS = {
+  ["adding-games"]: "MODDINGWIKI-Users-UI-Games-section",
+  ["creating-themes"]: "MODDINGWIKI-Developers-General-Creating-a-theme",
+  ["deployment-methods"]: "MODDINGWIKI-Users-General-Deployment-Methods",
+  ["downloading"]: "MODDINGWIKI-Users-General-Downloading-from-Nexus-Mods",
+  ["external-changes"]: "MODDINGWIKI-Users-General-Managing-External-Changes",
+  ["keyboard-shortcuts"]: "MODDINGWIKI-Users-General-Managing-Keyboard-Shortcuts",
+  ["file-conflicts"]: "MODDINGWIKI-Users-General-Managing-File-Conflicts",
+  ["load-order-about"]: "MODDINGWIKI-Users-General-The-Vortex-Approach-to-Load-Order",
+  ["load-order"]: "MODDINGWIKI-Users-General-Managing-your-Load-Order",
+  ["profiles"]: "MODDINGWIKI-Users-General-Setting-up-Profiles",
+};
+
+const WIKI_URL = "https://github.com/Nexus-Mods/Vortex/wiki";
+
+function generateUrl(wikiId: string) {
+  const topicId = WIKI_TOPICS[wikiId] || undefined;
+  if (topicId === undefined) {
+    return undefined;
+  }
+  return `${WIKI_URL}/${topicId}`;
+}
+
+export default function init(context: types.IExtensionContext) {
+  context.registerReducer(["session", "tutorials"], sessionReducer);
+
+  context.registerMainPage("details", "Knowledge base", DocumentationView, {
+    priority: 15,
+    hotkeyRaw: "F1",
+    group: "global",
+    isClassicOnly: true,
+  } as any);
+
+  const tutData = getTutorialData();
+
+  Object.keys(tutData).forEach((key) => {
+    if (key === TODO_GROUP) {
+      const element = tutData[key][0];
+      // Add the tutorial video to the TODO dashlet.
+      context.registerToDo(
+        "todo-tutorial-vid",
+        "more",
+        undefined,
+        "video",
+        "Introduction Video",
+        () => {
+          const { store } = context.api;
+          store.dispatch(
+            setTutorialOpen(
+              element.id,
+              !util.getSafe(
+                store.getState(),
+                ["session", "tutorials", "currentTutorial", "isOpen"],
+                false,
+              ),
+            ),
+          );
+          context.api.events.emit("analytics-track-click-event", "Dashboard", "Intro Video");
+        },
+        undefined,
+        (t) => <TutorialButton video={element} />,
+        5,
+      );
+    } else {
+      if (tutData[key].length === 1) {
+        const element = tutData[key][0];
+        // Add the tutorial item to the relevant icon group.
+        context.registerAction(key, 400, TutorialButton, {}, () => ({
+          video: element,
+        }));
+      } else {
+        context.registerAction(key, 400, TutorialDropdown, {}, () => ({
+          groupName: key,
+          videos: tutData[key],
+        }));
+      }
+    }
+  });
+
+  context.once(() => {
+    context.api.setStylesheet("documentation", path.join(__dirname, "documentation.scss"));
+
+    // User has moved onto a different page; we can close any open tutorial
+    //  videos.
+    context.api.onStateChange(["session", "base", "mainPage"], () => {
+      const { store } = context.api;
+      if (
+        false !==
+        util.getSafe(store.getState(), ["session", "tutorials", "currentTutorial", "isOpen"], false)
+      ) {
+        store.dispatch(closeTutorials());
+      }
+    });
+
+    context.api.events.on("open-knowledge-base", (wikiId?: string) => {
+      const state = context.api.store.getState();
+      const isModernLayout = state.settings?.window?.useModernLayout;
+      if (isModernLayout) {
+        const url = generateUrl(wikiId) ?? WIKI_URL;
+        util.opn(url).catch(() => null);
+      } else {
+        context.api.events.emit("show-main-page", "Knowledge base");
+        const url = generateUrl(wikiId);
+        if (url !== undefined) {
+          setTimeout(() => {
+            context.api.events.emit("navigate-knowledgebase", url);
+          }, 2000);
+        }
+      }
+    });
+  });
+
+  return true;
+}

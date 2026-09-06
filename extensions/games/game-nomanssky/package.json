@@ -1,0 +1,33 @@
+{
+  "name": "game-nomanssky",
+  "version": "1.0.3",
+  "description": "Support for No Man's Sky",
+  "scripts": {
+    "_assets": "copyfiles -u 1 -f ./assets/* dist",
+    "build": "node build.mjs && pnpm run _assets && pnpm extractInfo"
+  },
+  "author": "Black Tree Gaming Ltd.",
+  "license": "GPL-3.0",
+  "type": "commonjs",
+  "private": true,
+  "config": {
+    "game": "No Man's Sky"
+  },
+  "devDependencies": {
+    "@nexusmods/vortex-api": "workspace:*"
+  },
+  "nx": {
+    "tags": [
+      "vortex:extension"
+    ],
+    "targets": {
+      "build": {
+        "inputs": [
+          "default",
+          "typescript",
+          "vortex-api"
+        ]
+      }
+    }
+  }
+}

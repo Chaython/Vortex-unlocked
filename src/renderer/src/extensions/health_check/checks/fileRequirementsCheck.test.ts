@@ -1,0 +1,750 @@
+import { beforeEach, describe, expect, test, vi } from "vitest";
+
+// The file-requirements provider is tested end-to-end: real ports + resolver +
+// report mapping, with only the *endpoints* (v3 batch client, mod-details) and
+// the *input* (installed files) mocked. We feed installed files + canned endpoint
+// responses and assert the health-check reports that come out.
+vi.mock("@/extensions/health_check/utils/fileRequirements/installedFiles", () => ({
+  gatherInstalledFiles: vi.fn(),
+  gatherDownloadedFileRefs: vi.fn(),
+  makeInstalledFileHydrator: vi.fn(),
+  makeDownloadedFileHydrator: vi.fn(),
+}));
+vi.mock("@/extensions/nexus_integration/nexusV3Client", () => ({
+  createVortexNexusV3Client: vi.fn(),
+}));
+vi.mock("@/extensions/nexus_integration/selectors", () => ({ isLoggedIn: vi.fn() }));
+vi.mock("@/extensions/profile_management/selectors", () => ({ activeProfile: vi.fn() }));
+// mapRequirementsReport compares against this to drop Vortex-targeting dependencies;
+// the real module pulls in a heavy selector chain this test has no use for.
+vi.mock("@/extensions/nexus_integration/util/UIDs", () => ({ VORTEX_MOD_UID: "vortex-mod-uid" }));
+vi.mock("@/logging", () => ({ log: vi.fn() }));
+
+import {
+  gatherDownloadedFileRefs,
+  gatherInstalledFiles,
+  makeDownloadedFileHydrator,
+  makeInstalledFileHydrator,
+  type IDownloadedFileRef,
+  type IInstalledFile,
+  type IInstalledFileRef,
+} from "@/extensions/health_check/utils/fileRequirements/installedFiles";
+import { createVortexNexusV3Client } from "@/extensions/nexus_integration/nexusV3Client";
+import { isLoggedIn } from "@/extensions/nexus_integration/selectors";
+import { activeProfile } from "@/extensions/profile_management/selectors";
+import type { IProfile } from "@/extensions/profile_management/types/IProfile";
+import type { IExtensionApi } from "@/types/IExtensionContext";
+
+import type { IFileRequirementsCheckMetadata } from "../utils/fileRequirements/mapRequirementsReport";
+import { checkFileRequirements } from "./fileRequirementsCheck";
+
+const mockActiveProfile = vi.mocked(activeProfile);
+const mockIsLoggedIn = vi.mocked(isLoggedIn);
+const mockGather = vi.mocked(gatherInstalledFiles);
+const mockGatherDownloaded = vi.mocked(gatherDownloadedFileRefs);
+const mockHydrator = vi.mocked(makeInstalledFileHydrator);
+const mockDownloadedHydrator = vi.mocked(makeDownloadedFileHydrator);
+const mockCreateClient = vi.mocked(createVortexNexusV3Client);
+
+const api = { getState: () => ({}) } as unknown as IExtensionApi;
+
+/** A raw v3 dependency-candidate row (snake_case, as the endpoint returns it). */
+interface V3Candidate {
+  source_version_id: string;
+  definition_id: string;
+  mod_file_id: string;
+  version_id: string;
+  position: string;
+  category: string;
+  mod_status: string;
+  mod_id: string;
+}
+
+/** A raw v3 mod-detail row (snake_case, as /mods/batch returns it). */
+interface V3ModDetail {
+  id: string;
+  name: string;
+  summary?: string;
+  status?: string;
+  thumbnail_url?: string | null;
+  adult_content?: boolean;
+}
+
+/** Installed file metadata the resolver needs (its update-group "chain" + mod). */
+interface VersionFixture {
+  chain: string;
+  modId: string;
+  name?: string;
+  version?: string;
+}
+
+function ref(fileUID: string, enabled = true, emitRequirements = true): IInstalledFileRef {
+  return { fileUID, modId: `vortex-${fileUID}`, enabled, emitRequirements };
+}
+
+function downloadedRef(fileUID: string): IDownloadedFileRef {
+  return { fileUID, modUID: `moduid-${fileUID}`, downloadId: `download-${fileUID}` };
+}
+
+function installedFile(fileUID: string, enabled: boolean): IInstalledFile {
+  return {
+    modId: `vortex-${fileUID}`,
+    fileUID,
+    modUID: `moduid-${fileUID}`,
+    modName: `Mod ${fileUID}`,
+    fileName: `${fileUID}.zip`,
+    version: "1.0",
+    adultContent: false,
+    enabled,
+  };
+}
+
+function candidate(
+  over: Partial<V3Candidate> &
+    Pick<V3Candidate, "source_version_id" | "version_id" | "mod_file_id">,
+): V3Candidate {
+  return {
+    definition_id: "def-1",
+    position: "1.0",
+    category: "main",
+    mod_status: "published",
+    mod_id: "mod-uid",
+    ...over,
+  };
+}
+
+/** A fake v3 client backed by in-memory version + candidate + mod fixtures. */
+function fakeClient(
+  versions: Record<string, VersionFixture>,
+  candidates: V3Candidate[],
+  modDetails: V3ModDetail[] = [],
+) {
+  return {
+    getModFileVersionsBatch: vi.fn((ids: string[]) =>
+      Promise.resolve(
+        ids
+          .filter((id) => versions[id] !== undefined)
+          .map((id) => ({
+            id,
+            mod_id: versions[id].modId,
+            mod_file_id: versions[id].chain,
+            name: versions[id].name ?? `name-${id}`,
+            version: versions[id].version ?? "1.0",
+          })),
+      ),
+    ),
+    getModFileVersionDependencyCandidatesBatch: vi.fn(
+      (ids: readonly string[], page: number, pageSize: number) => {
+        const rows = candidates.filter((c) => ids.includes(c.source_version_id));
+        return Promise.resolve({
+          candidates: rows,
+          meta: { page, page_size: pageSize, total_count: rows.length },
+        });
+      },
+    ),
+    getModsBatch: vi.fn((ids: string[]) =>
+      Promise.resolve(modDetails.filter((m) => ids.includes(m.id))),
+    ),
+  };
+}
+
+/** Wire the mocks for one resolution run and return the metadata it produces. */
+async function runWith(opts: {
+  refs: IInstalledFileRef[];
+  downloadedRefs?: IDownloadedFileRef[];
+  versions: Record<string, VersionFixture>;
+  candidates: V3Candidate[];
+  modDetails?: V3ModDetail[];
+  /** Installed files the hydrator can't resolve, e.g. their mod left the store. */
+  unhydratable?: string[];
+}): Promise<IFileRequirementsCheckMetadata | undefined> {
+  const downloadedRefs = opts.downloadedRefs ?? [];
+  const unhydratable = new Set(opts.unhydratable ?? []);
+  mockGather.mockResolvedValue(opts.refs);
+  mockGatherDownloaded.mockResolvedValue(downloadedRefs);
+  mockHydrator.mockReturnValue((fileUID: string) => {
+    const found = opts.refs.find((r) => r.fileUID === fileUID);
+    return found && !unhydratable.has(fileUID) ? installedFile(fileUID, found.enabled) : undefined;
+  });
+  mockDownloadedHydrator.mockReturnValue((fileUID: string) => {
+    const found = downloadedRefs.find((r) => r.fileUID === fileUID);
+    if (!found) return undefined;
+    return {
+      downloadId: found.downloadId,
+      fileUID,
+      modUID: `moduid-${fileUID}`,
+      modName: `Downloaded ${fileUID}`,
+      fileName: `${fileUID}.zip`,
+      version: "1.0",
+      adultContent: false,
+    };
+  });
+  mockCreateClient.mockReturnValue(
+    fakeClient(opts.versions, opts.candidates, opts.modDetails) as unknown as ReturnType<
+      typeof createVortexNexusV3Client
+    >,
+  );
+
+  const result = await checkFileRequirements(api);
+  return result.metadata as IFileRequirementsCheckMetadata | undefined;
+}
+
+describe("checkFileRequirements / guards", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockActiveProfile.mockReturnValue({ gameId: "skyrimse" } as unknown as IProfile);
+    mockIsLoggedIn.mockReturnValue(true);
+    mockGatherDownloaded.mockResolvedValue([]);
+    mockDownloadedHydrator.mockReturnValue(() => undefined);
+  });
+
+  test("passes without resolving when there is no active profile", async () => {
+    mockActiveProfile.mockReturnValue(undefined);
+    const result = await checkFileRequirements(api);
+    expect(result.status).toBe("passed");
+    expect(mockGather).not.toHaveBeenCalled();
+  });
+
+  test("passes without resolving when no game is selected", async () => {
+    mockActiveProfile.mockReturnValue({ gameId: undefined } as unknown as IProfile);
+    const result = await checkFileRequirements(api);
+    expect(result.status).toBe("passed");
+    expect(result.message).toContain("No game selected");
+    expect(mockGather).not.toHaveBeenCalled();
+  });
+
+  test("passes without resolving when not logged in", async () => {
+    mockIsLoggedIn.mockReturnValue(false);
+    const result = await checkFileRequirements(api);
+    expect(result.status).toBe("passed");
+    expect(mockGather).not.toHaveBeenCalled();
+  });
+
+  test("passes without hitting the endpoints when nothing is installed", async () => {
+    mockGather.mockResolvedValue([]);
+    const result = await checkFileRequirements(api);
+    expect(result.status).toBe("passed");
+    expect(mockCreateClient).not.toHaveBeenCalled();
+  });
+});
+
+describe("checkFileRequirements / resolution", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockActiveProfile.mockReturnValue({ gameId: "skyrimse" } as unknown as IProfile);
+    mockIsLoggedIn.mockReturnValue(true);
+    mockGatherDownloaded.mockResolvedValue([]);
+    mockDownloadedHydrator.mockReturnValue(() => undefined);
+  });
+
+  // NOTE: fileDependencyPorts caches by UID across runs, so each case below uses
+  // distinct UIDs to stay independent.
+
+  test("reports a missing dependency with its recommended download", async () => {
+    const metadata = await runWith({
+      refs: [ref("ms_src")],
+      versions: {
+        ms_src: { chain: "ms_srcChain", modId: "ms_srcMod" },
+        ms_cand: { chain: "ms_candChain", modId: "ms_candMod", name: "SkyUI", version: "5.2" },
+      },
+      candidates: [
+        candidate({
+          source_version_id: "ms_src",
+          definition_id: "ms_def",
+          version_id: "ms_cand",
+          mod_file_id: "ms_candChain",
+          mod_id: "ms_candMod",
+        }),
+      ],
+      modDetails: [{ id: "ms_candMod", name: "SkyUI", adult_content: false }],
+    });
+
+    const reqs = metadata?.fileRequirements["ms_src"]?.requirements;
+    expect(reqs).toHaveLength(1);
+    expect(reqs?.[0]).toMatchObject({ kind: "missing", requirementDefId: "ms_def" });
+    expect(reqs?.[0].kind === "missing" && reqs[0].candidate).toMatchObject({
+      fileUID: "ms_cand",
+      modName: "SkyUI",
+      version: "5.2",
+    });
+  });
+
+  test("does not emit requirements for collection-managed source files", async () => {
+    const metadata = await runWith({
+      // cm_norm emits; cm_coll is collection-managed (emitRequirements:false).
+      refs: [ref("cm_norm"), ref("cm_coll", true, false)],
+      versions: {
+        cm_norm: { chain: "cm_normChain", modId: "cm_normMod" },
+        cm_coll: { chain: "cm_collChain", modId: "cm_collMod" },
+        cm_cand: { chain: "cm_candChain", modId: "cm_candMod", name: "Dep", version: "1.0" },
+      },
+      candidates: [
+        candidate({
+          source_version_id: "cm_norm",
+          definition_id: "cm_defN",
+          version_id: "cm_cand",
+          mod_file_id: "cm_candChain",
+          mod_id: "cm_candMod",
+        }),
+        candidate({
+          source_version_id: "cm_coll",
+          definition_id: "cm_defC",
+          version_id: "cm_cand",
+          mod_file_id: "cm_candChain",
+          mod_id: "cm_candMod",
+        }),
+      ],
+      modDetails: [{ id: "cm_candMod", name: "Dep", adult_content: false }],
+    });
+
+    expect(metadata?.fileRequirements["cm_norm"]?.requirements).toHaveLength(1);
+    expect(metadata?.fileRequirements["cm_coll"]).toBeUndefined();
+  });
+
+  test("reports a wrong (out-of-range) version that is installed and enabled", async () => {
+    const metadata = await runWith({
+      // wi_old shares the dependency chain but is NOT a listed candidate.
+      refs: [ref("wi_src"), ref("wi_old")],
+      versions: {
+        wi_src: { chain: "wi_srcChain", modId: "wi_srcMod" },
+        wi_old: { chain: "wi_depChain", modId: "wi_depMod" },
+        wi_new: { chain: "wi_depChain", modId: "wi_depMod", name: "SKSE", version: "2.2" },
+      },
+      candidates: [
+        candidate({
+          source_version_id: "wi_src",
+          definition_id: "wi_def",
+          version_id: "wi_new",
+          mod_file_id: "wi_depChain",
+          mod_id: "wi_depMod",
+        }),
+      ],
+      modDetails: [{ id: "wi_depMod", name: "SKSE", adult_content: false }],
+    });
+
+    const [req] = metadata?.fileRequirements["wi_src"]?.requirements ?? [];
+    expect(req).toMatchObject({
+      kind: "wrong-version-installed",
+      installedFile: { fileUID: "wi_old" },
+    });
+    expect(req.kind === "wrong-version-installed" && req.candidate.fileUID).toBe("wi_new");
+  });
+
+  test("reports a wrong version enabled while the correct version is installed-but-disabled", async () => {
+    const metadata = await runWith({
+      refs: [ref("we_src"), ref("we_old", true), ref("we_correct", false)],
+      versions: {
+        we_src: { chain: "we_srcChain", modId: "we_srcMod" },
+        we_old: { chain: "we_depChain", modId: "we_depMod" },
+        we_correct: { chain: "we_depChain", modId: "we_depMod" },
+      },
+      candidates: [
+        candidate({
+          source_version_id: "we_src",
+          definition_id: "we_def",
+          version_id: "we_correct",
+          mod_file_id: "we_depChain",
+          mod_id: "we_depMod",
+        }),
+      ],
+    });
+
+    const [req] = metadata?.fileRequirements["we_src"]?.requirements ?? [];
+    expect(req).toMatchObject({
+      kind: "wrong-version-enabled",
+      enabledFile: { fileUID: "we_old", enabled: true },
+      correctFile: { fileUID: "we_correct", enabled: false },
+    });
+  });
+
+  test("reports an OR with a download branch and an owned-but-disabled enable branch", async () => {
+    const metadata = await runWith({
+      // or_src depends on or_def, satisfiable by EITHER group or_g1 (not owned) or or_g2,
+      // whose acceptable version is installed but disabled while a wrong version of the
+      // same chain is enabled. Neither is enabled, so the OR is unsatisfied.
+      refs: [ref("or_src"), ref("or_g2_file", false), ref("or_g2_wrong")],
+      versions: {
+        or_src: { chain: "or_srcChain", modId: "or_srcMod" },
+        or_g1_file: { chain: "or_g1", modId: "or_g1Mod", name: "Alt A", version: "1.0" },
+        or_g2_file: { chain: "or_g2", modId: "or_g2Mod", name: "Alt B", version: "2.0" },
+        or_g2_wrong: { chain: "or_g2", modId: "or_g2Mod", name: "Alt B", version: "1.0" },
+      },
+      candidates: [
+        candidate({
+          source_version_id: "or_src",
+          definition_id: "or_def",
+          version_id: "or_g1_file",
+          mod_file_id: "or_g1",
+          mod_id: "or_g1Mod",
+        }),
+        candidate({
+          source_version_id: "or_src",
+          definition_id: "or_def",
+          version_id: "or_g2_file",
+          mod_file_id: "or_g2",
+          mod_id: "or_g2Mod",
+        }),
+      ],
+      modDetails: [{ id: "or_g1Mod", name: "Alt A", adult_content: false }],
+    });
+
+    const [req] = metadata?.fileRequirements["or_src"]?.requirements ?? [];
+    expect(req?.kind).toBe("or");
+    if (req?.kind !== "or") {
+      throw new Error("expected an OR requirement");
+    }
+    expect(req.branches).toHaveLength(2);
+
+    const downloadBranch = req.branches.find((b) => b.kind === "download");
+    const enableBranch = req.branches.find((b) => b.kind === "enable");
+    expect(downloadBranch?.kind === "download" && downloadBranch.candidate.fileUID).toBe(
+      "or_g1_file",
+    );
+    expect(enableBranch?.kind === "enable" && enableBranch.correctFile.fileUID).toBe("or_g2_file");
+    expect(enableBranch?.kind === "enable" && enableBranch.enabledFile?.fileUID).toBe(
+      "or_g2_wrong",
+    );
+  });
+
+  test("hides an OR whose alternative is owned but deliberately disabled", async () => {
+    const metadata = await runWith({
+      // ord_g2_file is an acceptable version the user installed and then disabled, with no
+      // wrong version enabled to explain it: enabling it would clear the OR, so the whole
+      // requirement stays hidden.
+      refs: [ref("ord_src"), ref("ord_g2_file", false)],
+      versions: {
+        ord_src: { chain: "ord_srcChain", modId: "ord_srcMod" },
+        ord_g1_file: { chain: "ord_g1", modId: "ord_g1Mod", name: "Alt A", version: "1.0" },
+        ord_g2_file: { chain: "ord_g2", modId: "ord_g2Mod", name: "Alt B", version: "2.0" },
+      },
+      candidates: [
+        candidate({
+          source_version_id: "ord_src",
+          definition_id: "ord_def",
+          version_id: "ord_g1_file",
+          mod_file_id: "ord_g1",
+          mod_id: "ord_g1Mod",
+        }),
+        candidate({
+          source_version_id: "ord_src",
+          definition_id: "ord_def",
+          version_id: "ord_g2_file",
+          mod_file_id: "ord_g2",
+          mod_id: "ord_g2Mod",
+        }),
+      ],
+    });
+
+    expect(metadata?.fileRequirements).toEqual({});
+  });
+
+  test("still offers an OR enable branch when the wrong enabled version can't be hydrated", async () => {
+    const metadata = await runWith({
+      // Same shape as the enable-branch case, but the wrong version has no display data -
+      // its mod left the store, so it isn't really installed any more. The alternative is
+      // still actionable, as a plain enable rather than a switch.
+      refs: [ref("orh_src"), ref("orh_g2_file", false), ref("orh_g2_wrong")],
+      unhydratable: ["orh_g2_wrong"],
+      versions: {
+        orh_src: { chain: "orh_srcChain", modId: "orh_srcMod" },
+        orh_g1_file: { chain: "orh_g1", modId: "orh_g1Mod" },
+        orh_g2_file: { chain: "orh_g2", modId: "orh_g2Mod" },
+        orh_g2_wrong: { chain: "orh_g2", modId: "orh_g2Mod" },
+      },
+      candidates: [
+        candidate({
+          source_version_id: "orh_src",
+          definition_id: "orh_def",
+          version_id: "orh_g1_file",
+          mod_file_id: "orh_g1",
+          mod_id: "orh_g1Mod",
+        }),
+        candidate({
+          source_version_id: "orh_src",
+          definition_id: "orh_def",
+          version_id: "orh_g2_file",
+          mod_file_id: "orh_g2",
+          mod_id: "orh_g2Mod",
+        }),
+      ],
+    });
+
+    const [req] = metadata?.fileRequirements["orh_src"]?.requirements ?? [];
+    expect(req?.kind).toBe("or");
+    if (req?.kind !== "or") {
+      throw new Error("expected an OR requirement");
+    }
+    expect(req.branches).toHaveLength(2);
+
+    const enableBranch = req.branches.find((b) => b.kind === "enable");
+    expect(enableBranch?.kind === "enable" && enableBranch.correctFile.fileUID).toBe("orh_g2_file");
+    expect(enableBranch?.kind === "enable" && enableBranch.enabledFile).toBeUndefined();
+  });
+
+  test("reports an OR install branch for an alternative that is downloaded but not installed", async () => {
+    const metadata = await runWith({
+      // oru_g2_file is an acceptable version the user downloaded but never installed. It
+      // must still show as its own alternative, or the user thinks only oru_g1 will do.
+      refs: [ref("oru_src")],
+      downloadedRefs: [downloadedRef("oru_g2_file")],
+      versions: {
+        oru_src: { chain: "oru_srcChain", modId: "oru_srcMod" },
+        oru_g1_file: { chain: "oru_g1", modId: "oru_g1Mod", name: "Alt A", version: "1.0" },
+        oru_g2_file: { chain: "oru_g2", modId: "oru_g2Mod", name: "Alt B", version: "2.0" },
+      },
+      candidates: [
+        candidate({
+          source_version_id: "oru_src",
+          definition_id: "oru_def",
+          version_id: "oru_g1_file",
+          mod_file_id: "oru_g1",
+          mod_id: "oru_g1Mod",
+        }),
+        candidate({
+          source_version_id: "oru_src",
+          definition_id: "oru_def",
+          version_id: "oru_g2_file",
+          mod_file_id: "oru_g2",
+          mod_id: "oru_g2Mod",
+        }),
+      ],
+      modDetails: [
+        { id: "oru_g1Mod", name: "Alt A", adult_content: false },
+        { id: "moduid-oru_g2_file", name: "Alt B", adult_content: true },
+      ],
+    });
+
+    const [req] = metadata?.fileRequirements["oru_src"]?.requirements ?? [];
+    expect(req?.kind).toBe("or");
+    if (req?.kind !== "or") {
+      throw new Error("expected an OR requirement");
+    }
+    expect(req.branches).toHaveLength(2);
+
+    const downloadBranch = req.branches.find((b) => b.kind === "download");
+    const installBranch = req.branches.find((b) => b.kind === "install");
+    expect(downloadBranch?.kind === "download" && downloadBranch.candidate.fileUID).toBe(
+      "oru_g1_file",
+    );
+    expect(installBranch?.kind === "install" && installBranch.uninstalledFile).toMatchObject({
+      fileUID: "oru_g2_file",
+      downloadId: "download-oru_g2_file",
+    });
+    expect(installBranch?.kind === "install" && installBranch.enabledFile).toBeUndefined();
+
+    // The downloaded alternative's display data is backfilled from /mods/batch, same as a
+    // non-OR downloaded requirement.
+    const detailsByUID = mockDownloadedHydrator.mock.calls.at(-1)?.[2];
+    expect(detailsByUID?.get("moduid-oru_g2_file")).toMatchObject({ adultContent: true });
+  });
+
+  test("offers a version switch on an OR install branch when a wrong version is enabled", async () => {
+    const metadata = await runWith({
+      // ors_g2_file is downloaded but not installed, and a wrong version of its chain is
+      // enabled: installing it has to switch the active version.
+      refs: [ref("ors_src"), ref("ors_g2_wrong")],
+      downloadedRefs: [downloadedRef("ors_g2_file")],
+      versions: {
+        ors_src: { chain: "ors_srcChain", modId: "ors_srcMod" },
+        ors_g1_file: { chain: "ors_g1", modId: "ors_g1Mod", name: "Alt A", version: "1.0" },
+        ors_g2_file: { chain: "ors_g2", modId: "ors_g2Mod", name: "Alt B", version: "2.0" },
+        ors_g2_wrong: { chain: "ors_g2", modId: "ors_g2Mod", name: "Alt B", version: "1.0" },
+      },
+      candidates: [
+        candidate({
+          source_version_id: "ors_src",
+          definition_id: "ors_def",
+          version_id: "ors_g1_file",
+          mod_file_id: "ors_g1",
+          mod_id: "ors_g1Mod",
+        }),
+        candidate({
+          source_version_id: "ors_src",
+          definition_id: "ors_def",
+          version_id: "ors_g2_file",
+          mod_file_id: "ors_g2",
+          mod_id: "ors_g2Mod",
+        }),
+      ],
+      modDetails: [{ id: "ors_g1Mod", name: "Alt A", adult_content: false }],
+    });
+
+    const [req] = metadata?.fileRequirements["ors_src"]?.requirements ?? [];
+    expect(req?.kind).toBe("or");
+    if (req?.kind !== "or") {
+      throw new Error("expected an OR requirement");
+    }
+
+    const installBranch = req.branches.find((b) => b.kind === "install");
+    expect(installBranch?.kind === "install" && installBranch.uninstalledFile.fileUID).toBe(
+      "ors_g2_file",
+    );
+    expect(installBranch?.kind === "install" && installBranch.enabledFile).toMatchObject({
+      fileUID: "ors_g2_wrong",
+      enabled: true,
+    });
+  });
+
+  test("reports nothing when the enabled installed version satisfies the dependency", async () => {
+    const metadata = await runWith({
+      refs: [ref("ok_src"), ref("ok_dep")],
+      versions: {
+        ok_src: { chain: "ok_srcChain", modId: "ok_srcMod" },
+        ok_dep: { chain: "ok_depChain", modId: "ok_depMod" },
+      },
+      candidates: [
+        candidate({
+          source_version_id: "ok_src",
+          definition_id: "ok_def",
+          version_id: "ok_dep",
+          mod_file_id: "ok_depChain",
+          mod_id: "ok_depMod",
+        }),
+      ],
+    });
+
+    expect(metadata?.fileRequirements).toEqual({});
+  });
+
+  test("derives a warning status and counts when requirements are found", async () => {
+    mockGather.mockResolvedValue([ref("w_src")]);
+    mockHydrator.mockReturnValue((fileUID) => installedFile(fileUID, true));
+    mockCreateClient.mockReturnValue(
+      fakeClient(
+        {
+          w_src: { chain: "w_srcChain", modId: "w_srcMod" },
+          w_cand: { chain: "w_candChain", modId: "w_candMod" },
+        },
+        [
+          candidate({
+            source_version_id: "w_src",
+            definition_id: "w_def",
+            version_id: "w_cand",
+            mod_file_id: "w_candChain",
+            mod_id: "w_candMod",
+          }),
+        ],
+        [{ id: "w_candMod", name: "Dep", adult_content: false }],
+      ) as unknown as ReturnType<typeof createVortexNexusV3Client>,
+    );
+
+    const result = await checkFileRequirements(api);
+    expect(result.status).toBe("warning");
+    expect(result.message).toContain("1 file requirements");
+  });
+
+  test("reports a correct-version-uninstalled requirement when the required file is downloaded but not installed", async () => {
+    // sourceWithUninstalledDep is installed and enabled. Its dependency is satisfied by
+    // uninstalledDependency, which the user has downloaded but not installed.
+    const metadata = await runWith({
+      refs: [ref("sourceWithUninstalledDep")],
+      downloadedRefs: [downloadedRef("uninstalledDependency")],
+      versions: {
+        sourceWithUninstalledDep: {
+          chain: "sourceWithUninstalledDepChain",
+          modId: "sourceWithUninstalledDepMod",
+        },
+        uninstalledDependency: {
+          chain: "uninstalledDependencyChain",
+          modId: "uninstalledDependencyMod",
+          name: "Downloaded Dep",
+          version: "1.0",
+        },
+      },
+      candidates: [
+        candidate({
+          source_version_id: "sourceWithUninstalledDep",
+          definition_id: "uninstalledDependencyDefinition",
+          version_id: "uninstalledDependency",
+          mod_file_id: "uninstalledDependencyChain",
+          mod_id: "uninstalledDependencyMod",
+        }),
+      ],
+    });
+
+    const reqs = metadata?.fileRequirements["sourceWithUninstalledDep"]?.requirements;
+    expect(reqs).toHaveLength(1);
+    expect(reqs?.[0]).toMatchObject({
+      kind: "correct-version-uninstalled",
+      requirementDefId: "uninstalledDependencyDefinition",
+      uninstalledFile: {
+        fileUID: "uninstalledDependency",
+        downloadId: "download-uninstalledDependency",
+      },
+    });
+    expect(reqs?.[0].kind === "correct-version-uninstalled" && reqs[0].enabledFile).toBeUndefined();
+  });
+
+  test("carries the wrong enabled version on a downloaded-but-not-installed requirement", async () => {
+    const metadata = await runWith({
+      // su_correct is downloaded but not installed while su_wrong, another version of the
+      // same chain, is enabled: installing it has to switch the active version.
+      refs: [ref("su_src"), ref("su_wrong")],
+      downloadedRefs: [downloadedRef("su_correct")],
+      versions: {
+        su_src: { chain: "su_srcChain", modId: "su_srcMod" },
+        su_correct: { chain: "su_depChain", modId: "su_depMod", name: "Dep", version: "2.0" },
+        su_wrong: { chain: "su_depChain", modId: "su_depMod", name: "Dep", version: "1.0" },
+      },
+      candidates: [
+        candidate({
+          source_version_id: "su_src",
+          definition_id: "su_def",
+          version_id: "su_correct",
+          mod_file_id: "su_depChain",
+          mod_id: "su_depMod",
+        }),
+      ],
+    });
+
+    const reqs = metadata?.fileRequirements["su_src"]?.requirements;
+    expect(reqs).toHaveLength(1);
+    expect(reqs?.[0]).toMatchObject({
+      kind: "correct-version-uninstalled",
+      uninstalledFile: { fileUID: "su_correct" },
+      enabledFile: { fileUID: "su_wrong", enabled: true },
+    });
+  });
+});
+
+describe("checkFileRequirements / abort", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockActiveProfile.mockReturnValue({ gameId: "skyrimse" } as unknown as IProfile);
+    mockIsLoggedIn.mockReturnValue(true);
+    mockGatherDownloaded.mockResolvedValue([]);
+    mockDownloadedHydrator.mockReturnValue(() => undefined);
+  });
+
+  // Cancelling a request already in flight is the v3 client's job and is covered there. What
+  // matters here is that an aborted run leaves no report for the registry to store.
+  test("throws instead of returning a result when the signal is already aborted", async () => {
+    mockGather.mockResolvedValue([ref("ab_src")]);
+    mockHydrator.mockReturnValue((fileUID: string) => installedFile(fileUID, true));
+    mockCreateClient.mockReturnValue(
+      fakeClient(
+        { ab_src: { chain: "ab_srcChain", modId: "ab_srcMod" } },
+        [],
+      ) as unknown as ReturnType<typeof createVortexNexusV3Client>,
+    );
+
+    await expect(checkFileRequirements(api, AbortSignal.abort())).rejects.toThrow();
+  });
+
+  test("throws when the signal aborts partway through the run", async () => {
+    const controller = new AbortController();
+    mockGather.mockImplementation(() => {
+      controller.abort();
+      return Promise.resolve([ref("ab2_src")]);
+    });
+    mockHydrator.mockReturnValue((fileUID: string) => installedFile(fileUID, true));
+    mockCreateClient.mockReturnValue(
+      fakeClient(
+        { ab2_src: { chain: "ab2_srcChain", modId: "ab2_srcMod" } },
+        [],
+      ) as unknown as ReturnType<typeof createVortexNexusV3Client>,
+    );
+
+    await expect(checkFileRequirements(api, controller.signal)).rejects.toThrow();
+  });
+});

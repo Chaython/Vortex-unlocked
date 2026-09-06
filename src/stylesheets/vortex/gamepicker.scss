@@ -1,0 +1,247 @@
+@use "sass:color";
+
+#gamepicker-layout {
+    text-align: right;
+}
+
+.gamepicker-body {
+    height: 100%;
+    // has to be relative for popovers to scroll along
+    position: relative;
+    overflow-y: auto;
+    overflow-x: hidden;
+    padding: 0 10px;
+    .popover {
+        max-width: 600px;
+    }
+}
+
+.game-thumbnail {
+    position: relative;
+    height: auto;
+    border: 0;
+    // Default width so the aspect-ratio Image box can resolve its height when
+    // the tile isn't in the Games-page grid (e.g. dashboard dashlets, which
+    // place it in a plain flex row). The .grid-games grid (ui/elements/grid.css)
+    // overrides this via the propped-in `w-full!` class on each tile.
+    width: 160px;
+
+    box-shadow: 0 4px 6px 0 rgba(0, 0, 0, 0.35);
+
+    &panel-primary {
+        border-color: $border-color;
+    }
+
+    &panel-default {
+        @extend .panel-default;
+        border-color: transparent;
+    }
+}
+
+.game-thumbnail-body {
+    @extend .panel-body;
+    padding: 0;
+
+    // Overlays live inside the design-system Image wrapper, whose <img> sits at
+    // z-1; lift them above it (but below the wrapper's z-5 border overlay).
+    .bottom,
+    .hover-menu,
+    .game-thumbnail-tags,
+    .game-thumbnail-info {
+        z-index: 2;
+    }
+
+    .bottom {
+        position: absolute;
+        left: 0;
+        top: 0;
+        right: 0;
+        bottom: 0;
+        white-space: normal;
+        display: flex;
+        padding: 60px 10px 10px 10px;
+        background: linear-gradient(to bottom, rgba(0, 0, 0, 0), rgba(0, 0, 0, 0.95));
+        flex-direction: column;
+        justify-content: flex-end;
+
+        &div {
+            margin: auto 0px;
+        }
+    }
+
+    .buttons {
+        height: 100%;
+        justify-content: center;
+        align-items: center;
+        > * {
+            display: inline-block;
+            margin: 4px;
+            background-color: $text-color;
+            color: $brand-clickable;
+            vertical-align: middle;
+            width: initial !important;
+            padding: 2px 8px;
+            &:hover {
+                background-color: $gray-darker;
+            }
+            &:active {
+                background-color: $gray-darker;
+            }
+            &:focus {
+                background-color: $gray-darker;
+            }
+        }
+        svg {
+            margin-right: 4px;
+        }
+    }
+
+    .name {
+        overflow: hidden;
+        text-overflow: ellipsis;
+        font-size: larger;
+        display: flex;
+        flex-direction: row;
+        flex-wrap: wrap;
+
+        .name-part {
+            margin-right: 0.2em;
+        }
+    }
+
+    .active-mods {
+        font-size: smaller;
+        > *:not(:first-child) {
+            margin-left: 4px;
+        }
+    }
+}
+
+.game-thumbnail-container-list {
+    min-width: 50px;
+    padding: 0px;
+    margin: 0px;
+    text-align: center;
+}
+
+.game-thumbnail-info {
+    position: absolute;
+    top: 8px;
+    right: 8px;
+    line-height: 0;
+    width: 24px;
+    height: 24px;
+    background: rgba($black, 0.3);
+    border: 1px solid rgba($white, 0.3);
+    svg {
+        stroke: $text-color;
+        stroke-width: 4px;
+    }
+}
+
+.game-thumbnail-tags {
+    display: flex;
+    align-items: flex-end;
+    font-size: smaller;
+
+    position: absolute;
+    top: 8px;
+    left: 8px;
+    padding: 2px 8px;
+    font-weight: 600;
+    box-shadow: 0px 2px 6px 1px rgba(0, 0, 0, 0.5);
+    background-color: $brand-info;
+    text-transform: uppercase;
+    color: $white;
+    border-radius: 20px;
+    font-family: $font-family-base;
+}
+
+.game-list-selected {
+    background-color: $table-bg-active;
+}
+
+.game-list-item {
+    .media-body {
+        justify-content: center;
+    }
+
+    .list-group-item:hover {
+        background-color: $gray-lighter;
+    }
+}
+
+.btngroup-game-list {
+    display: inline-flex;
+    button {
+        @extend .btn-embed;
+    }
+}
+
+.progress {
+    margin: 6px;
+}
+
+.discovery-progress-container {
+    display: flex;
+    align-items: center;
+    .progress {
+        height: 2em;
+        background-color: rgba(128, 128, 128, 0.5);
+        span {
+            color: $text-color;
+            text-shadow:
+                1px 1px 1px $gray-lighter,
+                -1px 1px 1px $gray-lighter,
+                1px -1px 1px $gray-lighter,
+                -1px -1px 1px $gray-lighter;
+            display: block;
+            width: 100%;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+    }
+}
+
+.discovery-progress-0 {
+    background-color: $brand-success;
+}
+
+.discovery-progress-1 {
+    background-color: $brand-info;
+}
+
+.discovery-progress-2 {
+    background-color: $brand-warning;
+}
+
+.discovery-progress-3 {
+    background-color: $brand-danger;
+}
+
+#img-add-game {
+    margin-bottom: 10px;
+}
+
+#game-panel-group {
+    .panel-heading {
+        background-color: color.adjust($table-bg, $lightness: -5%);
+        border-bottom: 1px solid $border-color;
+        display: flex;
+        align-items: center;
+
+        > .icon {
+            margin-right: 1em;
+        }
+    }
+
+    .panel,
+    .panel-body {
+        border: 0;
+    }
+
+    &:hover {
+        background-color: $table-bg-active;
+    }
+}

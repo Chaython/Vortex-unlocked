@@ -1,0 +1,52 @@
+{
+  "name": "issue-tracker",
+  "version": "0.1.4",
+  "description": "Track issues you reported on the dashboard",
+  "scripts": {
+    "_assets": "copyfiles -u 1 -f src/issue_tracker.scss dist",
+    "build": "node build.mjs && pnpm run _assets && pnpm extractInfo",
+    "typecheck": "pnpm tsc"
+  },
+  "author": "Black Tree Gaming Ltd.",
+  "license": "GPL-3.0",
+  "devDependencies": {
+    "@nexusmods/nexus-api": "catalog:",
+    "@types/bluebird": "catalog:",
+    "@types/node": "catalog:",
+    "@types/react": "catalog:",
+    "@types/react-bootstrap": "catalog:",
+    "@types/react-dom": "catalog:",
+    "@types/redux": "catalog:",
+    "@types/redux-thunk": "catalog:",
+    "copyfiles": "catalog:",
+    "lodash": "catalog:",
+    "react-i18next": "catalog:",
+    "react-markdown": "catalog:",
+    "react-redux": "catalog:",
+    "redux-act": "catalog:",
+    "tmp": "catalog:",
+    "typescript": "catalog:",
+    "@nexusmods/vortex-api": "workspace:*"
+  },
+  "nx": {
+    "tags": [
+      "vortex:extension"
+    ],
+    "targets": {
+      "build": {
+        "inputs": [
+          "default",
+          "typescript",
+          "vortex-api"
+        ]
+      },
+      "typecheck": {
+        "inputs": [
+          "default",
+          "typescript",
+          "vortex-api"
+        ]
+      }
+    }
+  }
+}

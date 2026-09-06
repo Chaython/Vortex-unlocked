@@ -1,0 +1,101 @@
+{
+  "$schema": "https://www.schemastore.org/package.json",
+  "name": "@vortex/monorepo",
+  "version": "1.0.0",
+  "private": true,
+  "type": "commonjs",
+  "packageManager": "pnpm@11.10.0+sha512.0b7f8b98060031904c017e3a41eb187a16d40eeb829b95c4f8cb03681761fc4ab53dd219115b9b447f4dce1a05a214764461e7d3703392a9f32f9511ce8c86c8",
+  "engines": {
+    "node": "24.17.0"
+  },
+  "devEngines": {
+    "runtime": {
+      "name": "node",
+      "version": "24.17.0",
+      "onFail": "download"
+    }
+  },
+  "volta": {
+    "node": "24.17.0",
+    "yarn": "1.22.19"
+  },
+  "scripts": {
+    "prepare": "husky",
+    "preinstall": "node ./scripts/create-env-file.mjs",
+    "dev": "pnpm nx run @vortex/main:dev",
+    "start": "pnpm nx run @vortex/main:start",
+    "build": "pnpm nx run-many -t build lint typecheck && pnpm run assets",
+    "assets": "node ./scripts/dependency-report.mjs",
+    "package": "pnpm cross-env NODE_ENV=production pnpm run build && pnpm cross-env NODE_ENV=production pnpm nx run @vortex/main:package",
+    "package:nosign": "pnpm cross-env NODE_ENV=production pnpm run build && pnpm cross-env NODE_ENV=production pnpm nx run @vortex/main:package:nosign",
+    "typecheck": "pnpm nx run-many -t typecheck",
+    "lint": "pnpm nx run-many -t lint",
+    "lint:verbose": "pnpm nx run-many -t lint:verbose",
+    "test": "pnpm nx run-many -t test test:integration --exclude @vortex/e2e",
+    "verify": "echo pnpm run format && pnpm run format && echo pnpm run build && pnpm run build && echo pnpm run test && pnpm run test",
+    "api": "pnpm nx run @nexusmods/vortex-api:build",
+    "format": "pnpm oxfmt",
+    "format:check": "pnpm oxfmt --check",
+    "format:staged": "git diff --name-only --cached | xargs --no-run-if-empty pnpm oxfmt",
+    "e2e": "pnpm nx run @vortex/e2e:e2e",
+    "e2e:headed": "pnpm nx run @vortex/e2e:e2e:headed",
+    "e2e:debug": "pnpm nx run @vortex/e2e:e2e:debug",
+    "e2e:report": "pnpm nx run @vortex/e2e:e2e:report",
+    "generate:query-types": "pnpm tsx scripts/generate-query-types.ts"
+  },
+  "lint-staged": {
+    "*": "pnpm exec oxfmt --no-error-on-unmatched-pattern"
+  },
+  "dependencies": {
+    "node": "catalog:"
+  },
+  "devDependencies": {
+    "@eslint-react/eslint-plugin": "catalog:",
+    "@eslint/js": "catalog:",
+    "@microsoft/api-extractor": "catalog:",
+    "@stylistic/eslint-plugin": "catalog:",
+    "@tailwindcss/cli": "catalog:",
+    "@types/copyfiles": "catalog:",
+    "@types/minimist": "catalog:",
+    "@types/node": "catalog:",
+    "@types/webpack-node-externals": "catalog:",
+    "@typescript-eslint/utils": "catalog:",
+    "@vitest/coverage-v8": "catalog:",
+    "@vitest/ui": "catalog:",
+    "cli-table3": "catalog:",
+    "copyfiles": "catalog:",
+    "cross-env": "catalog:",
+    "eslint": "catalog:",
+    "eslint-config-prettier": "catalog:",
+    "eslint-plugin-better-tailwindcss": "catalog:",
+    "eslint-plugin-perfectionist": "catalog:",
+    "fork-ts-checker-webpack-plugin": "catalog:",
+    "glob": "catalog:",
+    "globals": "catalog:",
+    "husky": "catalog:",
+    "lint-staged": "catalog:",
+    "minimist": "catalog:",
+    "nx": "catalog:",
+    "oxfmt": "catalog:",
+    "oxlint": "catalog:",
+    "oxlint-tsgolint": "catalog:",
+    "p-limit": "catalog:",
+    "rimraf": "catalog:",
+    "rolldown": "catalog:",
+    "sass": "catalog:",
+    "source-map-loader": "catalog:",
+    "tailwindcss": "catalog:",
+    "terser-webpack-plugin": "catalog:",
+    "ts-loader": "catalog:",
+    "tsconfig-paths-webpack-plugin": "catalog:",
+    "tsdown": "catalog:",
+    "tsx": "catalog:",
+    "typescript": "catalog:",
+    "typescript-eslint": "catalog:",
+    "vite": "catalog:",
+    "vitest": "catalog:",
+    "webpack": "catalog:",
+    "webpack-cli": "catalog:",
+    "webpack-node-externals": "catalog:"
+  }
+}

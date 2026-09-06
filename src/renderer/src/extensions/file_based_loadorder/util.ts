@@ -1,0 +1,124 @@
+import { DataInvalid, ProcessCanceled, UserCanceled } from "@vortex/shared/errors";
+
+import type * as types from "../../types/api";
+import { findRuleByRef } from "../mod_management/util/testModReference";
+import { activeGameId, lastActiveProfileForGame } from "../profile_management/selectors";
+import { setValidationResult } from "./actions/session";
+import { findGameEntry } from "./gameSupport";
+import { currentGameMods, currentLoadOrderForProfile } from "./selectors";
+import {
+  type ILoadOrderGameInfoExt,
+  type IValidationResult,
+  type LoadOrder,
+  LoadOrderSerializationError,
+  LoadOrderValidationError,
+  type ILoadOrderEntryExt,
+  type LockedState,
+} from "./types/types";
+
+// A load order entry is locked (pinned, not user-orderable) for any of the
+//  truthy LockedState values.
+export function isEntryLocked(locked: LockedState): boolean {
+  return locked === true || locked === "true" || locked === "always";
+}
+
+export const toExtendedLoadOrderEntry = (api: types.IExtensionApi) => {
+  return (entry: types.ILoadOrderEntry, index: number) => {
+    const state = api.getState();
+    const mods = currentGameMods(state);
+    const fileId = mods[entry?.modId]?.attributes?.fileId;
+    return { ...entry, index, fileId } as ILoadOrderEntryExt;
+  };
+};
+
+export function isModInCollection(collection: types.IMod, mod: types.IMod) {
+  return findRuleByRef(collection.rules, mod) !== undefined;
+}
+
+export async function genCollectionLoadOrder(
+  api: types.IExtensionApi,
+  gameEntry: ILoadOrderGameInfoExt,
+  mods: { [modId: string]: types.IMod },
+  profileId: string,
+  collection?: types.IMod,
+): Promise<LoadOrder> {
+  const state = api.getState();
+  try {
+    const prev = currentLoadOrderForProfile(state, profileId);
+    let loadOrder = await gameEntry.deserializeLoadOrder();
+    loadOrder = loadOrder.filter((entry) =>
+      collection !== undefined
+        ? isValidMod(mods[entry.modId]) && isModInCollection(collection, mods[entry.modId])
+        : isValidMod(mods[entry.modId]),
+    );
+    const validRes: IValidationResult = await gameEntry.validate(prev, loadOrder);
+    assertValidationResult(validRes);
+    if (validRes !== undefined) {
+      throw new LoadOrderValidationError(validRes, loadOrder);
+    }
+    return Promise.resolve(loadOrder);
+  } catch (err) {
+    return Promise.reject(err);
+  }
+}
+
+export function isValidMod(mod: types.IMod) {
+  return mod !== undefined && mod.type !== "collection";
+}
+
+function reportError(
+  api: types.IExtensionApi,
+  errorMessage: string,
+  errDetails: any,
+  allowReport: boolean = true,
+) {
+  const errorId = errorMessage + "notifId";
+  api.showErrorNotification(errorMessage, errDetails, {
+    allowReport,
+    id: errorId,
+  });
+}
+
+export async function errorHandler(api: types.IExtensionApi, gameId: string, err: Error) {
+  const gameEntry: ILoadOrderGameInfoExt = findGameEntry(gameId);
+  const allowReport =
+    !gameEntry.isContributed &&
+    !(err instanceof ProcessCanceled) &&
+    !(err instanceof DataInvalid) &&
+    !(err instanceof UserCanceled);
+  if (err instanceof LoadOrderValidationError) {
+    const invalLOErr = err as LoadOrderValidationError;
+    const profileId = lastActiveProfileForGame(api.getState(), gameId);
+    api.store.dispatch(setValidationResult(profileId, invalLOErr.validationResult));
+    const errorMessage = "Load order failed validation";
+    const details = {
+      message: errorMessage,
+      loadOrder: invalLOErr.loadOrderEntryNames,
+      reasons: invalLOErr.validationResult.invalid.map((invl) => `${invl.id} - ${invl.reason}\n`),
+    };
+    reportError(api, errorMessage, details, allowReport);
+  } else if (err instanceof LoadOrderSerializationError) {
+    const serErr = err as LoadOrderSerializationError;
+    const errMess = "Failed to serialize load order";
+    const details = {
+      loadOrder: serErr.loadOrder,
+    };
+    reportError(api, errMess, details, allowReport);
+  } else {
+    reportError(api, "Failed load order operation", err, allowReport);
+  }
+
+  return Promise.resolve();
+}
+
+export function assertValidationResult(validRes: any) {
+  if (validRes === undefined) {
+    return;
+  }
+  if (Array.isArray(validRes) || (validRes as IValidationResult)?.invalid === undefined) {
+    throw new TypeError(
+      "Received incorrect/invalid return type from validation function; " +
+        "expected object of type IValidationResult",
+    );
+  }
+}

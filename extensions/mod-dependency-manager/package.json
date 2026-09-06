@@ -1,0 +1,73 @@
+{
+  "name": "mod-dependency-manager",
+  "version": "0.3.0",
+  "description": "Control mod dependencies through drag & drop",
+  "scripts": {
+    "_assets": "copyfiles -u 1 -f src/stylesheets/*.scss src/language.json dist",
+    "build": "node build.mjs && pnpm run _assets && pnpm extractInfo",
+    "typecheck": "pnpm tsc"
+  },
+  "author": "Black Tree Gaming Ltd.",
+  "license": "GPL-3.0",
+  "devDependencies": {
+    "@nosferatu500/react-sortable-tree": "catalog:",
+    "@nosferatu500/theme-file-explorer": "catalog:",
+    "@types/lodash": "catalog:",
+    "@types/minimatch": "catalog:",
+    "@types/react": "catalog:",
+    "@types/react-bootstrap": "catalog:",
+    "@types/react-dom": "catalog:",
+    "@types/react-redux": "catalog:",
+    "@types/react-router": "catalog:",
+    "@types/semver": "catalog:",
+    "bluebird": "catalog:",
+    "copyfiles": "catalog:",
+    "cytoscape": "catalog:",
+    "cytoscape-cose-bilkent": "catalog:",
+    "cytoscape-edgehandles": "catalog:",
+    "i18next": "catalog:",
+    "immutability-helper": "catalog:",
+    "json-loader": "catalog:",
+    "lodash": "catalog:",
+    "memoize-one": "catalog:",
+    "minimatch": "catalog:",
+    "modmeta-db": "catalog:",
+    "react": "catalog:",
+    "react-bootstrap": "catalog:",
+    "react-dnd": "catalog:",
+    "react-dnd-html5-backend": "catalog:",
+    "react-dom": "catalog:",
+    "react-i18next": "catalog:",
+    "react-redux": "catalog:",
+    "react-select": "catalog:",
+    "redux": "catalog:",
+    "redux-act": "catalog:",
+    "redux-thunk": "catalog:",
+    "reselect": "catalog:",
+    "semver": "catalog:",
+    "shortid": "catalog:",
+    "turbowalk": "catalog:",
+    "@nexusmods/vortex-api": "workspace:*"
+  },
+  "nx": {
+    "tags": [
+      "vortex:extension"
+    ],
+    "targets": {
+      "build": {
+        "inputs": [
+          "default",
+          "typescript",
+          "vortex-api"
+        ]
+      },
+      "typecheck": {
+        "inputs": [
+          "default",
+          "typescript",
+          "vortex-api"
+        ]
+      }
+    }
+  }
+}

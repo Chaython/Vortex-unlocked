@@ -1,0 +1,122 @@
+import type { IGameListEntry } from "@nexusmods/nexus-api";
+
+import { getGame } from "@/extensions/gamemode_management/util/getGame";
+import type { IModRepoId } from "@/extensions/mod_management/types/IMod";
+import { log } from "@/logging";
+
+import { nexusGames } from "../util";
+import { nexusGameId } from "./convertGameId";
+
+const gameNum = (() => {
+  let cache: { [gameId: string]: number } | undefined;
+  let gamesList: IGameListEntry[];
+  return (gameId: string): number | undefined => {
+    const games = nexusGames();
+    if (cache === undefined || gamesList !== games) {
+      if (games.length > 0) {
+        cache = games.reduce((prev, game) => {
+          prev[game.domain_name] = game.id;
+          return prev;
+        }, {});
+        gamesList = games;
+      }
+    }
+
+    if (cache === undefined) {
+      return undefined;
+    }
+
+    const game = getGame(gameId);
+    return cache[nexusGameId(game, gameId)];
+  };
+})();
+
+export function makeFileUID(repoInfo: IModRepoId): string {
+  // check if gameId is numeric and if not, use gameNum() to convert
+  const gameIdNum = /^\d+$/.test(repoInfo.gameId)
+    ? parseInt(repoInfo.gameId, 10)
+    : gameNum(repoInfo.gameId);
+
+  if (gameIdNum === undefined || isNaN(gameIdNum)) {
+    return undefined;
+  }
+
+  const fileId = parseInt(repoInfo.fileId, 10);
+  if (isNaN(fileId)) {
+    return undefined;
+  }
+
+  return ((BigInt(gameIdNum) << BigInt(32)) | BigInt(fileId)).toString();
+}
+
+export function makeModUID(repoInfo: IModRepoId): string {
+  // check if gameId is numeric and if not, use gameNum() to convert
+  const gameIdNum = /^\d+$/.test(repoInfo.gameId)
+    ? parseInt(repoInfo.gameId, 10)
+    : gameNum(repoInfo.gameId);
+
+  if (gameIdNum === undefined || isNaN(gameIdNum)) {
+    return undefined;
+  }
+
+  const modId = parseInt(repoInfo.modId, 10);
+  if (isNaN(modId)) {
+    return undefined;
+  }
+
+  return ((BigInt(gameIdNum) << BigInt(32)) | BigInt(modId)).toString();
+}
+
+export function makeModAndFileUIDs(
+  gameId: string,
+  modId: string,
+  fileId: string,
+): { modUID: string; fileUID: string } {
+  // 1303 518 138454
+
+  const repoInfo = { gameId, modId, fileId };
+  if (process.env.NODE_ENV === "development") {
+    log("debug", "makeModAndFileUIDs", JSON.stringify(repoInfo));
+  }
+
+  // Early return if gameId, modId or fileId is missing or invalid
+  if (
+    !repoInfo.gameId ||
+    !repoInfo.modId ||
+    !repoInfo.fileId ||
+    isNaN(parseInt(repoInfo.modId, 10)) ||
+    isNaN(parseInt(repoInfo.fileId, 10))
+  ) {
+    return { modUID: undefined, fileUID: undefined };
+  }
+
+  const gameIdNum = /^\d+$/.test(repoInfo.gameId)
+    ? parseInt(repoInfo.gameId, 10)
+    : gameNum(repoInfo.gameId);
+
+  if (gameIdNum === undefined || isNaN(gameIdNum)) {
+    return { modUID: undefined, fileUID: undefined };
+  }
+
+  return {
+    modUID: makeModUID(repoInfo),
+    fileUID: makeFileUID(repoInfo),
+  };
+}
+
+/**
+ * Nexus's own "Vortex" listing (nexusmods.com/site/mods/1). A requirement or dependency
+ * resolving to it just means "requires Vortex," not an installable mod, so should be
+ * treated as always satisfied.
+ */
+export const VORTEX_MOD_UID = "9856949944321";
+
+/** Decode a composite UID ((gameId << 32) | id) into its numeric game id and low id. */
+export function decodeUID(uid: string): { gameId: number; id: number } | undefined {
+  try {
+    const value = BigInt(uid);
+    return { gameId: Number(value >> BigInt(32)), id: Number(value & BigInt(0xffffffff)) };
+  } catch {
+    return undefined;
+  }
+}

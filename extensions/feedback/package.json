@@ -1,0 +1,55 @@
+{
+  "name": "feedback",
+  "version": "0.0.2",
+  "description": "Feedback page",
+  "scripts": {
+    "_assets": "copyfiles -u 1 -f src/stylesheets/feedback.scss issues.json dist",
+    "build": "node build.mjs && pnpm extractInfo && pnpm run _assets",
+    "typecheck": "pnpm tsc",
+    "test": "pnpm exec vitest run"
+  },
+  "author": "Black Tree Gaming Ltd.",
+  "license": "GPL-3.0",
+  "devDependencies": {
+    "@mdi/js": "catalog:",
+    "@types/react": "catalog:",
+    "@types/react-bootstrap": "catalog:",
+    "@types/react-redux": "catalog:",
+    "@types/redux": "catalog:",
+    "@types/redux-thunk": "catalog:",
+    "@types/tmp": "catalog:",
+    "bluebird": "catalog:",
+    "copyfiles": "catalog:",
+    "cross-fetch": "catalog:",
+    "fuzzball": "catalog:",
+    "react-bootstrap": "catalog:",
+    "react-i18next": "catalog:",
+    "redux": "catalog:",
+    "redux-act": "catalog:",
+    "redux-thunk": "catalog:",
+    "tmp": "catalog:",
+    "@nexusmods/vortex-api": "workspace:*",
+    "winapi-bindings": "catalog:"
+  },
+  "nx": {
+    "tags": [
+      "vortex:extension"
+    ],
+    "targets": {
+      "build": {
+        "inputs": [
+          "default",
+          "typescript",
+          "vortex-api"
+        ]
+      },
+      "typecheck": {
+        "inputs": [
+          "default",
+          "typescript",
+          "vortex-api"
+        ]
+      }
+    }
+  }
+}

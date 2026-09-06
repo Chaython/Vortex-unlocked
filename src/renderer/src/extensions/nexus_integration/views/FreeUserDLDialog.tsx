@@ -1,0 +1,206 @@
+import type { IModFile, IModFileQuery } from "@nexusmods/nexus-api";
+import type Nexus from "@nexusmods/nexus-api";
+import { getErrorMessageOrDefault } from "@vortex/shared";
+import type { TFunction } from "i18next";
+import * as React from "react";
+import { Button } from "react-bootstrap";
+import { useSelector } from "react-redux";
+
+import Modal from "../../../controls/Modal";
+import type { ICollectionInstallSession } from "../../../types/collections/ICollectionInstallSession";
+import type { IComponentContext } from "../../../types/IComponentContext";
+import type { IState } from "../../../types/IState";
+import { freeUserDownloadPosition } from "../../../util/collectionInstallSession";
+import { log } from "../../../util/log";
+import opn from "../../../util/opn";
+import { MainContext } from "../../../views/MainWindow";
+import { NEXUS_BASE_URL } from "../constants";
+import { useRefreshUserInfoOnFocus } from "../hooks/useRefreshUserInfoOnFocus";
+import NXMUrl from "../NXMUrl";
+import { nexusGamesProm } from "../util";
+import { makeFileUID } from "../util/UIDs";
+import NewFreeDownloadModal from "./NewFreeDownloadModal";
+
+interface IFreeUserDLDialogProps {
+  t: TFunction;
+  nexus: Nexus;
+  onDownload: (url: string) => void;
+  onSkip: (url: string) => void;
+  onCancel: (url: string) => boolean;
+  onUpdated: () => void;
+  /** The membership improved, so every parked download can be re-resolved, not just the shown one. */
+  onRetry: () => void;
+}
+
+const FILE_QUERY: IModFileQuery = {
+  modId: true,
+  mod: {
+    summary: true,
+    name: true,
+    pictureUrl: true,
+    uploader: {
+      name: true,
+      avatar: true,
+    },
+  },
+  game: {
+    domainName: true,
+  },
+  name: true,
+  owner: {
+    memberId: true,
+  } as any,
+};
+
+type RecursivePartial<T> = {
+  [P in keyof T]?: T[P] extends Array<infer U>
+    ? Array<RecursivePartial<U>>
+    : T[P] extends object
+      ? RecursivePartial<T[P]>
+      : T[P];
+};
+
+const makeUnknown: (t: TFunction, url: NXMUrl) => RecursivePartial<IModFile> = (
+  t: TFunction,
+  url: NXMUrl,
+) => {
+  return {
+    modId: undefined,
+    mod: {
+      summary: t("N/A"),
+      name: t("Mod with id {{modId}}", { modId: url.modId }),
+      pictureUrl: null,
+      uploader: {
+        name: t("N/A"),
+        avatar: undefined,
+      },
+    },
+    game: {
+      domainName: undefined,
+    },
+    name: t("N/A"),
+    owner: {
+      member_id: undefined,
+    } as any,
+  };
+};
+
+function nop() {
+  // nop
+}
+
+function FreeUserDLDialog(props: IFreeUserDLDialogProps) {
+  const { t, nexus, onCancel, onDownload, onSkip, onUpdated } = props;
+
+  const urls: string[] = useSelector<IState, string[]>(
+    (state) => state.session["nexus"].freeUserDLQueue,
+  );
+
+  const collectionInstallSession = useSelector<IState, ICollectionInstallSession | undefined>(
+    (state) => state.session?.["collections"]?.activeSession,
+  );
+  const context = React.useContext<IComponentContext>(MainContext);
+
+  const [fileInfo, setFileInfo] = React.useState<any>(null);
+  const [positionText, setPositionText] = React.useState<string>("1/1");
+  const lastFetchUrl = React.useRef<string>();
+
+  // Vortex Unlocked: the queue dialog shows whenever a download is parked
+  // waiting for an authorised link from the website, regardless of membership.
+  const show = urls.length > 0;
+
+  useRefreshUserInfoOnFocus(context.api, show);
+
+  React.useEffect(() => {
+    if (collectionInstallSession?.mods == null) {
+      return;
+    }
+    const { position, total } = freeUserDownloadPosition(collectionInstallSession);
+    setPositionText(`${position}/${total}`);
+  }, [collectionInstallSession]);
+
+  React.useEffect(() => {
+    const fetchFileInfo = async () => {
+      const url: NXMUrl = new NXMUrl(urls[0]);
+
+      onUpdated();
+      setFileInfo(null);
+
+      try {
+        // makeFileUID needs the nexus games list to map domain -> numeric game id.
+        // This should've been done on startup, but there appears to be
+        // a race condition https://github.com/Nexus-Mods/Vortex/issues/22466
+        await nexusGamesProm();
+        const fileInfoList = await nexus.modFilesByUid(FILE_QUERY, [
+          makeFileUID({ fileId: url.fileId.toString(), gameId: url.gameId }),
+        ]);
+        if (fileInfoList.length > 0) {
+          setFileInfo(fileInfoList[0]);
+        } else {
+          setFileInfo(makeUnknown(t, url));
+        }
+      } catch (err) {
+        log("error", "failed to fetch file information", {
+          url,
+          error: getErrorMessageOrDefault(err),
+        });
+        setFileInfo(makeUnknown(t, url));
+      }
+    };
+
+    if (urls.length > 0 && urls[0] !== lastFetchUrl.current) {
+      lastFetchUrl.current = urls[0];
+      fetchFileInfo();
+    }
+  }, [urls]);
+
+  const cancel = React.useCallback(() => {
+    onCancel(urls[0]);
+  }, [onCancel, urls]);
+
+  const download = React.useCallback(() => {
+    onDownload(urls[0]);
+  }, [onDownload, urls]);
+
+  const skip = React.useCallback(() => {
+    onSkip(urls[0]);
+  }, [onSkip, urls]);
+
+  const openModPage = React.useCallback(() => {
+    opn(`${NEXUS_BASE_URL}/${fileInfo.game.domainName}/mods/${fileInfo.modId}`);
+  }, [fileInfo]);
+
+  const openAuthorPage = React.useCallback(() => {
+    opn(`${NEXUS_BASE_URL}/${fileInfo.game.domainName}/users/${fileInfo.owner.memberId}`);
+  }, [fileInfo]);
+
+  return (
+    <Modal id="free-user-dl-dialog" show={show} onHide={nop}>
+      <Modal.Header>
+        <Modal.Title>{t("Download mod")}</Modal.Title>
+      </Modal.Header>
+
+      <Modal.Body>
+        <NewFreeDownloadModal
+          fileInfo={fileInfo}
+          openModPage={openModPage}
+          positionText={positionText}
+          t={t}
+          onDownload={download}
+        />
+      </Modal.Body>
+
+      <Modal.Footer>
+        <Button id="cancel-button" onClick={cancel}>
+          {t("Cancel install")}
+        </Button>
+
+        <Button id="skip-button" onClick={skip}>
+          {t("Skip mod")}
+        </Button>
+      </Modal.Footer>
+    </Modal>
+  );
+}
+
+export default FreeUserDLDialog;

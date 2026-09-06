@@ -1,0 +1,121 @@
+{
+  "$schema": "https://www.schemastore.org/package.json",
+  "name": "@nexusmods/vortex-api",
+  "version": "1.0.0",
+  "license": "GPL-3.0-only",
+  "author": {
+    "name": "Black Tree Gaming Ltd.",
+    "url": "https://nexusmods.com"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Nexus-Mods/Vortex.git",
+    "directory": "packages/vortex-api"
+  },
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
+  "type": "module",
+  "types": "./src/index.ts",
+  "bin": {
+    "extractInfo": "./bin/extractInfo.mjs"
+  },
+  "exports": {
+    ".": {
+      "types": "./lib/api.d.ts"
+    }
+  },
+  "files": [
+    "lib",
+    "bin",
+    "README.md",
+    "docs"
+  ],
+  "scripts": {
+    "typecheck": "pnpm exec tsc -p tsconfig.lib.json",
+    "api:report": "pnpm exec api-extractor run --local"
+  },
+  "nx": {
+    "targets": {
+      "build": {
+        "executor": "nx:noop",
+        "dependsOn": [
+          "api:report"
+        ],
+        "cache": false,
+        "outputs": [
+          "{projectRoot}/lib/api.d.ts"
+        ]
+      },
+      "typecheck": {
+        "dependsOn": [
+          "build"
+        ],
+        "cache": true,
+        "inputs": [
+          "default",
+          "{projectRoot}/lib/api.d.ts",
+          "{projectRoot}/tsconfig.lib.json"
+        ],
+        "outputs": []
+      },
+      "api:report": {
+        "dependsOn": [
+          {
+            "target": "api:dts",
+            "projects": "@vortex/renderer"
+          }
+        ],
+        "cache": true,
+        "inputs": [
+          "default",
+          "{projectRoot}/api-extractor.json",
+          "{projectRoot}/lib/api.d.ts"
+        ],
+        "outputs": [
+          "{workspaceRoot}/etc/vortex.api.md",
+          "{projectRoot}/lib/tsdoc-metadata.json"
+        ]
+      }
+    }
+  },
+  "devDependencies": {
+    "@microsoft/api-extractor": "catalog:",
+    "@nexusmods/nexus-api": "catalog:",
+    "@types/react": "catalog:",
+    "@types/react-dom": "catalog:",
+    "@types/redux": "catalog:",
+    "date-fns": "catalog:",
+    "electron": "catalog:",
+    "i18next": "catalog:",
+    "modmeta-db": "catalog:",
+    "node-7z": "catalog:",
+    "re-reselect": "catalog:",
+    "react": "catalog:",
+    "redux": "catalog:",
+    "reselect": "catalog:",
+    "vitest": "catalog:"
+  },
+  "peerDependencies": {
+    "@types/bluebird": "catalog:",
+    "bluebird": "catalog:",
+    "fs-extra": "catalog:",
+    "immutability-helper": "catalog:",
+    "minimatch": "catalog:",
+    "react": "catalog:",
+    "react-bootstrap": "catalog:",
+    "react-dom": "catalog:",
+    "react-i18next": "catalog:",
+    "react-redux": "catalog:",
+    "react-select": "catalog:",
+    "redux": "catalog:",
+    "redux-act": "catalog:",
+    "redux-thunk": "catalog:",
+    "relaxed-json": "catalog:",
+    "semver": "catalog:",
+    "string-template": "catalog:",
+    "uuid": "catalog:",
+    "xml2js": "catalog:"
+  }
+}

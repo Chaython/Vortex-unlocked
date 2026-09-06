@@ -1,0 +1,24 @@
+import * as React from "react";
+
+import { truthy } from "../util/util";
+
+export interface IDashletProps {
+  className: string;
+  title: string;
+  children?: React.ReactNode;
+}
+
+class Dashlet extends React.Component<IDashletProps, {}> {
+  public render(): JSX.Element {
+    const { className, title } = this.props;
+    const classes = ["dashlet"].concat(className.split(" "));
+    return (
+      <div className={classes.join(" ")}>
+        {truthy(title) ? <div className="dashlet-title">{title}</div> : null}
+        {this.props.children}
+      </div>
+    );
+  }
+}
+
+export default Dashlet;

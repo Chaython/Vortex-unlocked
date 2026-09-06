@@ -1,0 +1,55 @@
+{
+  "name": "modtype-bepinex",
+  "version": "0.2.10",
+  "description": "Adds several BepInEx-specific modTypes and the ability to automatically download and install the library.",
+  "scripts": {
+    "_assets": "copyfiles -u 1 -f src/assets/* dist",
+    "build": "node build.mjs && pnpm extractInfo && pnpm run _assets",
+    "typecheck": "pnpm tsc"
+  },
+  "author": "Black Tree Gaming Ltd.",
+  "license": "GPL-3.0",
+  "type": "commonjs",
+  "private": true,
+  "config": {
+    "extensionName": "Mod Type: BepInEx"
+  },
+  "devDependencies": {
+    "@nexusmods/vortex-api": "workspace:*",
+    "@types/react": "catalog:",
+    "@types/redux": "catalog:",
+    "@types/semver": "catalog:",
+    "bluebird": "catalog:",
+    "copyfiles": "catalog:",
+    "i18next": "catalog:",
+    "lodash": "catalog:",
+    "react": "catalog:",
+    "react-i18next": "catalog:",
+    "semver": "catalog:",
+    "vortex-parse-ini": "catalog:"
+  },
+  "dependencies": {
+    "@iarna/toml": "catalog:"
+  },
+  "nx": {
+    "tags": [
+      "vortex:extension"
+    ],
+    "targets": {
+      "build": {
+        "inputs": [
+          "default",
+          "typescript",
+          "vortex-api"
+        ]
+      },
+      "typecheck": {
+        "inputs": [
+          "default",
+          "typescript",
+          "vortex-api"
+        ]
+      }
+    }
+  }
+}

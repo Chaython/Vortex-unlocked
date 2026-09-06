@@ -1,0 +1,10 @@
+{
+  "$schema": "./node_modules/oxfmt/configuration_schema.json",
+  "sortPackageJson": false,
+  "sortImports": {},
+  "sortTailwindcss": {
+    "stylesheet": "./src/stylesheets/tailwind-v4.css"
+  },
+  "ignorePatterns": ["etc/**", "src/renderer/src/index.html", ".github/actions/*/dist/**"],
+  "embeddedLanguageFormatting": "auto"
+}

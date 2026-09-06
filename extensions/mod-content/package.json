@@ -1,0 +1,50 @@
+{
+  "name": "mod-content",
+  "version": "0.2.4",
+  "description": "Add mod column indicating the content it contains",
+  "scripts": {
+    "_assets": "copyfiles -u 1 -f src/icons.svg src/mod-content.scss dist",
+    "build": "node build.mjs && pnpm run _assets && pnpm extractInfo",
+    "typecheck": "pnpm tsc"
+  },
+  "author": "Black Tree Gaming Ltd.",
+  "license": "GPL-3.0",
+  "devDependencies": {
+    "7z-bin": "catalog:",
+    "@nexusmods/vortex-api": "workspace:*",
+    "@types/node": "catalog:",
+    "@types/react": "catalog:",
+    "@types/react-bootstrap": "catalog:",
+    "@types/react-redux": "catalog:",
+    "@types/redux": "catalog:",
+    "@types/redux-thunk": "catalog:",
+    "bluebird": "catalog:",
+    "copyfiles": "catalog:",
+    "i18next": "catalog:",
+    "react": "catalog:",
+    "react-bootstrap": "catalog:",
+    "redux": "catalog:",
+    "turbowalk": "catalog:"
+  },
+  "nx": {
+    "tags": [
+      "vortex:extension"
+    ],
+    "targets": {
+      "build": {
+        "inputs": [
+          "default",
+          "typescript",
+          "vortex-api"
+        ]
+      },
+      "typecheck": {
+        "inputs": [
+          "default",
+          "typescript",
+          "vortex-api"
+        ]
+      }
+    }
+  }
+}

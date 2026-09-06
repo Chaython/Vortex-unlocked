@@ -1,0 +1,53 @@
+{
+  "name": "script-extender-installer",
+  "version": "1.1.14",
+  "description": "Install script extenders for Gamebyro games",
+  "scripts": {
+    "build": "node build.mjs && pnpm extractInfo",
+    "typecheck": "pnpm tsc"
+  },
+  "author": "Pickysaurus",
+  "license": "GPL-3.0",
+  "devDependencies": {
+    "7z-bin": "catalog:",
+    "@nexusmods/nexus-api": "catalog:",
+    "@types/bluebird": "catalog:",
+    "@types/lodash": "catalog:",
+    "@types/node": "catalog:",
+    "bluebird": "catalog:",
+    "copyfiles": "catalog:",
+    "electron": "catalog:",
+    "exe-version": "workspace:*",
+    "lodash": "catalog:",
+    "nexus-api": "catalog:",
+    "react": "catalog:",
+    "react-bootstrap": "catalog:",
+    "redux": "catalog:",
+    "typescript": "catalog:",
+    "@nexusmods/vortex-api": "workspace:*"
+  },
+  "dependencies": {
+    "semver": "catalog:"
+  },
+  "nx": {
+    "tags": [
+      "vortex:extension"
+    ],
+    "targets": {
+      "build": {
+        "inputs": [
+          "default",
+          "typescript",
+          "vortex-api"
+        ]
+      },
+      "typecheck": {
+        "inputs": [
+          "default",
+          "typescript",
+          "vortex-api"
+        ]
+      }
+    }
+  }
+}

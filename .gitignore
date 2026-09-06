@@ -1,0 +1,111 @@
+**/node_modules/*
+.pnpm-store
+typings
+dist
+dist_custom
+dist_portable
+dist_web
+out
+doc
+coverage
+.vscode/.BROWSE.VC.DB*
+*.VC.db
+app/bundledPlugins
+attachments
+sourcemaps
+*.env
+CodeSignTool*
+BuildPatchTool*
+
+# User-specific files
+*.suo
+
+# auto generated
+auto.gypi
+auto-top.gypi
+npm-debug.log*
+.DS_Store
+yarn-error.log
+
+# temporary fonts directory used during font-svg generation
+/fonts/
+
+# Build results
+[Dd]ebug/
+[Dd]ebugPublic/
+[Rr]elease/
+[Rr]eleases/
+api/lib/
+# we need to include the installer image
+build/
+bld/
+
+# DuckDB extension build output
+src/main/build/duckdb-extensions/
+[Oo]bj/
+lib/cpp/loot/loot/
+lib/cpp/loot/loot_api/docs/
+icons/material-design-icons-4.0.0
+icons/material-design
+icons/fontawesome/
+icons/Font-Awesome-SVG-PNG-master/
+icons/fontawesome/
+icons/Nucleo_Colored/
+icons/Nucleo_Glyph/
+icons/Nucleo_Outline/
+icons/nucleo-standard-license.txt
+BuildState*.json
+tools/stackmap/*.vsix
+changelog_*.txt
+eslint.log
+log.txt
+
+# Claude piping into nul file on windows
+nul
+
+# Claude Code directory
+.claude/settings.local.json
+
+# direnv
+.direnv/
+
+# Serena (AI agent) memory files
+.serena
+
+# Sewer's LLM artifacts
+PROMPT-*.md
+
+# Sewer's local reviews
+.vscode/local-reviews/
+
+# playright stuff
+playwright/playwright-report/
+playwright/run-*
+playwright/test-results/
+playwright/.test-session
+playwright/.run-counter
+
+# JetBrains
+.idea/
+
+# api-extractor
+temp/
+
+# ESLint
+.eslintcache
+
+# Flatpak
+.flatpak-builder/
+flatpak/.venv-flatpak/
+flatpak/flatpak-repo/
+
+flatpak/scripts/__pycache__/
+
+*.tsbuildinfo
+
+test-results/
+
+.codemogger
+
+.nx/cache
+.nx/workspace-data

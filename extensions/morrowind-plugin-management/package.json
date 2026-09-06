@@ -1,0 +1,51 @@
+{
+  "name": "morrowind-plugin-management",
+  "version": "0.1.0",
+  "description": "Management for Morrowind plugins",
+  "scripts": {
+    "_assets": "copyfiles -u 1 -f src/stylesheet.scss dist",
+    "build": "node build.mjs && pnpm run _assets && pnpm extractInfo",
+    "typecheck": "pnpm tsc"
+  },
+  "author": "Black Tree Gaming Ltd.",
+  "license": "GPL-3.0",
+  "devDependencies": {
+    "@nexusmods/vortex-api": "workspace:*",
+    "@types/react": "catalog:",
+    "@types/react-bootstrap": "catalog:",
+    "@types/react-dom": "catalog:",
+    "@types/react-redux": "catalog:",
+    "@types/react-router": "catalog:",
+    "@types/redux": "catalog:",
+    "@types/redux-thunk": "catalog:",
+    "bluebird": "catalog:",
+    "copyfiles": "catalog:",
+    "i18next": "catalog:",
+    "immutability-helper": "catalog:",
+    "react-dnd": "catalog:",
+    "react-i18next": "catalog:",
+    "typescript": "catalog:",
+    "vortex-parse-ini": "catalog:"
+  },
+  "nx": {
+    "tags": [
+      "vortex:extension"
+    ],
+    "targets": {
+      "build": {
+        "inputs": [
+          "default",
+          "typescript",
+          "vortex-api"
+        ]
+      },
+      "typecheck": {
+        "inputs": [
+          "default",
+          "typescript",
+          "vortex-api"
+        ]
+      }
+    }
+  }
+}

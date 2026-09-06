@@ -1,0 +1,61 @@
+{
+  "name": "mo-import",
+  "version": "0.0.2",
+  "description": "Import mods from Mod Organizer (MO)",
+  "scripts": {
+    "_assets": "copyfiles -u 1 -f src/stylesheets/mo-import.scss dist",
+    "build": "node build.mjs && pnpm run _assets && pnpm extractInfo",
+    "typecheck": "pnpm tsc"
+  },
+  "author": "Black Tree Gaming Ltd.",
+  "license": "GPL-3.0",
+  "type": "commonjs",
+  "private": true,
+  "config": {
+    "extensionName": "Import Tool: Mod Organizer (MO)"
+  },
+  "devDependencies": {
+    "@nexusmods/vortex-api": "workspace:*",
+    "@types/bluebird": "catalog:",
+    "@types/react": "catalog:",
+    "@types/react-bootstrap": "catalog:",
+    "@types/react-dom": "catalog:",
+    "@types/react-redux": "catalog:",
+    "@types/react-router": "catalog:",
+    "bluebird": "catalog:",
+    "copyfiles": "catalog:",
+    "i18next": "catalog:",
+    "immutability-helper": "catalog:",
+    "json-loader": "catalog:",
+    "modmeta-db": "catalog:",
+    "react": "catalog:",
+    "react-bootstrap": "catalog:",
+    "react-dom": "catalog:",
+    "react-i18next": "catalog:",
+    "redux": "catalog:",
+    "semver": "catalog:",
+    "shortid": "catalog:",
+    "vortex-parse-ini": "catalog:"
+  },
+  "nx": {
+    "tags": [
+      "vortex:extension"
+    ],
+    "targets": {
+      "build": {
+        "inputs": [
+          "default",
+          "typescript",
+          "vortex-api"
+        ]
+      },
+      "typecheck": {
+        "inputs": [
+          "default",
+          "typescript",
+          "vortex-api"
+        ]
+      }
+    }
+  }
+}

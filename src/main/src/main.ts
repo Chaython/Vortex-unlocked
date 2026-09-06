@@ -1,0 +1,355 @@
+// IPC handler for forked child processes requesting Electron app info
+if (process.send) {
+  process.on("message", (msg: unknown) => {
+    if (typeof msg === "object" && msg && "type" in msg && msg.type === "get-app-info") {
+      // You can expand this object with more info as needed
+      process.send?.({
+        type: "app-info",
+        appPath: app.getAppPath(),
+        userData: app.getPath("userData"),
+        temp: app.getPath("temp"),
+        appData: app.getPath("appData"),
+        exe: app.getPath("exe"),
+        home: app.getPath("home"),
+        documents: app.getPath("documents"),
+        desktop: app.getPath("desktop"),
+      });
+    }
+  });
+}
+
+import child_process from "node:child_process";
+import { appendFileSync, mkdirSync } from "node:fs";
+import { stat } from "node:fs/promises";
+import path from "node:path";
+import os from "os";
+
+import { DEBUG_PORT, getErrorMessageOrDefault, HTTP_HEADER_SIZE } from "@vortex/shared";
+import { app, crashReporter, dialog } from "electron";
+import i18next from "i18next";
+import * as sourceMapSupport from "source-map-support";
+import winapi from "winapi-bindings";
+
+// E2E test isolation: redirect userData and appData to temp directories so
+// parallel test workers share no data and don't conflict with the real install.
+if (process.env.VORTEX_E2E === "1") {
+  if (process.env.ELECTRON_USERDATA) {
+    app.setPath("userData", process.env.ELECTRON_USERDATA);
+  }
+  if (process.env.ELECTRON_APPDATA) {
+    app.setPath("appData", process.env.ELECTRON_APPDATA);
+  }
+}
+
+import Application from "./Application";
+import { parseCommandline } from "./cli";
+import { init as initDownloadIpc } from "./downloading/ipc";
+import { DownloadManager } from "./downloading/manager";
+import { terminateAsync } from "./errorHandling";
+import {
+  reportCrash,
+  errorToReportableError,
+  sendPendingCrashReport,
+  sendPendingNativeCrashReport,
+  sendReportFile,
+} from "./errorReporting";
+import { getVortexPath } from "./getVortexPath";
+import { init as initIpcHandlers } from "./ipcHandlers";
+import { log } from "./logging";
+import StylesheetCompiler from "./stylesheetCompiler";
+import { initTelemetryIpcHandler } from "./telemetry/ipcHandler";
+import { createMainTelemetryProvider } from "./telemetry/setup";
+import { init as initUploadIpc } from "./uploading/ipc";
+import { UploadManager } from "./uploading/manager";
+
+process.env["UV_THREADPOOL_SIZE"] = (os.cpus().length * 2).toString();
+
+const earlyErrHandler = (error: Error) => {
+  // Show the dialog first — dialog.showErrorBox is synchronous in Electron
+  // and blocks until the user dismisses it, giving the report time to send.
+  if ("stack" in error && typeof error.stack === "string" && error.stack.includes("[as dlopen]")) {
+    dialog.showErrorBox(
+      "Vortex failed to start up",
+      `An unexpected error occurred while Vortex was initialising:\n\n${error.message}\n\n` +
+        "This is often caused by a bad installation of the app, " +
+        "a security app interfering with Vortex " +
+        "or a problem with the Microsoft Visual C++ Redistributable installed on your PC. " +
+        "To solve this issue please try the following:\n\n" +
+        "- Wait a moment and try starting Vortex again\n" +
+        "- Reinstall Vortex from the Nexus Mods website\n" +
+        "- Install the latest Microsoft Visual C++ Redistributable (find it using a search engine)\n" +
+        "- Disable anti-virus or other security apps that might interfere and install Vortex again\n\n" +
+        "If the issue persists, please create a thread in our support forum for further assistance.",
+    );
+  } else {
+    dialog.showErrorBox(
+      "Unhandled error",
+      "Vortex failed to start up. This is usually caused by foreign software (e.g. Anti Virus) " +
+        "interfering.\n\n" +
+        error.stack,
+    );
+  }
+
+  // Send the crash report after the dialog is dismissed, then exit.
+  // reportCrash creates its own short-lived provider so it works before
+  // the main telemetry provider is initialized.
+  reportCrash("EarlyCrash", errorToReportableError(error))
+    .catch(() => {
+      /* best-effort — if this fails we still exit */
+    })
+    .finally(() => {
+      app.exit(1);
+    });
+};
+
+process.on("uncaughtException", earlyErrHandler);
+process.on("unhandledRejection", earlyErrHandler);
+
+// ensure the cwd is always set to the path containing the exe, otherwise dynamically loaded
+// dlls will not be able to load vc-runtime files shipped with Vortex.
+process.chdir(getVortexPath("application"));
+
+sourceMapSupport.install();
+
+function setEnv(key: string, value: string, force?: boolean) {
+  if (process.env[key] === undefined || force) {
+    process.env[key] = value;
+  }
+}
+
+if (process.env.NODE_ENV !== "development") {
+  setEnv("NODE_ENV", "production", true);
+}
+
+if (process.platform === "win32" && process.env.NODE_ENV !== "development") {
+  // On windows dlls may be loaded from directories in the path variable
+  // (which I don't know why you'd ever want that) so I filter path quite aggressively here
+  // to prevent dynamically loaded dlls to be loaded from unexpected locations.
+  // The most common problem this should prevent is the edge dll being loaded from
+  // "Browser Assistant" instead of our own.
+
+  const userPath = (process.env.HOMEDRIVE || "c:") + (process.env.HOMEPATH || "\\Users");
+  const programFiles = process.env.ProgramFiles || "C:\\Program Files";
+  const programFilesX86 = process.env["ProgramFiles(x86)"] || "C:\\Program Files (x86)";
+  const programData = process.env.ProgramData || "C:\\ProgramData";
+
+  const pathFilter = (envPath: string): boolean => {
+    return (
+      !envPath.startsWith(userPath) &&
+      !envPath.startsWith(programData) &&
+      !envPath.startsWith(programFiles) &&
+      !envPath.startsWith(programFilesX86)
+    );
+  };
+
+  const path = process.env.PATH;
+  if (path) {
+    process.env["PATH_ORIG"] = path.slice(0);
+    process.env["PATH"] = path.split(";").filter(pathFilter).join(";");
+  }
+}
+
+try {
+  winapi?.SetProcessPreferredUILanguages?.(["en-US"]);
+} catch {
+  // nop
+}
+
+process.env.Path = process.env.Path + path.delimiter + import.meta.dirname;
+
+const handleError = (error: Error) => {
+  if (Application.shouldIgnoreError(error)) {
+    return;
+  }
+
+  // Use terminateAsync instead of terminate here because this handler is
+  // registered on process 'uncaughtException' — throwing UserCanceled
+  // from terminate() would be a double-fault that kills the process
+  // before the dialog/report can run.
+  void terminateAsync(error);
+};
+
+async function main(): Promise<void> {
+  // important: The following has to be synchronous!
+  const mainArgs = parseCommandline(process.argv, false);
+
+  // Elevation diagnostics (issue #23043). Uses synchronous fs.appendFileSync
+  // (not winston) because the elevated Vortex.exe app.quit()s immediately
+  // after the --run handler spawns the inner Node child; winston's buffered
+  // writes can be lost in that window, and winston itself isn't initialised
+  // until later in Application's constructor.
+  const traceElevation = (stage: string, data?: Record<string, unknown>): void => {
+    try {
+      const line =
+        new Date().toISOString() +
+        " [DEBG] [MAIN] [elevation-trace] " +
+        stage +
+        " " +
+        JSON.stringify({ pid: process.pid, ...(data || {}) }) +
+        "\n";
+      appendFileSync(path.join(app.getPath("userData"), "vortex.log"), line);
+    } catch {
+      // diagnostics must never throw
+    }
+  };
+
+  traceElevation("main entry", { argv: process.argv });
+
+  if (mainArgs.report) {
+    return sendReportFile(mainArgs.report)
+      .catch((err: unknown) => {
+        log("warn", "failed to send crash report", {
+          error: getErrorMessageOrDefault(err),
+        });
+      })
+      .then(() => app.quit());
+  }
+
+  // --run is the entry point for the elevated helper chain (see
+  // src/renderer/src/util/elevated.ts). The renderer-side monitorConsent
+  // watchdog is tight, so this must run before the telemetry / IPC /
+  // stylesheet init below; in v2.0 those steps burned the budget and broke
+  // deployment elevation (issue #23043).
+  if (mainArgs.run !== undefined) {
+    traceElevation("--run detected, spawning inner Node child", {
+      tmpScript: mainArgs.run,
+    });
+    const appAsar = `${path.sep}app.asar${path.sep}`;
+    const execPath = process.execPath.replace(appAsar, `${path.sep}app.asar.unpacked${path.sep}`);
+
+    child_process
+      .spawn(execPath, [mainArgs.run], {
+        env: {
+          ...process.env,
+          ELECTRON_RUN_AS_NODE: "1",
+          ELECTRON_USERDATA: app.getPath("userData"),
+          ELECTRON_TEMP: app.getPath("temp"),
+          ELECTRON_APPDATA: app.getPath("appData"),
+          ELECTRON_HOME: app.getPath("home"),
+          ELECTRON_DOCUMENTS: app.getPath("documents"),
+          ELECTRON_EXE: app.getPath("exe"),
+          ELECTRON_DESKTOP: app.getPath("desktop"),
+          ELECTRON_APP_PATH: app.getAppPath(),
+          ELECTRON_ASSETS: path.join(app.getAppPath(), "assets"),
+          ELECTRON_ASSETS_UNPACKED: path.join(app.getAppPath() + ".unpacked", "assets"),
+          ELECTRON_MODULES: path.join(app.getAppPath(), "node_modules"),
+          ELECTRON_MODULES_UNPACKED: path.join(app.getAppPath() + ".unpacked", "node_modules"),
+          ELECTRON_BUNDLEDPLUGINS: path.join(app.getAppPath() + ".unpacked", "bundledPlugins"),
+          ELECTRON_LOCALES: path.resolve(app.getAppPath(), "..", "locales"),
+          ELECTRON_BASE: app.getAppPath(),
+          ELECTRON_BASE_UNPACKED: app.getAppPath() + ".unpacked",
+          ELECTRON_APPLICATION: path.resolve(app.getAppPath(), ".."),
+          ELECTRON_PACKAGE: app.getAppPath(),
+          ELECTRON_PACKAGE_UNPACKED: path.join(path.dirname(app.getAppPath()), "app.asar.unpacked"),
+        },
+        stdio: "inherit",
+        detached: true,
+      })
+      .on("error", (err) => {
+        traceElevation("inner child spawn error", { error: err.message });
+        // TODO: In practice we have practically no information about what we're running
+        //       at this point
+        dialog.showErrorBox("Failed to run script", err.message);
+      });
+    traceElevation("inner child spawn issued, quitting");
+    // quit this process, the new one is detached
+    app.quit();
+    return;
+  }
+
+  // Start Crashpad as early as possible so even startup crashes produce a
+  // dump; sendPendingNativeCrashReport picks it up on the next start. Must
+  // run before the sweeps below — they read the crashDumps path.
+  const dumpsPath = path.join(app.getPath("userData"), "temp", "dumps");
+  try {
+    mkdirSync(dumpsPath, { recursive: true });
+  } catch {
+    // ignored
+  }
+  app.setPath("crashDumps", dumpsPath);
+  crashReporter.start({ uploadToServer: false });
+
+  // Reports left by previous sessions, sent as early as possible — this
+  // startup may crash before getting any further. Not awaited so
+  // they don't delay startup.
+  void sendPendingCrashReport();
+  void sendPendingNativeCrashReport();
+
+  const NODE_OPTIONS = process.env.NODE_OPTIONS || "";
+  process.env.NODE_OPTIONS =
+    NODE_OPTIONS + ` --max-http-header-size=${HTTP_HEADER_SIZE}` + " --no-force-async-hooks-checks";
+
+  if (mainArgs.disableGPU) {
+    app.disableHardwareAcceleration();
+    app.commandLine.appendSwitch("--disable-software-rasterizer");
+    app.commandLine.appendSwitch("--disable-gpu");
+  }
+
+  app.commandLine.appendSwitch("disable-features", "WidgetLayering");
+  app.commandLine.appendSwitch("disable-features", "UseEcoQoSForBackgroundProcess");
+
+  createMainTelemetryProvider();
+
+  // Now that telemetry is available, swap in the proper error handler
+  // that supports crash reporting
+  process.removeListener("uncaughtException", earlyErrHandler);
+  process.removeListener("unhandledRejection", earlyErrHandler);
+  process.on("uncaughtException", handleError);
+  process.on("unhandledRejection", handleError);
+
+  const downloadManager = new DownloadManager({ concurrency: 1 });
+  const uploadManager = new UploadManager({ userAgent: `Vortex/${app.getVersion()}` });
+
+  initIpcHandlers();
+  initDownloadIpc(downloadManager);
+  initUploadIpc(uploadManager);
+  initTelemetryIpcHandler();
+
+  StylesheetCompiler.init();
+
+  if (process.env.VORTEX_E2E === "1") {
+    // Skip single-instance lock in e2e tests — each test worker runs its
+    // own Electron instance with an isolated user data directory.
+  } else if (!app.requestSingleInstanceLock()) {
+    app.disableHardwareAcceleration();
+    app.commandLine.appendSwitch("--in-process-gpu");
+    app.commandLine.appendSwitch("--disable-software-rasterizer");
+    app.quit();
+    return;
+  }
+
+  // async code only allowed from here on out
+
+  try {
+    await stat(getVortexPath("userData"));
+  } catch {
+    // no-op
+  }
+
+  if (
+    process.env.NODE_ENV === "development" &&
+    !app.commandLine.hasSwitch("remote-debugging-port")
+  ) {
+    // In e2e mode, use port 0 (OS-assigned random port) to avoid conflicts
+    // between parallel test workers. Otherwise use the fixed debug port.
+    const port = process.env.VORTEX_E2E === "1" ? "0" : DEBUG_PORT;
+    app.commandLine.appendSwitch("remote-debugging-port", port);
+  }
+
+  const fixedT = i18next.getFixedT("en");
+  try {
+    fixedT("dummy");
+  } catch {
+    /** ignored */
+  }
+
+  new Application(mainArgs);
+}
+
+main().catch((err: unknown) => {
+  if (err instanceof Error) {
+    handleError(err);
+  } else {
+    earlyErrHandler(new Error(getErrorMessageOrDefault(err)));
+  }
+});

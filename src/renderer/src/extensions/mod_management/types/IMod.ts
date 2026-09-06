@@ -1,0 +1,286 @@
+import type { IReference, IRule } from "modmeta-db";
+
+import type { IChoiceType } from "../../installer_fomod_shared/types/interface";
+
+export type { IReference, IRule };
+// The installer-choices shape is owned by the fomod installer (the only producer
+// today). Re-exported here so the install-customization fields have one import home.
+export type { IChoiceType };
+
+export type ModState = "downloading" | "downloaded" | "installing" | "installed";
+
+/**
+ * Binary patches applied to a mod's files when it is installed as a dependency,
+ * keyed by file path. The value is the hash of the baseline file the patch is
+ * applied against.
+ */
+export interface IModPatches {
+  [filePath: string]: string;
+}
+
+/**
+ * Attributes specific to Nexus Mods Collections (when IMod.type === "collection")
+ */
+export interface ICollectionAttributes {
+  collectionId: number;
+  collectionSlug: string;
+  revisionId: number;
+  revisionNumber: number;
+  downloadGame: string;
+  customFileName?: string;
+  shortDescription?: string;
+  pictureUrl?: string;
+  uploader?: string;
+  uploaderId?: number;
+  uploaderAvatar?: string;
+  uploadedTimestamp?: number;
+  updatedTimestamp?: number;
+  rating?: {
+    average: number;
+    total: number;
+  };
+  recommendNewProfile?: boolean;
+  installInstructions?: string;
+  bugMessage?: string;
+  modSize?: number;
+}
+
+/**
+ * Common attributes shared by all mods
+ */
+export interface ICommonModAttributes {
+  // Basic mod information
+  author?: string;
+  version?: string;
+  modName?: string;
+  modVersion?: string;
+  name?: string;
+  description?: string;
+  shortDescription?: string;
+
+  // Source and download information
+  source?: string;
+  fileName?: string;
+  fileSize?: number;
+  fileMD5?: string;
+  logicalFileName?: string;
+  additionalLogicalFileNames?: string[];
+  customFileName?: string;
+  downloadGame?: string;
+  game?: string[];
+  fileType?: string;
+
+  // Nexus Mods specific
+  modId?: number;
+  fileId?: number;
+  category?: string | number;
+  homepage?: string;
+  pictureUrl?: string;
+  uploader?: string;
+  uploaderUrl?: string;
+  uploaderId?: number;
+  uploadedTimestamp?: number;
+  updatedTimestamp?: number;
+
+  // Installation tracking
+  // Note: callers may set this as a Date object, but it is always serialized
+  // to an ISO string during persistence (via JSON.stringify) and rehydrated
+  // as a string on the next startup.
+  installTime?: string | Date;
+  installedAsDependency?: boolean;
+  referenceTag?: string;
+  // every collection-rule tag this mod satisfies; append-only superset of referenceTag, which
+  // holds the first tag stamped and is what older Vortex versions read
+  referenceTags?: string[];
+
+  // Installer and patching
+  installerChoices?: IChoiceType;
+  patches?: IModPatches;
+  fileList?: IFileListItem[];
+
+  // Version and updates
+  newestVersion?: string;
+  newestFileId?: number;
+
+  // Ratings and endorsements
+  allowRating?: boolean;
+  endorsement?: string;
+  endorsed?: string;
+
+  // Special mod types and flags
+  scriptExtender?: boolean;
+  is4GBPatcher?: boolean;
+  isPrimary?: number | boolean;
+
+  // Size information
+  modSize?: number;
+
+  // Messages and warnings
+  bugMessage?: string;
+}
+
+/**
+ * Comprehensive type for mod attributes that can be either common mod attributes,
+ * collection-specific attributes, or any custom attributes
+ */
+export type IModAttributes = Partial<ICommonModAttributes & ICollectionAttributes> & {
+  [key: string]: any;
+};
+
+/**
+ * represents a mod in all states (being downloaded, downloaded, installed)
+ *
+ * @interface IMod
+ */
+export interface IMod {
+  id: string;
+
+  state: ModState;
+  /**
+   * mod type (empty string is the default)
+   * this type is primarily used to determine how and where to deploy the mod, it
+   * could be "enb" for example to tell vortex the mod needs to be installed to the game
+   * directory. Different games will have different types.
+   *
+   * Special types:
+   * - "" (empty string): Default mod type
+   * - "collection": Nexus Mods collection
+   * - "dinput": Direct input mod (e.g., 4GB patch)
+   * - "enb": ENB graphics mod
+   * - game-specific types defined by game extensions
+   */
+  type: string;
+  // id of the corresponding download
+  archiveId?: string;
+  // path to the installed mod (will usually be the same as id)
+  installationPath: string;
+  /**
+   * dictionary of extended information fields
+   *
+   * Type-safe access to common attributes and collection attributes:
+   * - Use ICommonModAttributes for standard mod properties (author, version, etc.)
+   * - Use ICollectionAttributes when type === "collection"
+   * - Index signature allows any custom attributes for game-specific extensions
+   */
+  attributes?: IModAttributes;
+  // list of custom rules for this mod instance
+  rules?: IModRule[];
+  // list of enabled ini tweaks
+  enabledINITweaks?: string[];
+  // list of files that shall always be provided by this mod, no matter the deployment order
+  fileOverrides?: string[];
+}
+
+// identifies a mod in an online repository (like nexusmods.com)
+// we're assuming there will be at least an id for the file.
+// if the fileid is not unique across all mods we require an id to identify the mod.
+// if the modid is not unique across all games, we require an id to identify the game as well.
+export interface IModRepoId {
+  gameId?: string;
+  modId?: string;
+  fileId: string;
+}
+
+export interface IModReference extends IReference {
+  // if this is set, it's a reference tied to a local mod, all other attributes are then treated
+  // as a fallback, meaning they are only considered if a mod by this id doesn't exist.
+  id?: string;
+  // this is basically a cache. Once a rule has been successfully matched to a local mod, Vortex
+  // will check against that mod first. It will still have to fulfill all other attributes but if it
+  // does, no more check gets done.
+  idHint?: string;
+  // this can be used in combination with a fuzzy version match. If a file with this md5 hash
+  // exists, it gets used
+  md5Hint?: string;
+  // if a tag is set and a mod or archive has a referenceTag that is identical, that item will be
+  // used, no other attribute will be checked.
+  // When downloading/installing mods from dependencies, this tag is passed along and stored with
+  // the archive/mod to keep track which rule pulled it in.
+  tag?: string;
+  // the archive id is used only if it's the only flag alongside id, alowing to find a previously
+  // downloaded archive in the same way id helps find a locally installed mod
+  archiveId?: string;
+  // using a set of ids identifying the mod on a specific repository
+  repo?: { repository: string; campaign?: string } & IModRepoId;
+  // optional parameter used to display the reference in a user-friendly way if available.
+  // This is only used when the mod isn't installed, otherwise we always try to use the name
+  // the user chose for the mod.
+  description?: string;
+  instructions?: string;
+}
+
+/**
+ * a mod (requires/recommends) rule can provide a list of files to control how the referenced
+ * mod is to be installed if it gets installed as a dependency.
+ *
+ * At this time Vortex does not verify whether an already-installed mod contains these files,
+ * meaning the requires rule will not show red if these files get removed after installation
+ * of the dependency.
+ */
+export interface IFileListItem {
+  path: string;
+  // hex-encoded md5 hash
+  md5?: string;
+  // base64 encoded 64-bit xxhash
+  xxh64?: string;
+}
+
+export interface IDownloadHint {
+  mode: "direct" | "browse" | "manual";
+  url?: string;
+  instructions?: string;
+}
+
+/**
+ * A mod's "install spec": not which mod it is, but how it was installed - the
+ * installer choices, file list, and binary patches. This is the data that
+ * distinguishes the user-facing "variants" of a mod; it is NOT the named variant
+ * itself (that is the `mod.attributes.variant` string). Declared here so IModRule,
+ * IDependency and the install-spec matchers all draw the same three fields from a
+ * single source rather than re-declaring them and risking drift.
+ */
+export interface IModInstallSpec {
+  installerChoices?: IChoiceType;
+  fileList?: IFileListItem[];
+  // binary patches applied to the referenced mod's files when it is installed as a
+  // dependency
+  patches?: IModPatches;
+}
+
+/**
+ * Free-form metadata bag carried on any mod rule (and copied onto the IDependency built
+ * from it). The bag is general, not collection-specific: keys arrive from mod-metadata /
+ * nexus dependency rules too (e.g. `rules` for nested dependencies, `onlyIfFulfillable`).
+ * The named fields below are the common ones (most populated by the collection converter);
+ * the index signature is kept deliberately so the bag stays open. Legacy `patches` /
+ * `phase` may also live here on older rules; read those through ruleInstallSpec() /
+ * rulePhase() rather than off `extra` directly.
+ */
+export interface IModRuleExtra {
+  author?: string;
+  type?: string;
+  category?: string;
+  version?: string;
+  url?: string;
+  name?: string;
+  instructions?: string;
+  fileOverrides?: string[];
+  // bundled mods ship inside the collection archive; path of the file within it
+  localPath?: string;
+  [key: string]: any;
+}
+
+export interface IModRule extends IRule, IModInstallSpec {
+  reference: IModReference;
+  downloadHint?: IDownloadHint;
+  // install-ordering phase, matching IDependency.phase and ICollectionMod.phase. Older
+  // rules persisted this under `extra.phase`; read it via rulePhase() so the legacy
+  // location keeps working without a migration.
+  phase?: number;
+  // additional information attached to the rule. This will not have any effect on the
+  // resolution of the rule but may be used to customize/improve its presentation or to
+  // add details to a mod after/if it got installed through this rule.
+  extra?: IModRuleExtra;
+  // if true, the rule is deactivated and will not have an effect
+  ignored?: boolean;
+}

@@ -1,0 +1,155 @@
+{
+  "version": "0.2.0",
+  "compounds": [
+    {
+      "name": "Debug Electron",
+      "configurations": ["Debug Main Process", "Debug Renderer Process"],
+      "presentation": {
+        "hidden": false,
+        "group": "",
+        "order": 1
+      },
+      "stopAll": true
+    },
+    {
+      "name": "Debug Electron (System Electron)",
+      "configurations": ["Debug Main Process (System Electron)", "Debug Renderer Process"],
+      "presentation": {
+        "hidden": false,
+        "group": "",
+        "order": 1
+      },
+      "stopAll": true
+    },
+    {
+      "name": "Debug Electron (Staging)",
+      "configurations": ["Debug Main Process (Staging)", "Debug Renderer Process"],
+      "presentation": {
+        "hidden": false,
+        "group": "",
+        "order": 1
+      },
+      "stopAll": true
+    }
+  ],
+  "configurations": [
+    {
+      "name": "Debug Main Process",
+      "type": "node",
+      "request": "launch",
+      "runtimeExecutable": "${workspaceRoot}/src/main/node_modules/.bin/electron",
+      "windows": {
+        "runtimeExecutable": "${workspaceRoot}/src/main/node_modules/.bin/electron.cmd"
+      },
+      "runtimeArgs": [".", "--remote-debugging-port=9222"],
+      "cwd": "${workspaceRoot}/src/main",
+      "env": {
+        "NODE_ENV": "development",
+        "START_DEVTOOLS": "true"
+      },
+      "envFile": "${workspaceFolder}/.env",
+      "console": "integratedTerminal",
+      "sourceMaps": true,
+      "outFiles": ["${workspaceFolder}/src/main/build/**/*.{js,cjs}"],
+      "resolveSourceMapLocations": ["${workspaceFolder}/**", "!**/node_modules/**"],
+      "autoAttachChildProcesses": false,
+      "timeout": 60000,
+      "skipFiles": ["<node_internals>/**", "${workspaceFolder}/node_modules/**"]
+    },
+    {
+      "name": "Debug Main Process (System Electron)",
+      "type": "node",
+      "request": "launch",
+      "runtimeExecutable": "electron",
+      "args": ["."],
+      "runtimeArgs": ["--inspect=9229", "--remote-debugging-port=9222"],
+      // NixOS: VS Code's default NODE_OPTIONS injection doesn't work with system Electron.
+      // Use attachSimplePort to bypass the bootloader and attach directly.
+      // `--inspect-brk` made the combined main+renderer session hang intermittently, so this
+      // uses `--inspect` instead. Startup is a bit slower, but it is reliable.
+      "attachSimplePort": 9229,
+      "cwd": "${workspaceRoot}/src/main",
+      "env": {
+        "NODE_ENV": "development",
+        "START_DEVTOOLS": "true"
+      },
+      "envFile": "${workspaceFolder}/.env",
+      "console": "integratedTerminal",
+      "sourceMaps": true,
+      "outFiles": ["${workspaceFolder}/src/main/build/**/*.{js,cjs}"],
+      "resolveSourceMapLocations": ["${workspaceFolder}/**", "!**/node_modules/**"],
+      "timeout": 60000,
+      "skipFiles": ["<node_internals>/**", "${workspaceFolder}/node_modules/**"]
+    },
+    {
+      "name": "Debug Main Process (Staging)",
+      "type": "node",
+      "request": "launch",
+      "cwd": "${workspaceRoot}/src/main",
+      "runtimeExecutable": "${workspaceRoot}/src/main/node_modules/.bin/electron",
+      "windows": {
+        "runtimeExecutable": "${workspaceRoot}/src/main/node_modules/.bin/electron.cmd"
+      },
+      "runtimeArgs": ["."],
+      "env": {
+        "NODE_ENV": "development",
+        "START_DEVTOOLS": "true",
+        "VORTEX_DEV_UPDATER": "1",
+        "VORTEX_UPDATER_REPO": "Nexus-Mods/Vortex-Staging"
+      },
+      "envFile": "${workspaceFolder}/.env",
+      "console": "internalConsole",
+      "sourceMaps": true,
+      "outFiles": ["${workspaceFolder}/src/main/build/**/*.{js,cjs}"],
+      "skipFiles": ["<node_internals>/**", "${workspaceFolder}/node_modules/**"],
+      "autoAttachChildProcesses": false,
+      "timeout": 60000
+    },
+    {
+      "name": "Debug Renderer Process",
+      "type": "chrome",
+      "request": "attach",
+      "port": 9222,
+      "timeout": 60000,
+      "webRoot": "${workspaceFolder}",
+      "sourceMaps": true,
+      "outFiles": ["${workspaceFolder}/src/main/build/**/*.{js,cjs}"],
+      "sourceMapPathOverrides": {
+        "webpack://@vortex/renderer/./*": "${workspaceFolder}/src/renderer/*",
+        "webpack://@vortex/renderer/*": "${workspaceFolder}/src/renderer/*"
+      },
+      "skipFiles": [
+        "<node_internals>/**",
+        "${workspaceRoot}/node_modules/**",
+        "${workspaceRoot}/dist-electron/**"
+      ]
+    },
+    {
+      "name": "Debug Report Process",
+      "type": "node",
+      "request": "launch",
+      "runtimeExecutable": "${workspaceRoot}/src/main/node_modules/.bin/electron",
+      "windows": {
+        "runtimeExecutable": "${workspaceRoot}/src/main/node_modules/.bin/electron.cmd"
+      },
+      "runtimeArgs": ["."],
+      "args": ["--report", "${env:APPDATA}/@vortex/main/crashinfo.json"],
+      "cwd": "${workspaceRoot}/src/main",
+      "env": { "NODE_ENV": "development" },
+      "console": "integratedTerminal",
+      "sourceMaps": true,
+      "outFiles": ["${workspaceRoot}/src/main/build/**/*.{js,cjs}"],
+      "timeout": 60000,
+      "skipFiles": ["<node_internals>/**", "${workspaceFolder}/node_modules/**"]
+    },
+    {
+      "name": "Debug Jest Tests",
+      "type": "node",
+      "request": "launch",
+      "program": "${workspaceFolder}/node_modules/jest/bin/jest.js",
+      "args": ["__tests__/fblo.updateset.test.js", "--runInBand"],
+      "console": "integratedTerminal",
+      "internalConsoleOptions": "neverOpen"
+    }
+  ]
+}

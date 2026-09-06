@@ -1,0 +1,69 @@
+import React, { useEffect, useMemo, useReducer, type FC } from "react";
+import { Badge } from "react-bootstrap";
+import { useTranslation } from "react-i18next";
+
+import Icon from "../controls/Icon";
+import Spinner from "../controls/Spinner";
+import type { IUpdateable } from "../ReduxProp";
+import type { IMainPage } from "../types/IMainPage";
+
+interface IPageButtonProps {
+  page: IMainPage;
+  namespace: string;
+}
+
+export const PageButton: FC<React.PropsWithChildren<IPageButtonProps>> = (props) => {
+  const { namespace, page } = props;
+  const [, forceUpdate] = useReducer((x: number) => x + 1, 0);
+
+  const { t } = useTranslation();
+
+  // Create a stable object to pass to attach/detach that triggers re-renders
+  const updateHandle: IUpdateable = useMemo(() => ({ forceUpdate }), []);
+
+  useEffect(() => {
+    if (page.badge) {
+      page.badge.attach(updateHandle);
+    }
+    if (page.activity) {
+      page.activity.attach(updateHandle);
+    }
+
+    return () => {
+      if (page.badge) {
+        page.badge.detach(updateHandle);
+      }
+      if (page.activity) {
+        page.activity.detach(updateHandle);
+      }
+    };
+  }, [page, updateHandle]);
+
+  const renderBadge = () => {
+    if (page.badge === undefined) {
+      return null;
+    }
+    return <Badge>{page.badge.calculate()}</Badge>;
+  };
+
+  const renderActivity = () => {
+    if (page.activity === undefined || !page.activity.calculate()) {
+      return null;
+    }
+    return <Spinner />;
+  };
+
+  return (
+    <div>
+      <Icon name={page.icon} />
+
+      <span className="menu-label">{t(page.title, { ns: namespace })}</span>
+
+      {renderBadge()}
+
+      {renderActivity()}
+    </div>
+  );
+};
+
+export default PageButton;

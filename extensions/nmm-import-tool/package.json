@@ -1,0 +1,66 @@
+{
+  "name": "nmm-import-tool",
+  "version": "0.1.0",
+  "description": "Import tool for the Nexus Mod Manager (NMM)",
+  "scripts": {
+    "_assets": "copyfiles -u 1 -f src/stylesheets/import-tool.scss src/images/* dist",
+    "build": "node build.mjs && pnpm run _assets && pnpm extractInfo",
+    "typecheck": "pnpm tsc",
+    "test": "pnpm exec vitest run"
+  },
+  "author": "Black Tree Gaming Ltd.",
+  "license": "GPL-3.0",
+  "type": "commonjs",
+  "private": true,
+  "config": {
+    "extensionName": "Import Tool: Nexus Mod Manager (NMM)"
+  },
+  "devDependencies": {
+    "@types/node": "catalog:",
+    "@types/react": "catalog:",
+    "@types/react-bootstrap": "catalog:",
+    "@types/react-dom": "catalog:",
+    "@types/react-redux": "catalog:",
+    "@types/react-router": "catalog:",
+    "@types/redux": "catalog:",
+    "@types/semver": "catalog:",
+    "bluebird": "catalog:",
+    "copyfiles": "catalog:",
+    "i18next": "catalog:",
+    "immutability-helper": "catalog:",
+    "json-loader": "catalog:",
+    "modmeta-db": "catalog:",
+    "react": "catalog:",
+    "react-bootstrap": "catalog:",
+    "react-dom": "catalog:",
+    "react-i18next": "catalog:",
+    "redux": "catalog:",
+    "redux-act": "catalog:",
+    "redux-thunk": "catalog:",
+    "semver": "catalog:",
+    "shortid": "catalog:",
+    "@nexusmods/vortex-api": "workspace:*",
+    "winapi-bindings": "catalog:"
+  },
+  "nx": {
+    "tags": [
+      "vortex:extension"
+    ],
+    "targets": {
+      "build": {
+        "inputs": [
+          "default",
+          "typescript",
+          "vortex-api"
+        ]
+      },
+      "typecheck": {
+        "inputs": [
+          "default",
+          "typescript",
+          "vortex-api"
+        ]
+      }
+    }
+  }
+}

@@ -1,0 +1,50 @@
+{
+  "name": "titlebar-launcher",
+  "version": "1.0.6",
+  "description": "Adds a launcher bar on the titlebar",
+  "vortex": {
+    "version": ">=1.2.0"
+  },
+  "scripts": {
+    "_assets": "copyfiles -u 1 -f titlebar-launcher.scss src/images/* dist",
+    "build": "node build.mjs && pnpm run _assets && pnpm extractInfo",
+    "typecheck": "pnpm tsc"
+  },
+  "author": "Black Tree Gaming Ltd.",
+  "license": "GPL-3.0",
+  "devDependencies": {
+    "7z-bin": "catalog:",
+    "@types/node": "catalog:",
+    "@types/react": "catalog:",
+    "@types/react-bootstrap": "catalog:",
+    "copyfiles": "catalog:",
+    "memoize-one": "catalog:",
+    "react-i18next": "catalog:",
+    "react-redux": "catalog:",
+    "redux": "catalog:",
+    "redux-act": "catalog:",
+    "typescript": "catalog:",
+    "@nexusmods/vortex-api": "workspace:*"
+  },
+  "nx": {
+    "tags": [
+      "vortex:extension"
+    ],
+    "targets": {
+      "build": {
+        "inputs": [
+          "default",
+          "typescript",
+          "vortex-api"
+        ]
+      },
+      "typecheck": {
+        "inputs": [
+          "default",
+          "typescript",
+          "vortex-api"
+        ]
+      }
+    }
+  }
+}

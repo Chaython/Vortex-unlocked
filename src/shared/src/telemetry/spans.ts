@@ -1,0 +1,75 @@
+import type { Span } from "@opentelemetry/api";
+import { SpanStatusCode } from "@opentelemetry/api";
+
+import { computeErrorFingerprint, getErrorCode, sanitizeFramePath } from "../errors";
+
+/**
+ * Record an error on a span: compute fingerprint, record the exception,
+ * and set ERROR status. Optionally attach extra attributes and
+ * ambient context entries (prefixed with `context.`).
+ *
+ * The error's message and stack are passed through `sanitizeFramePath`
+ * before being attached, so OS usernames and absolute install paths do
+ * not reach the telemetry backend (GDPR Art. 5(1)(c) data minimisation).
+ * The caller's Error object is not mutated.
+ */
+export const recordErrorOnSpan = (
+  span: Span,
+  error: Error,
+  appVersion: string,
+  context?: Record<string, string>,
+  attributes?: Record<string, string | number | boolean>,
+): void => {
+  const sanitizedMessage = sanitizeFramePath(error.message);
+  const sanitizedStack = error.stack !== undefined ? sanitizeFramePath(error.stack) : undefined;
+  const sanitized = new Error(sanitizedMessage);
+  sanitized.name = error.name;
+  sanitized.stack = sanitizedStack;
+
+  if (attributes !== undefined) {
+    for (const [key, value] of Object.entries(attributes)) {
+      span.setAttribute(key, value);
+    }
+  }
+
+  if (context !== undefined) {
+    for (const [key, value] of Object.entries(context)) {
+      span.setAttribute(`context.${key}`, value);
+    }
+  }
+
+  const fingerprint = computeErrorFingerprint(
+    sanitizedStack,
+    appVersion,
+    errorDiscriminator(error),
+  );
+  if (fingerprint !== undefined) {
+    span.setAttribute("error.fingerprint", fingerprint);
+  }
+
+  span.recordException(sanitized);
+  span.setStatus({ code: SpanStatusCode.ERROR, message: sanitizedMessage });
+};
+
+/**
+ * An error `discriminator` that distinguishes error sub-types that share an
+ * identical stack. Combines the runtime class name (`error.constructor.name`,
+ * e.g. `TypeError`, `HttpError`) with the `code` property when present, so
+ * different error types thrown from the same call site don't collapse into one
+ * fingerprint. The generic `Error` class name is omitted to keep plain errors'
+ * fingerprints stable.
+ */
+const errorDiscriminator = (error: Error): string | undefined => {
+  const code = getErrorCode(error);
+  // `constructor.name` is accurate for live errors but degrades to "Error" for
+  // any error rebuilt from the IPC wire (see error-serialization.ts, which always
+  // mints a plain Error). `error.name` is the serialization-durable type signal,
+  // so fall back to it once `constructor.name` is the generic "Error".
+  const ctorName = error.constructor?.name;
+  const typeName =
+    ctorName !== undefined && ctorName !== "" && ctorName !== "Error" ? ctorName : error.name;
+  const parts = [typeName, typeof code === "string" ? code : undefined].filter(
+    (part): part is string => part !== undefined && part !== "" && part !== "Error",
+  );
+  return parts.length > 0 ? parts.join(":") : undefined;
+};

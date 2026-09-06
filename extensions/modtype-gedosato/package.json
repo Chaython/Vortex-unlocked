@@ -1,0 +1,47 @@
+{
+  "name": "modtype-gedosato",
+  "version": "0.0.1",
+  "description": "Support for GeDoSaTo mods",
+  "scripts": {
+    "build": "node build.mjs && pnpm extractInfo",
+    "typecheck": "pnpm tsc"
+  },
+  "author": "Black Tree Gaming Ltd.",
+  "license": "GPL-3.0",
+  "type": "commonjs",
+  "private": true,
+  "config": {
+    "extensionName": "Mod Type: GeDoSaTo"
+  },
+  "devDependencies": {
+    "@types/redux": "catalog:",
+    "@types/redux-thunk": "catalog:",
+    "bluebird": "catalog:",
+    "copyfiles": "catalog:",
+    "i18next": "catalog:",
+    "redux-thunk": "catalog:",
+    "@nexusmods/vortex-api": "workspace:*",
+    "winapi-bindings": "catalog:"
+  },
+  "nx": {
+    "tags": [
+      "vortex:extension"
+    ],
+    "targets": {
+      "build": {
+        "inputs": [
+          "default",
+          "typescript",
+          "vortex-api"
+        ]
+      },
+      "typecheck": {
+        "inputs": [
+          "default",
+          "typescript",
+          "vortex-api"
+        ]
+      }
+    }
+  }
+}

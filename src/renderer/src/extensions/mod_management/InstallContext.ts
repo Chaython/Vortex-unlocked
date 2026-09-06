@@ -1,0 +1,485 @@
+import * as path from "path";
+
+import {
+  addNotification,
+  dismissNotification,
+  updateNotification,
+} from "../../actions/notifications";
+import { startActivity, stopActivity } from "../../actions/session";
+import type { IExtensionApi } from "../../types/IExtensionContext";
+import type { INotification } from "../../types/INotification";
+import type { IState } from "../../types/IState";
+import getVortexPath from "../../util/getVortexPath";
+import { log } from "../../util/log";
+import type { IPrettifiedError } from "../../util/message";
+import { showError } from "../../util/message";
+import { getSafe } from "../../util/storeHelper";
+import type { ModInstallKind } from "../analytics/mixpanel/MixpanelEvents";
+import {
+  emitModInstallOutcome,
+  emitModInstallStarted,
+} from "../analytics/mixpanel/modInstallAnalytics";
+import { setDownloadInstalled } from "../download_management/actions/state";
+import { getModType } from "../gamemode_management/util/modTypeExtensions";
+import NXMUrl from "../nexus_integration/NXMUrl";
+import { setModsEnabled } from "../profile_management/actions/profiles";
+import {
+  addMod,
+  removeMod,
+  setModAttributes,
+  setModInstallationPath,
+  setModState,
+  setModType,
+} from "./actions/mods";
+import type { NotificationAggregator } from "./NotificationAggregator";
+import type { IInstallContext, InstallOutcome } from "./types/IInstallContext";
+import type { IMod, ModState } from "./types/IMod";
+import getModName from "./util/modName";
+
+class InstallContext implements IInstallContext {
+  private mAddMod: (mod: IMod) => void;
+  private mRemoveMod: (modId: string) => void;
+  private mAddNotification: (notification: INotification) => void;
+  private mUpdateNotification: (id: string, progress: number, message: string) => void;
+  private mDismissNotification: (id: string) => void;
+  private mShowError: (
+    message: string,
+    details?: any,
+    allowReport?: boolean,
+    replace?: { [key: string]: string },
+  ) => void;
+  private mSetModState: (id: string, state: ModState) => void;
+  private mSetModAttributes: (id: string, attributes: { [key: string]: any }) => void;
+  private mSetModInstallationPath: (id: string, installPath: string) => void;
+  private mSetModType: (id: string, modType: string) => void;
+  private mEnableMod: (modId: string) => void;
+  private mSetDownloadInstalled: (archiveId: string, gameId: string, modId: string) => void;
+  private mStartActivity: (activityId: string) => void;
+  private mStopActivity: (activityId: string) => void;
+  private mAddedId: string;
+  private mIndicatorId: string;
+  private mGameId: string;
+  private mArchiveId: string;
+  private mInstallKind: ModInstallKind = "fresh";
+  private mInstallOutcome: InstallOutcome;
+  private mFailReason: string;
+  private mFailError: IPrettifiedError;
+  private mIsEnabled: (modId: string) => boolean;
+  private mIsDownload: (archiveId: string) => boolean;
+  private mSilent: boolean = false;
+  private mDidReportError: boolean = false;
+
+  private mLastPhase: string;
+  private mLastProgress: number;
+
+  private mApi: IExtensionApi;
+  private mStartTime: number;
+  private mNotificationAggregator?: NotificationAggregator;
+  private mSourceModId?: string;
+  private mActionBuffer: any[] | null = null;
+
+  // Successive auto-enabled installs share this toast id, so a batch (many mods installed in
+  // quick succession) collapses into one count-updating toast instead of stacking one per mod.
+  // Shared across every InstallContext instance since a fresh one is constructed per install.
+  private static readonly BATCH_TOAST_ID = "mod-installed-batch";
+  private static readonly BATCH_TOAST_DISPLAY_MS = 4000;
+  private static sBatchToast: { count: number; lastAt: number } = { count: 0, lastAt: 0 };
+
+  constructor(
+    gameMode: string,
+    api: IExtensionApi,
+    silent: boolean,
+    notificationAggregator?: NotificationAggregator,
+    sourceModId?: string,
+  ) {
+    this.mStartTime = Date.now();
+    this.mApi = api;
+    this.mNotificationAggregator = notificationAggregator;
+    this.mSourceModId = sourceModId;
+    const store = api.store;
+    const dispatch = store.dispatch;
+    const doDispatch = (action: any) => {
+      if (this.mActionBuffer !== null) {
+        this.mActionBuffer.push(action);
+      } else {
+        dispatch(action);
+      }
+    };
+    this.mAddMod = (mod) => dispatch(addMod(gameMode, mod));
+    this.mRemoveMod = (modId) => dispatch(removeMod(gameMode, modId));
+    this.mAddNotification = (notification) => api.sendNotification(notification);
+    this.mUpdateNotification = (id: string, progress: number, message: string) =>
+      dispatch(updateNotification(id, progress, message));
+    this.mDismissNotification = (id) => dispatch(dismissNotification(id));
+    this.mStartActivity = (activity: string) => dispatch(startActivity("mods", "installing"));
+
+    this.mStopActivity = (activity: string) => dispatch(stopActivity("mods", "installing"));
+    this.mShowError = (message, details?, allowReport?, replace?) => {
+      this.mDidReportError = true;
+      return showError(dispatch, message, details, {
+        allowReport,
+        replace,
+        attachments: [
+          {
+            id: "log",
+            type: "file",
+            data: path.join(getVortexPath("userData"), "vortex.log"),
+            description: "Vortex Log",
+          },
+        ],
+      });
+    };
+    this.mLastProgress = 0;
+    this.mSetModState = (id, state) => doDispatch(setModState(gameMode, id, state));
+    this.mSetModAttributes = (modId, attributes) => {
+      Object.keys(attributes).forEach((attributeId) => {
+        if (attributes[attributeId] === undefined) {
+          delete attributes[attributeId];
+        }
+      });
+      if (Object.keys(attributes).length > 0) {
+        doDispatch(setModAttributes(gameMode, modId, attributes));
+      }
+    };
+    this.mSetModInstallationPath = (id, installPath) =>
+      dispatch(setModInstallationPath(gameMode, id, installPath));
+    this.mSetModType = (id, modType) => dispatch(setModType(gameMode, id, modType));
+    this.mEnableMod = (modId: string) => {
+      const state: IState = store.getState();
+      const profileId = state.settings.profiles.lastActiveProfile[this.mGameId];
+      // enabling on install completion is implied by the install event.
+      return setModsEnabled(api, profileId, [modId], true, { skipStateChangeEvent: true });
+    };
+    this.mIsEnabled = (modId) => {
+      const state: IState = store.getState();
+
+      const profileId = state.settings.profiles.lastActiveProfile[this.mGameId];
+      const profile = state.persistent.profiles[profileId];
+      return getSafe(profile, ["modState", modId, "enabled"], false);
+    };
+    this.mSetDownloadInstalled = (archiveId, gameId, modId) => {
+      doDispatch(setDownloadInstalled(archiveId, gameId, modId));
+    };
+    this.mIsDownload = (archiveId) => {
+      const state: IState = store.getState();
+      return (
+        archiveId !== null &&
+        getSafe(state, ["persistent", "downloads", "files", archiveId], undefined) !== undefined
+      );
+    };
+    this.mSilent = silent ?? false;
+  }
+
+  public startIndicator(id: string): void {
+    log("info", "start mod install", { id });
+
+    this.mLastProgress = 0;
+    // TODO: we're adding even when silent but those "silent"
+    // notifications aren't displayed.
+    // This is hacky but notifications get used to track progress on some ops
+    // to display in other locations
+    // if (!this.mSilent) {
+    this.mAddNotification({
+      id: "install_" + id,
+      title: "Installing {{ id }}",
+      message: "Preparing",
+      replace: { id },
+      type: this.mSilent ? "silent" : "activity",
+    });
+    // }
+    this.mIndicatorId = id;
+    this.mInstallOutcome = undefined;
+    this.mStartActivity(`installing_${id}`);
+  }
+
+  public stopIndicator(mod?: IMod): void {
+    if (this.mIndicatorId === undefined) {
+      return;
+    }
+
+    this.mDismissNotification("install_" + this.mIndicatorId);
+    this.mStopActivity(`installing_${this.mIndicatorId}`);
+
+    new Promise((resolve) => setTimeout(resolve, 50)).then(() => {
+      if (!this.mDidReportError) {
+        this.mDidReportError = true;
+        const noti: INotification = this.outcomeNotification(
+          this.mInstallOutcome,
+          this.mIndicatorId,
+          this.mIsEnabled(this.mAddedId),
+          mod !== undefined ? getModName(mod) : this.mIndicatorId,
+          mod,
+        );
+        if (noti != null) {
+          // Route through aggregator if available and aggregating
+          if (this.mNotificationAggregator && this.mSourceModId) {
+            const aggregationId = `install-dependencies-${this.mSourceModId}`;
+            if (this.mNotificationAggregator.isAggregating(aggregationId)) {
+              this.mNotificationAggregator.addNotification(
+                aggregationId,
+                noti.type as "error" | "warning" | "info",
+                noti.title,
+                this.mFailError ?? noti.message,
+                mod !== undefined ? getModName(mod) : this.mIndicatorId,
+                {
+                  allowReport: this.mFailError?.allowReport ?? true,
+                  actions: noti.actions,
+                },
+              );
+              return;
+            }
+          }
+          // Fallback to direct notification
+          this.mAddNotification(noti);
+        }
+      }
+    });
+  }
+
+  public setProgress(phase: string, percent?: number) {
+    if (
+      percent === undefined ||
+      this.mLastPhase !== phase ||
+      Math.abs(percent - (this.mLastProgress ?? 0)) >= 5
+    ) {
+      this.mLastProgress = percent;
+      this.mLastPhase = phase;
+      this.mUpdateNotification("install_" + this.mIndicatorId, percent, phase);
+    }
+  }
+
+  public startInstallCB(
+    id: string,
+    gameId: string,
+    archiveId: string,
+    installKind: ModInstallKind = "fresh",
+  ): void {
+    this.mAddMod({
+      id,
+      type: "",
+      archiveId,
+      installationPath: id,
+      state: "installing",
+      attributes: {
+        name: id,
+        installTime: new Date(),
+      },
+    });
+    this.mAddedId = id;
+    this.mGameId = gameId;
+    this.mArchiveId = archiveId;
+    // Kept for the terminal events, which fire from finishInstallCB.
+    this.mInstallKind = installKind;
+
+    emitModInstallStarted(this.mApi, archiveId, installKind);
+  }
+
+  public finishInstallCB(
+    outcome: InstallOutcome,
+    info?: any,
+    reason?: string,
+    error?: IPrettifiedError,
+  ): void {
+    log("info", "finish mod install", {
+      id: this.mIndicatorId,
+      outcome,
+    });
+    if (outcome === "ignore") {
+      // nop
+    } else if (outcome === "success") {
+      this.mSetModState(this.mAddedId, "installed");
+
+      this.mSetModAttributes(this.mAddedId, {
+        installTime: new Date(),
+        category: info.category,
+        version: info.version,
+        fileId: info.fileId,
+        newestFileId: info.fileId,
+        changelog: info.changelog,
+        endorsed: undefined,
+        bugMessage: "",
+        ...info,
+      });
+
+      if (this.mIsDownload(this.mArchiveId)) {
+        this.mSetDownloadInstalled(this.mArchiveId, this.mGameId, this.mAddedId);
+      }
+    } else {
+      this.mFailReason = reason;
+      this.mFailError = error;
+      if (this.mAddedId !== undefined) {
+        this.mRemoveMod(this.mAddedId);
+      }
+    }
+    this.mInstallOutcome = outcome;
+
+    // Terminal install analytics: the exactly-once hook, with mArchiveId available and the
+    // download record intact regardless of mod removal. "ignore" (bundled/subsumed) is not tracked.
+    if (this.mArchiveId !== undefined) {
+      if (outcome === "success") {
+        emitModInstallOutcome(this.mApi, this.mArchiveId, "completed", this.mInstallKind, {
+          durationMs: Date.now() - this.mStartTime,
+        });
+      } else if (outcome === "canceled") {
+        emitModInstallOutcome(this.mApi, this.mArchiveId, "cancelled", this.mInstallKind);
+      } else if (outcome === "failed") {
+        emitModInstallOutcome(this.mApi, this.mArchiveId, "failed", this.mInstallKind, {
+          error: this.mFailError,
+          failReason: this.mFailReason,
+        });
+      }
+    }
+  }
+
+  public beginBatch(): void {
+    this.mActionBuffer = [];
+  }
+
+  public flushBatch(): any[] {
+    const actions = this.mActionBuffer ?? [];
+    this.mActionBuffer = null;
+    return actions;
+  }
+
+  public setInstallPathCB(id: string, installPath: string) {
+    const fileName = path.basename(installPath);
+    log("info", "using install path", { id, installPath, fileName });
+    this.mSetModInstallationPath(id, fileName);
+  }
+
+  public setModType(id: string, modType: string) {
+    log("info", "determined mod type", { id, modType });
+    this.mSetModType(id, modType);
+  }
+
+  public reportError(
+    message: string,
+    details?: string | Error,
+    allowReport?: boolean,
+    replace?: { [key: string]: string },
+  ): void {
+    log("error", "install error", { message, details, replace });
+
+    // Use NotificationAggregator if available and aggregating for this source mod
+    if (this.mNotificationAggregator && this.mSourceModId) {
+      const aggregationId = `install-dependencies-${this.mSourceModId}`;
+      if (this.mNotificationAggregator.isAggregating(aggregationId)) {
+        // Pass the original details (Error or string) to preserve stack traces
+        this.mNotificationAggregator.addNotification(
+          aggregationId,
+          "error",
+          message,
+          details || message,
+          this.mAddedId || this.mIndicatorId || "unknown",
+          { allowReport },
+        );
+        return;
+      }
+    }
+
+    // Fallback to regular error reporting
+    this.mShowError(message, details, allowReport, replace);
+  }
+
+  public progressCB(percent: number, file: string): void {
+    log("debug", "install progress", { percent, file });
+  }
+
+  private outcomeNotification(
+    outcome: InstallOutcome,
+    id: string,
+    isEnabled: boolean,
+    modName: string,
+    mod?: IMod,
+  ): INotification {
+    const type = mod !== undefined ? getModType(mod.type) : undefined;
+    const typeName =
+      type !== undefined && type.options !== undefined && type.options.name !== undefined
+        ? type.options.name
+        : "Mod";
+
+    // Terminal install analytics are emitted from finishInstallCB (the exactly-once
+    // hook with archiveId still in hand); this method only builds the user notification.
+    switch (outcome) {
+      case "success":
+        // TODO: bit of a hack, I'd prefer if we controlled this from the collections
+        //   extension
+        if (mod?.type === "collection" || this.mSilent) {
+          return null;
+        }
+
+        if (!isEnabled) {
+          return {
+            id: `may-enable-${id}`,
+            type: "success",
+            message: modName,
+            title: `${typeName} installed`,
+            group: "mod-installed",
+            actions: [
+              {
+                title: "Enable All",
+                action: (dismiss) => {
+                  this.mEnableMod(this.mAddedId);
+                  dismiss();
+                },
+              },
+            ],
+          };
+        }
+
+        return InstallContext.batchInstalledToast(typeName, modName);
+      case "canceled":
+        return {
+          type: "info",
+          title: "Installation canceled",
+          message: modName,
+          replace: { id },
+          displayMS: 4000,
+          localize: { message: false },
+        };
+      case "ignore":
+        return null;
+      default:
+        return {
+          type: "error",
+          title: "{{id}} failed to install",
+          message: this.mFailReason,
+          replace: { id },
+          localize: { message: false },
+        };
+    }
+  }
+
+  /**
+   * The toast for an auto-enabled install. Upserts the same id as any other install still
+   * within BATCH_TOAST_DISPLAY_MS of the last one, so the batch shows a single toast whose
+   * text steps from the mod's own name to a running count, rather than one toast per mod.
+   */
+  private static batchInstalledToast(typeName: string, modName: string): INotification {
+    const now = Date.now();
+    const state = InstallContext.sBatchToast;
+    state.count = now - state.lastAt <= InstallContext.BATCH_TOAST_DISPLAY_MS ? state.count + 1 : 1;
+    state.lastAt = now;
+
+    return state.count === 1
+      ? {
+          id: InstallContext.BATCH_TOAST_ID,
+          type: "success",
+          message: modName,
+          title: `${typeName} installed`,
+          group: "mod-installed",
+          displayMS: InstallContext.BATCH_TOAST_DISPLAY_MS,
+          actions: [],
+        }
+      : {
+          id: InstallContext.BATCH_TOAST_ID,
+          type: "success",
+          message: `${state.count} mods installed`,
+          group: "mod-installed",
+          displayMS: InstallContext.BATCH_TOAST_DISPLAY_MS,
+          actions: [],
+        };
+  }
+}
+
+export default InstallContext;

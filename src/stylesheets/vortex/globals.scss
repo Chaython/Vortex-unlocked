@@ -1,0 +1,84 @@
+@use "sass:color";
+html {
+    // 16px base for correct rem calculations (Tailwind assumes 1rem = 16px)
+    font-size: 16px;
+    letter-spacing: 0.02em;
+}
+
+body {
+    // Keep legacy 12px font size for existing UI
+    font-size: $font-size-base;
+    touch-action: $touch-action;
+    text-rendering: optimizeLegibility;
+
+    // in custom-titlebar-mode, the toolbar region allows dragging the
+    // main window around.
+    // This rule should ensure everything that is clickable
+    // on this region remains clickable
+    a,
+    button,
+    .btn,
+    .Select {
+        -webkit-app-region: no-drag;
+    }
+}
+
+#content {
+    background-color: $brand-bg;
+}
+
+#overlays {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    left: 0;
+    right: 0;
+
+    pointer-events: none;
+
+    > * {
+        pointer-events: initial;
+        -webkit-app-region: no-drag;
+    }
+}
+
+// filters are quite slow without gpu acceleration
+.modal-open #content > div:not(.no-gpu-acceleration) #main-window-content,
+.modal-open #content > div:not(.no-gpu-acceleration) #notifications-popover,
+.modal-open #content > div:not(.no-gpu-acceleration) #window-controls {
+    filter: blur(5px);
+}
+
+.suspense-spinner {
+    width: 100%;
+    height: 100%;
+    svg {
+        width: 4em;
+        height: 4em;
+    }
+}
+
+::-webkit-scrollbar {
+    width: $scrollbar-width;
+    height: $scrollbar-width;
+}
+
+::-webkit-scrollbar-thumb {
+    background-color: $gray-darker;
+    border-radius: 4px;
+}
+
+::-webkit-scrollbar-corner {
+    background-color: $brand-secondary;
+}
+
+::-webkit-scrollbar-thumb:hover {
+    background: color.adjust($gray-darker, $lightness: -10%);
+}
+
+@layer base {
+    ::-webkit-input-placeholder {
+        color: $input-color-placeholder;
+        font-style: italic;
+    }
+}
