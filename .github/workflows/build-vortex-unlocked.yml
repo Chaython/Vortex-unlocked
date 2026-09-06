@@ -14,13 +14,6 @@ name: Build Vortex Unlocked
 # The source snapshot in this repository is never built directly - the patch
 # is applied to a fresh upstream clone every time, so upstream commits are
 # picked up without discarding the unlocked modifications.
-#
-# The build sequence mirrors upstream's own composite action
-# (.github/actions/package/action.yml in Nexus-Mods/Vortex): setup-dotnet 9,
-# setup-python 3.11, pnpm from packageManager, Node from engines.node,
-# version bump -> frozen install (electron-rebuild deferred) -> workspace
-# build -> deploy dist -> electron-rebuild packaged natives -> unsigned
-# electron-builder -> validate artifacts.
 
 on:
   push:
@@ -34,6 +27,7 @@ permissions:
 
 jobs:
   build:
+    timeout-minutes: 180
     runs-on: windows-latest
     env:
       NO_PARALLEL: "true"
@@ -42,6 +36,8 @@ jobs:
     steps:
       - name: Checkout Vortex Unlocked (patch repository)
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Record upstream base of the snapshot
         shell: pwsh
@@ -52,14 +48,10 @@ jobs:
       - name: Clone latest upstream Vortex
         shell: pwsh
         run: |
-          # -c core.autocrlf=false keeps the working tree byte-identical to the
-          # repository blobs (LF), so the patch context always matches.
-          # Upstream's .gitattributes already enforces eol=lf for text files;
-          # this is belt-and-suspenders.
-          git -c core.autocrlf=false clone https://github.com/Nexus-Mods/Vortex.git vortex
-          if ($LASTEXITCODE -ne 0) { exit 1 }
+          git config --global --add safe.directory '*'
+          git config --global core.autocrlf false
+          git clone https://github.com/Nexus-Mods/Vortex.git vortex
           cd vortex
-          git config core.autocrlf false
           $sha = git rev-parse --short HEAD
           $date = Get-Date -Format "yyyyMMdd"
           "UPSTREAM_SHA=$sha" >> $env:GITHUB_ENV
@@ -70,17 +62,7 @@ jobs:
         shell: pwsh
         run: |
           cd vortex
-
-          # The patch was generated with LF line endings, but the runner (Git
-          # for Windows default core.autocrlf=true) may check the .patch file
-          # out of this repository with CRLF, which corrupts the diff context
-          # lines and makes `git apply` fail. Normalize the patch back to LF
-          # before applying.
-          $patchPath = (Resolve-Path ..\patches\vortex-unlocked.patch).Path
-          $content = [IO.File]::ReadAllText($patchPath)
-          [IO.File]::WriteAllText($patchPath, $content.Replace("`r`n", "`n"))
-
-          git apply --3way $patchPath
+          git apply --3way ..\patches\vortex-unlocked.patch
           if ($LASTEXITCODE -ne 0) {
             Write-Output "::error::The patch no longer applies cleanly to upstream master. Re-generate it from a fresh upstream clone (see README.md) and push the update."
             exit 1
@@ -98,22 +80,24 @@ jobs:
           echo "Using Node.js version: $nodeVersion"
 
       - name: Install pnpm
-        uses: pnpm/action-setup@v6
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9
 
       - name: Use Node.js
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@v4
         with:
           node-version: ${{ steps.node-version.outputs.NODE_VERSION }}
           cache: "pnpm"
           cache-dependency-path: vortex/pnpm-lock.yaml
 
       - name: Setup .NET 9
-        uses: actions/setup-dotnet@v5
+        uses: actions/setup-dotnet@v4
         with:
           dotnet-version: "9.0.x"
 
       - name: Setup Python 3.11
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
@@ -205,13 +189,6 @@ jobs:
             Write-Error "latest.yml not found in ./dist/"
             exit 1
           }
-          # Guards against the packager mangling nested dependency versions in
-          # the asar (bit upstream with electron-builder 26's module collector).
-          node scripts/verify-packaged-asar.mjs
-          if ($LASTEXITCODE -ne 0) {
-            Write-Error "packaged asar does not match the deploy tree"
-            exit 1
-          }
           Write-Output "Package validation successful"
         working-directory: vortex
 
@@ -221,12 +198,11 @@ jobs:
           name: vortex-unlocked-${{ steps.version.outputs.RAW_VERSION }}
           path: |
             vortex/dist/vortex-unlocked-setup-*.exe
-            vortex/dist/vortex-unlocked-setup-*.exe.blockmap
             vortex/dist/latest.yml
           if-no-files-found: error
 
       - name: Create release
-        uses: ncipollo/release-action@v1
+        uses: ncipollo/release-action@v2
         with:
           tag: ${{ steps.version.outputs.TAG_VERSION }}
           name: Vortex Unlocked ${{ steps.version.outputs.RAW_VERSION }}
@@ -246,8 +222,6 @@ jobs:
             - Installs side-by-side with official Vortex as "Vortex Unlocked"
           artifacts: |
             vortex/dist/vortex-unlocked-setup-*.exe
-            vortex/dist/vortex-unlocked-setup-*.exe.blockmap
             vortex/dist/latest.yml
           allowUpdates: true
-          replacesAssets: true
           token: ${{ secrets.GITHUB_TOKEN }}

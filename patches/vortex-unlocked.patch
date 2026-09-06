@@ -15,24 +15,29 @@ index 04527bc3e..6df9873bd 100644
    const downloadId = genDownloadInfo(api, archiveName).downloadId;
    if (downloadId !== undefined) {
 diff --git a/src/main/electron-builder.config.json b/src/main/electron-builder.config.json
-index 4242d924e..9b030b81b 100644
+index 4242d924e..40f07c418 100644
 --- a/src/main/electron-builder.config.json
 +++ b/src/main/electron-builder.config.json
-@@ -10,20 +10,13 @@
-   "win": {
-     "target": "nsis",
-     "icon": "nsis/icon.ico",
--    "publish": [
--      {
--        "provider": "github",
+@@ -1,6 +1,6 @@
+ {
+   "$schema": "https://github.com/electron-userland/electron-builder/raw/refs/tags/v24.13.3/packages/app-builder-lib/scheme.json",
+-  "appId": "com.nexusmods.vortex",
++  "appId": "com.chaython.vortexunlocked",
+   "includeSubNodeModules": false,
+   "directories": {
+     "buildResources": "./nsis",
+@@ -13,8 +13,8 @@
+     "publish": [
+       {
+         "provider": "github",
 -        "owner": "Nexus-Mods",
 -        "repo": "Vortex",
--        "private": false
--      }
--    ],
-     "publisherName": ["Black Tree Gaming Limited", "Black Tree Gaming Ltd"],
-     "signExts": [".dll"],
-     "signingHashAlgorithms": ["sha256"],
++        "owner": "Chaython",
++        "repo": "Vortex-unlocked",
+         "private": false
+       }
+     ],
+@@ -24,6 +24,7 @@
      "rfc3161TimeStampServer": "http://timestamp.comodoca.com/rfc3161",
      "timeStampServer": "http://timestamp.comodoca.com"
    },
@@ -40,7 +45,7 @@ index 4242d924e..9b030b81b 100644
    "nsis": {
      "perMachine": true,
      "runAfterFinish": true,
-@@ -32,7 +25,7 @@
+@@ -32,7 +33,7 @@
      "allowToChangeInstallationDirectory": true,
      "uninstallDisplayName": "${productName}",
      "include": "./nsis/installer.nsh",
@@ -50,17 +55,19 @@ index 4242d924e..9b030b81b 100644
      "installerHeaderIcon": "nsis/icon.ico"
    },
 diff --git a/src/main/prepare-dist-package.mjs b/src/main/prepare-dist-package.mjs
-index 4ae13de7a..49b55507e 100644
+index 4ae13de7a..2c8e2729d 100644
 --- a/src/main/prepare-dist-package.mjs
 +++ b/src/main/prepare-dist-package.mjs
-@@ -50,7 +50,10 @@ async function main() {
+@@ -50,7 +50,12 @@ async function main() {
    const json = await readFile(MAIN_PACKAGE_PATH, "utf8");
    const mainPkg = JSON.parse(json);
  
 -  mainPkg["name"] = "Vortex";
-+  // Vortex Unlocked: the packaged app identifies as "Vortex Unlocked",
-+  // so it installs and stores its data separately from an official Vortex.
-+  mainPkg["name"] = "Vortex Unlocked";
++  // Vortex Unlocked: npm-compliant package name - electron-builder rejects
++  // names containing spaces ("Invalid name"). productName carries the display
++  // name and keeps the app data directory (%APPDATA%/Vortex Unlocked) separate
++  // from an official Vortex install.
++  mainPkg["name"] = "vortex-unlocked";
 +  mainPkg["productName"] = "Vortex Unlocked";
    mainPkg["main"] = mainPkg.main.replace(/^build\//, "");
  
