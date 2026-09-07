@@ -241,7 +241,7 @@ jobs:
             - No premium upsell UI (banners, dashlets, dialogs, badges, membership status)
             - No client-side premium gates (parallel download threads, Update All, collection bulk-install)
             - Optional: fully hide the Dashboard tab via Settings -> Interface -> Customisation -> "Hide Dashboard tab"
-            - On first start: option to import data (profiles, mods, settings, downloads) from an existing official Vortex install; also available later via Settings -> Interface -> "Import data from Vortex" (staging paths inside the data directory are rewritten to the new location; close the official client while importing)
+            - On first start: option to import data (profiles, mods, settings, downloads) from an existing official Vortex install; also available later via Settings -> Interface -> "Import data from Vortex" (staging paths inside the data directory are rewritten to the new location; only Vortex' own data is copied - caches/logs are skipped; the import refuses to run while the official client is open and backs up/restores existing data on failure)
             - Keeps its data separate from official Vortex: %APPDATA%\vortex-unlocked (official Vortex uses %APPDATA%\Vortex), so both can run side by side
             - Uninstaller: removes the electron-updater cache (%LOCALAPPDATA%\vortex-unlocked-updater) and asks whether to also delete the application data; the upstream uninstall feedback survey was removed
             - Usage analytics / event reporting disabled

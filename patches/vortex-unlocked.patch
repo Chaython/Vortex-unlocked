@@ -188,13 +188,15 @@ index ab04007fb..f9e714daa 100644
    const picked = pickRelease(releases, channel);
 diff --git a/src/main/src/migrateOfficialData.ts b/src/main/src/migrateOfficialData.ts
 new file mode 100644
-index 000000000..7da1b246b
+index 000000000..bb6242ad6
 --- /dev/null
 +++ b/src/main/src/migrateOfficialData.ts
-@@ -0,0 +1,336 @@
-+import { existsSync } from "node:fs";
-+import { cp, rm, writeFile } from "node:fs/promises";
+@@ -0,0 +1,608 @@
++import { execFile } from "node:child_process";
++import { existsSync, type Dirent } from "node:fs";
++import { cp, open, readdir, rm, stat, writeFile } from "node:fs/promises";
 +import * as path from "node:path";
++import { promisify } from "node:util";
 +
 +import { currentStatePath } from "@vortex/shared/state";
 +import { app, dialog } from "electron";
@@ -220,9 +222,21 @@ index 000000000..7da1b246b
 + * staging folders at {USERDATA}\{GAME}\mods - are rewritten to the new
 + * location so both installs don't fight over the same files.
 + *
++ * Robustness against files being in use: only Vortex' own data is copied -
++ * electron/chromium runtime files (caches, leveldb storages, crashpad
++ * database) are excluded because a running instance on the source side and
++ * our own electron processes on the destination side keep them open, and
++ * copying over them fails with EBUSY/EPERM. Before anything is written the
++ * source database is probed for locks (a running official client is also
++ * detected via the process list), and file operations are retried a few
++ * times to survive short-lived locks held by antivirus software or the
++ * search indexer.
++ *
 + * The official installation is never modified. Marker files remember a
 + * completed or declined import so the prompt doesn't keep nagging.
 + */
++
++const execFileAsync = promisify(execFile);
 +
 +/** written after a successful import so the prompt doesn't show again */
 +const MARKER_DONE = ".unlocked-import.json";
@@ -236,6 +250,109 @@ index 000000000..7da1b246b
 + *  upstream's bulkRemoveItem chunk size so statement sizes stay bounded) */
 +const BULK_CHUNK = 256;
 +
++/**
++ * Top level directories inside a Vortex data directory that are never
++ * copied. "temp", "crashdumps" and "logs" are volatile junk. Everything
++ * else in this set is electron/chromium runtime data: it contains no
++ * Vortex state, it is regenerated as soon as the app runs, and - crucially
++ * for the import - the files inside are held open by the running app, by
++ * the official client on the source side and by our own gpu/network/
++ * crashpad processes on the destination side. Overwriting them mid-copy
++ * fails with EBUSY or EPERM on Windows.
++ * Vortex game ids are never named like any of these.
++ */
++const SKIP_DIRS = new Set([
++  "temp",
++  "crashdumps",
++  "logs",
++  "cache",
++  "code cache",
++  "gpucache",
++  "shadercache",
++  "grshadercache",
++  "graphitedawncache",
++  "dawncache",
++  "dawngraphitecache",
++  "dawnwebgpucache",
++  "blob_storage",
++  "local storage",
++  "indexeddb",
++  "session storage",
++  "webstorage",
++  "service worker",
++  "shared dictionary",
++  "crashpad",
++  "file system",
++  "storage",
++]);
++
++/**
++ * Chromium bookkeeping files directly in the data directory root that are
++ * skipped for the same reason as SKIP_DIRS (held open and rewritten by the
++ * browser process of a running instance; no Vortex state inside).
++ */
++const SKIP_FILES = new Set([
++  "local state",
++  "preferences",
++  "secure preferences",
++  "network persistent state",
++  "cookies",
++  "cookies-journal",
++  "transportsecurity",
++]);
++
++/**
++ * fs error codes that mean a file is (or was just) in use: another process
++ * holding it open, antivirus software scanning it, the search indexer or a
++ * sync tool. They are usually transient, so operations failing with one of
++ * these are retried a few times before the import gives up.
++ */
++const TRANSIENT_ERRNOS = new Set(["EBUSY", "EPERM", "EACCES"]);
++/** delay before retrying a file operation that failed with a lock error */
++const RETRY_DELAYS_MS = [400, 1200, 3000];
++
++/** the import was refused before anything was written because the source
++ *  data is in use - almost always: official Vortex is still running */
++class ImportSourceLockedError extends Error {
++  public constructor(detail: string) {
++    super(detail);
++    this.name = "ImportSourceLockedError";
++  }
++}
++
++function errnoOf(err: unknown): string | undefined {
++  if (err === null || typeof err !== "object") {
++    return undefined;
++  }
++  const code = (err as { code?: unknown }).code;
++  return typeof code === "string" ? code : undefined;
++}
++
++/** runs a file operation, retrying it while the failure looks transient */
++async function withRetry<T>(label: string, op: () => Promise<T>): Promise<T> {
++  let attempt = 0;
++  for (;;) {
++    try {
++      return await op();
++    } catch (err) {
++      const code = errnoOf(err);
++      if (
++        code === undefined
++        || !TRANSIENT_ERRNOS.has(code)
++        || attempt >= RETRY_DELAYS_MS.length
++      ) {
++        throw err;
++      }
++      const delay = RETRY_DELAYS_MS[attempt] ?? 0;
++      attempt += 1;
++      log("warn", `import: ${label} failed with ${code}, retrying in ${delay}ms (attempt ${attempt + 1})`);
++      await new Promise<void>((resolve) => {
++        setTimeout(resolve, delay);
++      });
++    }
++  }
++}
++
 +function pathsEqual(a: string, b: string): boolean {
 +  const caseSensitive = process.platform === "linux";
 +  return caseSensitive ? a === b : a.toLowerCase() === b.toLowerCase();
@@ -243,6 +360,84 @@ index 000000000..7da1b246b
 +
 +function escapeRegExp(input: string): string {
 +  return input.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
++}
++
++/**
++ * Best effort check whether the official Vortex client is running. Its
++ * executable is "Vortex.exe" (ours is "Vortex Unlocked.exe", which the
++ * exact image name comparison deliberately does not match). Returns null
++ * when the check could not be run; callers then rely on the file lock
++ * probe instead.
++ */
++async function isOfficialVortexRunning(): Promise<boolean | null> {
++  if (process.platform !== "win32") {
++    return null;
++  }
++  try {
++    const { stdout } = await execFileAsync(
++      "tasklist",
++      ["/FI", "IMAGENAME eq Vortex.exe", "/FO", "CSV", "/NH"],
++      { timeout: 8000, windowsHide: true },
++    );
++    return stdout
++      .split(/\r?\n/)
++      .some((line) =>
++        (line.split(",")[0] ?? "").replace(/^"|"$/g, "").toLowerCase() === "vortex.exe",
++      );
++  } catch {
++    return null;
++  }
++}
++
++/**
++ * All files below `root` (recursively; `root` itself may be a plain file).
++ * Unreadable or missing paths yield an empty list - the actual copy will
++ * then surface a proper error message instead.
++ */
++async function collectFiles(root: string): Promise<string[]> {
++  try {
++    const st = await stat(root);
++    if (st.isFile()) {
++      return [root];
++    }
++    if (!st.isDirectory()) {
++      return [];
++    }
++  } catch {
++    return [];
++  }
++  const entries: Dirent[] = await readdir(root, { recursive: true, withFileTypes: true });
++  const files: string[] = [];
++  for (const entry of entries) {
++    if (entry.isFile()) {
++      files.push(path.join(entry.parentPath, entry.name));
++    }
++  }
++  return files;
++}
++
++/**
++ * Pre-flight check: every file that is about to be copied from the state
++ * database is briefly opened for writing and the handle closed again
++ * immediately (nothing is written). If another process - the official
++ * client - holds a database file open without sharing write access, the
++ * open fails and the import is refused with a clear message instead of
++ * dying half way through with EBUSY or, worse, copying a torn write.
++ */
++async function findLockedFiles(files: string[]): Promise<string[]> {
++  const locked: string[] = [];
++  for (const file of files) {
++    try {
++      const handle = await open(file, "r+");
++      await handle.close();
++    } catch (err) {
++      const code = errnoOf(err);
++      if (code !== undefined && TRANSIENT_ERRNOS.has(code)) {
++        locked.push(file);
++      }
++    }
++  }
++  return locked;
 +}
 +
 +interface IRewriteResult {
@@ -293,18 +488,28 @@ index 000000000..7da1b246b
 +}
 +
 +async function copyTree(source: string, dest: string): Promise<void> {
-+  const skipDirs = new Set(["temp", "crashdumps"]);
 +  await cp(source, dest, {
 +    recursive: true,
 +    force: true,
++    // symlinks and junctions are resolved and their content copied as
++    // regular files: creating symlinks can require privileges on windows,
++    // and a link back into the source tree must not silently make both
++    // installs share files
++    dereference: true,
 +    filter: (item: string) => {
 +      const rel = path.relative(source, item);
 +      if (rel === "") {
 +        return true;
 +      }
-+      // volatile data that must not be carried over
-+      const top = (rel.split(path.sep)[0] ?? "").toLowerCase();
-+      if (skipDirs.has(top)) {
++      const parts = rel.split(path.sep);
++      // volatile or runtime-managed subtrees must not be carried over (see
++      // SKIP_DIRS) - notably everything electron/chromium owns
++      const top = (parts[0] ?? "").toLowerCase();
++      if (SKIP_DIRS.has(top)) {
++        return false;
++      }
++      // chromium bookkeeping files directly in the data directory root
++      if (parts.length === 1 && SKIP_FILES.has(top)) {
 +        return false;
 +      }
 +      // log files of the official install are of no use here
@@ -374,16 +579,58 @@ index 000000000..7da1b246b
 +
 +async function runImport(officialDir: string, ourDir: string): Promise<void> {
 +  const ourState = path.join(ourDir, currentStatePath);
++  const officialState = path.join(officialDir, currentStatePath);
 +  const backupPath = `${ourState}${BACKUP_SUFFIX}`;
++
++  // refuse to import from a database that is currently in use before a
++  // single byte is written. copying a file another process has open either
++  // fails outright (EBUSY/EPERM) or captures a torn write that corrupts the
++  // imported database.
++  const running = await isOfficialVortexRunning();
++  if (running === true) {
++    throw new ImportSourceLockedError(
++      "The official Vortex client is still running (Vortex.exe was found in the process list).",
++    );
++  }
++  const probeTargets = [officialState];
++  const officialWal = `${officialState}.wal`;
++  if (existsSync(officialWal)) {
++    probeTargets.push(officialWal);
++  }
++  const dbFiles: string[] = [];
++  for (const target of probeTargets) {
++    dbFiles.push(...(await collectFiles(target)));
++  }
++  let locked = await findLockedFiles(dbFiles);
++  if (locked.length > 0) {
++    // give a transient lock (antivirus, indexer) a moment to clear before
++    // declaring the source unusable
++    await new Promise<void>((resolve) => {
++      setTimeout(resolve, 400);
++    });
++    locked = await findLockedFiles(locked);
++  }
++  if (locked.length > 0) {
++    const sample = locked.slice(0, 3).map((file) => `  ${file}`).join("\n");
++    throw new ImportSourceLockedError(
++      `The Vortex data at\n  ${officialDir}\nis in use by another program; ` +
++        `these files are locked:\n${sample}` +
++        (locked.length > 3 ? `\n  (and ${locked.length - 3} more)` : ""),
++    );
++  }
++
 +  const hadExistingData = existsSync(ourState);
 +
-+  // back up the current unlocked database so a failed import can be restored.
-+  // the state (state.v2) is a directory of database files, so both the
-+  // removal of a previous backup and the copy have to be recursive -
-+  // copying a directory without { recursive: true } fails with EISDIR.
++  // back up the current unlocked database so a failed import can be
++  // restored. the state (state.v2) is a directory of database files, so
++  // both the removal of a previous backup and the copy have to be
++  // recursive - copying a directory without { recursive: true } fails
++  // with EISDIR.
 +  if (hadExistingData) {
-+    await rm(backupPath, { force: true, recursive: true });
-+    await cp(ourState, backupPath, { recursive: true });
++    await withRetry("remove previous backup", () =>
++      rm(backupPath, { force: true, recursive: true }));
++    await withRetry("back up current data", () =>
++      cp(ourState, backupPath, { recursive: true }));
 +  }
 +
 +  try {
@@ -391,37 +638,43 @@ index 000000000..7da1b246b
 +    // mixing database files from two generations in one directory could
 +    // corrupt it. the backup taken above is restored if anything below
 +    // goes wrong.
-+    await rm(ourState, { force: true, recursive: true });
++    await withRetry("remove current state", () =>
++      rm(ourState, { force: true, recursive: true }));
 +    // a write-ahead log of the old data must not be replayed over the
 +    // imported one
-+    await rm(`${ourState}.wal`, { force: true, recursive: true });
++    await withRetry("remove current state write-ahead log", () =>
++      rm(`${ourState}.wal`, { force: true, recursive: true }));
 +
-+    await copyTree(officialDir, ourDir);
++    await withRetry("copy data", () => copyTree(officialDir, ourDir));
 +    const replacements = await rewriteStoredPaths(ourState, officialDir, ourDir);
-+    await rm(backupPath, { force: true, recursive: true });
-+    await writeFile(
-+      path.join(ourDir, MARKER_DONE),
-+      JSON.stringify(
-+        {
-+          when: new Date().toISOString(),
-+          source: officialDir,
-+          pathRewrites: replacements,
-+        },
-+        null,
-+        2,
-+      ) + "\n",
-+    );
++    await withRetry("remove import backup", () =>
++      rm(backupPath, { force: true, recursive: true }));
++    await withRetry("write import marker", () =>
++      writeFile(
++        path.join(ourDir, MARKER_DONE),
++        JSON.stringify(
++          {
++            when: new Date().toISOString(),
++            source: officialDir,
++            pathRewrites: replacements,
++          },
++          null,
++          2,
++        ) + "\n",
++      ));
 +    log("info", `imported data from ${officialDir} (${replacements} stored paths rewritten)`);
 +  } catch (err) {
-+    // restore the previous state (if any) so the application can still start.
-+    // this must not mask the original error, so restoration failures are
-+    // logged and swallowed.
++    // restore the previous state (if any) so the application can still
++    // start. this must not mask the original error, so restoration
++    // failures are logged and swallowed.
 +    try {
-+      await rm(ourState, { force: true, recursive: true });
-+      await rm(`${ourState}.wal`, { force: true, recursive: true });
-+      if (hadExistingData) {
-+        await cp(backupPath, ourState, { recursive: true });
-+      }
++      await withRetry("restore pre-import state", async () => {
++        await rm(ourState, { force: true, recursive: true });
++        await rm(`${ourState}.wal`, { force: true, recursive: true });
++        if (hadExistingData) {
++          await cp(backupPath, ourState, { recursive: true });
++        }
++      });
 +    } catch (restoreErr) {
 +      log("error", "failed to restore the pre-import state", restoreErr);
 +    }
@@ -445,8 +698,9 @@ index 000000000..7da1b246b
 +          : "") +
 +        "This copies profiles, mod staging folders, settings and download metadata " +
 +        "into the Vortex Unlocked data directory. The Vortex installation is not " +
-+        "modified. Please close the official Vortex client while the data is " +
-+        "imported. Depending on the size of your mod library this may take a while.",
++        "modified. Only Vortex' own data is copied; caches and logs are skipped. " +
++        "Please close the official Vortex client while the data is imported. " +
++        "Depending on the size of your mod library this may take a while.",
 +      buttons: ["Import", "Not now", "Never ask again"],
 +      defaultId: 0,
 +      cancelId: 1,
@@ -512,6 +766,24 @@ index 000000000..7da1b246b
 +
 +    await runImport(officialDir, ourDir);
 +  } catch (err) {
++    if (err instanceof ImportSourceLockedError) {
++      // nothing was changed - the pre-flight check refused the import
++      log("warn", "import aborted, the Vortex data is in use", err.message);
++      await dialog
++        .showMessageBox({
++          type: "warning",
++          title: "Vortex Unlocked",
++          message: "The Vortex data is in use",
++          detail:
++            `${err.message}\n\n` +
++            "Nothing was changed. Close the official Vortex client (and any other " +
++            "program using that folder) and start the import again " +
++            "(Settings - Interface - Import data from Vortex).",
++          buttons: ["OK"],
++        })
++        .catch(() => undefined);
++      return;
++    }
 +    log("error", "failed to import data from official Vortex", err);
 +    await dialog
 +      .showMessageBox({
