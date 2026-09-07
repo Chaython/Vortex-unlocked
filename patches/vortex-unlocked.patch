@@ -188,13 +188,13 @@ index ab04007fb..f9e714daa 100644
    const picked = pickRelease(releases, channel);
 diff --git a/src/main/src/migrateOfficialData.ts b/src/main/src/migrateOfficialData.ts
 new file mode 100644
-index 000000000..bb6242ad6
+index 000000000..32a5da286
 --- /dev/null
 +++ b/src/main/src/migrateOfficialData.ts
-@@ -0,0 +1,608 @@
+@@ -0,0 +1,779 @@
 +import { execFile } from "node:child_process";
 +import { existsSync, type Dirent } from "node:fs";
-+import { cp, open, readdir, rm, stat, writeFile } from "node:fs/promises";
++import { copyFile, cp, mkdir, open, readdir, rm, stat, writeFile } from "node:fs/promises";
 +import * as path from "node:path";
 +import { promisify } from "node:util";
 +
@@ -223,14 +223,19 @@ index 000000000..bb6242ad6
 + * location so both installs don't fight over the same files.
 + *
 + * Robustness against files being in use: only Vortex' own data is copied -
-+ * electron/chromium runtime files (caches, leveldb storages, crashpad
-+ * database) are excluded because a running instance on the source side and
-+ * our own electron processes on the destination side keep them open, and
-+ * copying over them fails with EBUSY/EPERM. Before anything is written the
++ * electron/chromium runtime files (caches, leveldb storages, the DIPS
++ * database, cookies, history, crashpad data, ...) are excluded because a
++ * running instance on the source side and our own electron processes on
++ * the destination side keep them open, and copying over them fails with
++ * EBUSY/EPERM. Chromium adds new runtime files with every electron
++ * upgrade, so the exclusion list cannot be complete by construction: the
++ * copy itself is therefore fault tolerant as well - a file that stays
++ * locked after several retries is skipped and reported instead of failing
++ * the whole import. Only failures in the state database itself (which is
++ * never held open at this point) abort the import, because a torn database
++ * copy would corrupt the imported data. Before anything is written the
 + * source database is probed for locks (a running official client is also
-+ * detected via the process list), and file operations are retried a few
-+ * times to survive short-lived locks held by antivirus software or the
-+ * search indexer.
++ * detected via the process list).
 + *
 + * The official installation is never modified. Marker files remember a
 + * completed or declined import so the prompt doesn't keep nagging.
@@ -257,15 +262,21 @@ index 000000000..bb6242ad6
 + * Vortex state, it is regenerated as soon as the app runs, and - crucially
 + * for the import - the files inside are held open by the running app, by
 + * the official client on the source side and by our own gpu/network/
-+ * crashpad processes on the destination side. Overwriting them mid-copy
-+ * fails with EBUSY or EPERM on Windows.
++ * storage processes on the destination side. Overwriting them mid-copy
++ * fails with EBUSY or EPERM on Windows ("DIPS" was exactly such a case).
++ * This list is deliberately broad: unknown directories are still copied
++ * (they may be game staging folders), so anything that is definitely
++ * chromium's has to be named here.
 + * Vortex game ids are never named like any of these.
 + */
 +const SKIP_DIRS = new Set([
++  // Vortex' own volatile data
 +  "temp",
 +  "crashdumps",
 +  "logs",
++  // caches
 +  "cache",
++  "media cache",
 +  "code cache",
 +  "gpucache",
 +  "shadercache",
@@ -274,6 +285,7 @@ index 000000000..bb6242ad6
 +  "dawncache",
 +  "dawngraphitecache",
 +  "dawnwebgpucache",
++  // web storage backends
 +  "blob_storage",
 +  "local storage",
 +  "indexeddb",
@@ -281,15 +293,28 @@ index 000000000..bb6242ad6
 +  "webstorage",
 +  "service worker",
 +  "shared dictionary",
-+  "crashpad",
-+  "file system",
++  "network",
 +  "storage",
++  "file system",
++  // browser service databases
++  "dips",
++  "shared_proto_db",
++  "trust tokens",
++  "sct auditing",
++  "media history",
++  "optimization hints",
++  "on_device_head_suggest",
++  "component_crx_cache",
++  "affiliation database",
++  "browser metrics",
++  "crashpad",
 +]);
 +
 +/**
 + * Chromium bookkeeping files directly in the data directory root that are
 + * skipped for the same reason as SKIP_DIRS (held open and rewritten by the
-+ * browser process of a running instance; no Vortex state inside).
++ * browser process of a running instance; no Vortex state inside). Entries
++ * that may appear as a file or a directory are listed in both sets.
 + */
 +const SKIP_FILES = new Set([
 +  "local state",
@@ -299,6 +324,21 @@ index 000000000..bb6242ad6
 +  "cookies",
 +  "cookies-journal",
 +  "transportsecurity",
++  "dips",
++  "sct auditing",
++  "crashpadmetrics.pma",
++  "history",
++  "history-journal",
++  "favicons",
++  "favicons-journal",
++  "web data",
++  "web data-journal",
++  "login data",
++  "login data-journal",
++  "top sites",
++  "top sites-journal",
++  "visited links",
++  "shortcuts",
 +]);
 +
 +/**
@@ -487,38 +527,136 @@ index 000000000..bb6242ad6
 +  }
 +}
 +
-+async function copyTree(source: string, dest: string): Promise<void> {
-+  await cp(source, dest, {
-+    recursive: true,
-+    force: true,
-+    // symlinks and junctions are resolved and their content copied as
-+    // regular files: creating symlinks can require privileges on windows,
-+    // and a link back into the source tree must not silently make both
-+    // installs share files
-+    dereference: true,
-+    filter: (item: string) => {
-+      const rel = path.relative(source, item);
-+      if (rel === "") {
-+        return true;
++/**
++ * Copies the official data directory to the Vortex Unlocked one. Returns
++ * the list of files (relative to the source) that could not be copied
++ * because they stayed locked after retries.
++ *
++ * Unlike fs.cp this walker is fault tolerant per file: chromium grows new
++ * runtime files (e.g. the DIPS database) with every electron upgrade, so
++ * the exclusion lists above cannot be complete. A locked file outside the
++ * state database - by definition runtime data, Vortex' own files are never
++ * held open while the import runs - is skipped and reported instead of
++ * failing the import. Failures on the state database itself are fatal: a
++ * partially copied database would corrupt the imported data.
++ */
++async function copyTree(source: string, dest: string): Promise<string[]> {
++  const skipped: string[] = [];
++
++  const relToSource = (p: string): string => path.relative(source, p);
++
++  const copyOne = async (srcFile: string, destFile: string, critical: boolean): Promise<void> => {
++    try {
++      await withRetry(`copy ${relToSource(srcFile)}`, () => copyFile(srcFile, destFile));
++    } catch (err) {
++      const code = errnoOf(err);
++      if (critical) {
++        // a partially copied state database would be corrupt - aborting
++        // and restoring the backup is the only safe outcome
++        throw err;
 +      }
-+      const parts = rel.split(path.sep);
-+      // volatile or runtime-managed subtrees must not be carried over (see
-+      // SKIP_DIRS) - notably everything electron/chromium owns
-+      const top = (parts[0] ?? "").toLowerCase();
-+      if (SKIP_DIRS.has(top)) {
-+        return false;
++      if (code === "ENOENT") {
++        // a volatile file in the source directory disappeared mid-copy
++        log("info", `import: source file disappeared before it could be copied: ${relToSource(srcFile)}`);
++        return;
 +      }
-+      // chromium bookkeeping files directly in the data directory root
-+      if (parts.length === 1 && SKIP_FILES.has(top)) {
-+        return false;
++      if (code === "EISDIR") {
++        // the destination has a directory where the source has a file -
++        // that only happens between the runtimes of the two installs and
++        // never affects Vortex' own data
++        skipped.push(relToSource(srcFile));
++        log("warn", `import: skipped ${relToSource(srcFile)} (conflicts with a directory)`);
++        return;
 +      }
-+      // log files of the official install are of no use here
-+      if (/\.log(\.\d+)?$/.test(path.basename(item).toLowerCase())) {
-+        return false;
++      if (code !== undefined && TRANSIENT_ERRNOS.has(code)) {
++        // still locked after all retries - runtime data another process
++        // (usually our own electron) holds open; not worth failing over
++        skipped.push(relToSource(srcFile));
++        log("warn", `import: skipped locked file ${relToSource(srcFile)}`);
++        return;
 +      }
-+      return true;
-+    },
-+  });
++      throw err;
++    }
++  };
++
++  const walk = async (srcDir: string, destDir: string, critical: boolean): Promise<void> => {
++    let entries: Dirent[];
++    try {
++      entries = await readdir(srcDir, { withFileTypes: true });
++    } catch (err) {
++      if (errnoOf(err) === "ENOENT") {
++        return;
++      }
++      throw err;
++    }
++    try {
++      await mkdir(destDir, { recursive: true });
++    } catch (err) {
++      if (errnoOf(err) === "EEXIST") {
++        // fine as long as the destination is a directory - otherwise the
++        // runtimes of the two installs disagree about this path and the
++        // subtree is not Vortex data
++        const st = await stat(destDir).catch(() => null);
++        if (st === null || !st.isDirectory()) {
++          log("warn", `import: skipped ${destDir} (destination is not a directory)`);
++          return;
++        }
++      } else {
++        throw err;
++      }
++    }
++    for (const entry of entries) {
++      const src = path.join(srcDir, entry.name);
++      const dst = path.join(destDir, entry.name);
++      if (entry.isDirectory()) {
++        await walk(src, dst, critical);
++      } else if (entry.isFile()) {
++        await copyOne(src, dst, critical);
++      } else if (entry.isSymbolicLink()) {
++        // symlinks and junctions are dereferenced: creating them can
++        // require privileges on windows, and a link back into the source
++        // tree must not make both installs share files
++        const st = await stat(src).catch(() => null);
++        if (st?.isDirectory() ?? false) {
++          await walk(src, dst, critical);
++        } else if (st?.isFile() ?? false) {
++          await copyOne(src, dst, critical);
++        }
++      }
++    }
++  };
++
++  // top level: the exclusion list applies here. everything else - Vortex'
++  // own data - is copied. only the state database is "critical".
++  for (const entry of await readdir(source, { withFileTypes: true })) {
++    const name = entry.name.toLowerCase();
++    if (entry.isDirectory() && SKIP_DIRS.has(name)) {
++      continue;
++    }
++    if (entry.isFile() && SKIP_FILES.has(name)) {
++      continue;
++    }
++    if (/\.log(\.\d+)?$/.test(name)) {
++      continue;
++    }
++    const critical = name === currentStatePath || name === `${currentStatePath}.wal`;
++    const src = path.join(source, entry.name);
++    const dst = path.join(dest, entry.name);
++    if (entry.isDirectory()) {
++      await walk(src, dst, critical);
++    } else if (entry.isFile()) {
++      await copyOne(src, dst, critical);
++    } else if (entry.isSymbolicLink()) {
++      const st = await stat(src).catch(() => null);
++      if (st?.isDirectory() ?? false) {
++        await walk(src, dst, critical);
++      } else if (st?.isFile() ?? false) {
++        await copyOne(src, dst, critical);
++      }
++    }
++  }
++
++  return skipped;
 +}
 +
 +/**
@@ -577,7 +715,7 @@ index 000000000..bb6242ad6
 +  }
 +}
 +
-+async function runImport(officialDir: string, ourDir: string): Promise<void> {
++async function runImport(officialDir: string, ourDir: string): Promise<string[]> {
 +  const ourState = path.join(ourDir, currentStatePath);
 +  const officialState = path.join(officialDir, currentStatePath);
 +  const backupPath = `${ourState}${BACKUP_SUFFIX}`;
@@ -645,7 +783,7 @@ index 000000000..bb6242ad6
 +    await withRetry("remove current state write-ahead log", () =>
 +      rm(`${ourState}.wal`, { force: true, recursive: true }));
 +
-+    await withRetry("copy data", () => copyTree(officialDir, ourDir));
++    const skipped = await copyTree(officialDir, ourDir);
 +    const replacements = await rewriteStoredPaths(ourState, officialDir, ourDir);
 +    await withRetry("remove import backup", () =>
 +      rm(backupPath, { force: true, recursive: true }));
@@ -657,12 +795,19 @@ index 000000000..bb6242ad6
 +            when: new Date().toISOString(),
 +            source: officialDir,
 +            pathRewrites: replacements,
++            skippedFiles: skipped,
 +          },
 +          null,
 +          2,
 +        ) + "\n",
 +      ));
-+    log("info", `imported data from ${officialDir} (${replacements} stored paths rewritten)`);
++    log(
++      "info",
++      `imported data from ${officialDir} (${replacements} stored paths rewritten` +
++        (skipped.length > 0 ? `, ${skipped.length} locked file(s) skipped` : "") +
++        ")",
++    );
++    return skipped;
 +  } catch (err) {
 +    // restore the previous state (if any) so the application can still
 +    // start. this must not mask the original error, so restoration
@@ -764,7 +909,33 @@ index 000000000..bb6242ad6
 +      }
 +    }
 +
-+    await runImport(officialDir, ourDir);
++    const skipped = await runImport(officialDir, ourDir);
++    // locked files directly in the data directory root are runtime data of
++    // the two electron runtimes - not worth bothering the user. anything
++    // in a subdirectory may be real data (mods, downloads) that could not
++    // be copied and is reported so it can be recovered.
++    const skippedDeep = skipped.filter((file) => file.includes(path.sep));
++    if (skippedDeep.length > 0) {
++      const sample = skippedDeep
++        .slice(0, 5)
++        .map((file) => `  ${path.join(ourDir, file)}`)
++        .join("\n");
++      log("warn", `import: ${skippedDeep.length} locked file(s) in subdirectories were skipped`);
++      await dialog
++        .showMessageBox({
++          type: "warning",
++          title: "Vortex Unlocked",
++          message: "Import completed, some files could not be copied",
++          detail:
++            `The data was imported, but ${skippedDeep.length} file(s) were in use and could not ` +
++            `be copied:\n${sample}` +
++            (skippedDeep.length > 5 ? `\n  (and ${skippedDeep.length - 5} more)` : "") +
++            "\n\nClose the program using them (antivirus, backup software, the official " +
++            "Vortex client) and import again to pick them up.",
++          buttons: ["OK"],
++        })
++        .catch(() => undefined);
++    }
 +  } catch (err) {
 +    if (err instanceof ImportSourceLockedError) {
 +      // nothing was changed - the pre-flight check refused the import
