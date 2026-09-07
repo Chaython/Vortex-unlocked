@@ -54,24 +54,97 @@ index 4242d924e..40f07c418 100644
      "installerIcon": "nsis/icon.ico",
      "installerHeaderIcon": "nsis/icon.ico"
    },
+diff --git a/src/main/nsis/installer.nsh b/src/main/nsis/installer.nsh
+index 947735168..a80e84c02 100644
+--- a/src/main/nsis/installer.nsh
++++ b/src/main/nsis/installer.nsh
+@@ -71,10 +71,37 @@ ignore:
+   ; Remove Windows Defender exclusion for Vortex installation folder (silent)
+   nsExec::ExecToLog 'powershell -WindowStyle Hidden -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "try { Remove-MpPreference -ExclusionPath \"$INSTDIR\" -ErrorAction SilentlyContinue } catch { }"'
+ 
+-  # if we are updating (i.e. auto uninstall before an install), don't ask for feedback
++  ; Vortex Unlocked: the upstream uninstall survey (which opened a Google
++  ; feedback form for Black Tree Gaming) was removed. Instead the uninstaller
++  ; now offers to clean up the data the app keeps outside the install dir.
++  ; Nothing here runs during an update: the uninstaller is also invoked by
++  ; electron-updater when replacing the app, and the -updater cache then
++  ; holds the installer that is currently running.
+   ${ifNot} ${isUpdated}
+-    MessageBox MB_YESNO "Thank you for using Vortex. Would you like to help us improve Vortex by giving us feedback?" IDNO no  
+-      ExecShell open "https://forms.gle/EAxrcY6C1MYq9d1e9" "" SW_SHOWNORMAL
+-    no:
++    ; per-machine install: the uninstaller may run elevated, so switch to the
++    ; invoking user's shell folders (the same pattern electron-builder itself
++    ; uses for app data removal) to make $APPDATA/$LOCALAPPDATA resolve for
++    ; the user the app was installed for.
++    ${if} $installMode == "all"
++      SetShellVarContext current
++    ${endIf}
++
++    ; electron-updater download cache - never contains user data
++    RMDir /r "$LOCALAPPDATA\vortex-unlocked-updater"
++    RMDir /r "$LOCALAPPDATA\Vortex Unlocked-updater"
++
++    ; application data (settings, profiles, mod registrations). This has to
++    ; be a prompt: with default settings the mod staging folders live inside
++    ; this directory, so deleting it deletes staged mods as well.
++    ; /SD IDNO auto-declines during silent uninstalls.
++    MessageBox MB_YESNO|MB_DEFBUTTON2|MB_ICONQUESTION "Delete the Vortex Unlocked application data?$\r$\n$\r$\nThis removes settings, profiles and mod registrations from %APPDATA%\vortex-unlocked.$\r$\nMods staged inside the application data directory are deleted as well; mods stored elsewhere on disk are not touched." /SD IDNO IDYES delete_app_data IDNO keep_app_data
++    delete_app_data:
++      RMDir /r "$APPDATA\vortex-unlocked"
++      RMDir /r "$APPDATA\Vortex Unlocked"
++    keep_app_data:
++
++    ${if} $installMode == "all"
++      SetShellVarContext all
++    ${endIf}
+   ${endIf}
+ !macroend
 diff --git a/src/main/prepare-dist-package.mjs b/src/main/prepare-dist-package.mjs
-index 4ae13de7a..2c8e2729d 100644
+index 4ae13de7a..015c80054 100644
 --- a/src/main/prepare-dist-package.mjs
 +++ b/src/main/prepare-dist-package.mjs
-@@ -50,7 +50,12 @@ async function main() {
+@@ -50,7 +50,15 @@ async function main() {
    const json = await readFile(MAIN_PACKAGE_PATH, "utf8");
    const mainPkg = JSON.parse(json);
  
 -  mainPkg["name"] = "Vortex";
 +  // Vortex Unlocked: npm-compliant package name - electron-builder rejects
-+  // names containing spaces ("Invalid name"). productName carries the display
-+  // name and keeps the app data directory (%APPDATA%/Vortex Unlocked) separate
-+  // from an official Vortex install.
++  // names containing spaces ("Invalid name"). The packaged app name doubles
++  // as the application data directory on disk: Electron derives the user data
++  // path from the name in this package.json, so the data lands in
++  // %APPDATA%/vortex-unlocked, separate from an official Vortex install
++  // (%APPDATA%/Vortex). productName is deliberately not written here - the
++  // display name comes from electron-builder.config.json, and a productName
++  // in the packaged package.json would move the data directory.
 +  mainPkg["name"] = "vortex-unlocked";
-+  mainPkg["productName"] = "Vortex Unlocked";
    mainPkg["main"] = mainPkg.main.replace(/^build\//, "");
  
    // NOTE(erri120): this is the minimal amount of bullshit required to get the piece of shit software called "electron-builder" to work with PNPM.
+diff --git a/src/main/src/Application.ts b/src/main/src/Application.ts
+index eb196686c..16a905ad3 100644
+--- a/src/main/src/Application.ts
++++ b/src/main/src/Application.ts
+@@ -35,6 +35,7 @@ import { getVortexPath, setVortexPath } from "./getVortexPath";
+ import { shutdownHashWorker } from "./hash/host";
+ import { betterIpcMain } from "./ipc";
+ import { log, setupLogging, changeLogPath } from "./logging";
++import { maybeImportOfficialVortexData } from "./migrateOfficialData";
+ import MainWindow from "./MainWindow";
+ import SplashScreen from "./SplashScreen";
+ import DuckDBSingleton from "./store/DuckDBSingleton";
+@@ -890,6 +891,11 @@ class Application {
+       return startupSettings;
+     });
+ 
++    // Vortex Unlocked: offer to import data (profiles, mods, settings,
++    // downloads) from an existing official Vortex installation before the
++    // state database is opened for the first time.
++    await maybeImportOfficialVortexData(this.mArgs.userData !== undefined);
++
+     // Initialize app metadata that will be sent to renderer
+     this.mAppMetadata = {
+       commandLine: this.mArgs as unknown as Record<string, unknown>,
 diff --git a/src/main/src/MainWindow.ts b/src/main/src/MainWindow.ts
 index 59dffa1fe..d85321e14 100644
 --- a/src/main/src/MainWindow.ts
@@ -113,6 +186,314 @@ index ab04007fb..f9e714daa 100644
    const repo = repoForChannel();
    const releases = await fetchReleases(repo);
    const picked = pickRelease(releases, channel);
+diff --git a/src/main/src/migrateOfficialData.ts b/src/main/src/migrateOfficialData.ts
+new file mode 100644
+index 000000000..ff41329e8
+--- /dev/null
++++ b/src/main/src/migrateOfficialData.ts
+@@ -0,0 +1,302 @@
++import { existsSync } from "node:fs";
++import { cp, rm, writeFile } from "node:fs/promises";
++import * as path from "node:path";
++
++import { currentStatePath } from "@vortex/shared/state";
++import { app, dialog } from "electron";
++
++import { log } from "./logging";
++import LevelPersist from "./store/LevelPersist";
++
++/**
++ * Vortex Unlocked: import application data from an existing official Vortex
++ * installation.
++ *
++ * Vortex Unlocked stores its data in a separate directory
++ * (%APPDATA%\vortex-unlocked on Windows - Electron derives the user data
++ * path from the packaged application name) so it can be installed and used
++ * side-by-side with the official client (%APPDATA%\Vortex). On first start
++ * this module offers to copy the official data - profiles, mod staging
++ * folders, settings, download metadata - into the Vortex Unlocked directory
++ * so an existing setup carries over without reinstalling anything.
++ *
++ * The import runs before the state database is opened (called from
++ * setupPersistence). Afterwards, absolute paths stored in the database that
++ * point into the old data directory - most importantly the default mod
++ * staging folders at {USERDATA}\{GAME}\mods - are rewritten to the new
++ * location so both installs don't fight over the same files.
++ *
++ * The official installation is never modified. Marker files remember a
++ * completed or declined import so the prompt doesn't keep nagging.
++ */
++
++/** written after a successful import so the prompt doesn't show again */
++const MARKER_DONE = ".unlocked-import.json";
++/** written when the user picks "Never ask again" */
++const MARKER_DECLINED = ".unlocked-import-declined";
++/** command line flag set by the settings dialog to trigger an import on restart */
++const FORCED_FLAG = "--import-vortex-data";
++/** suffix for the one-generation backup of pre-existing unlocked data */
++const BACKUP_SUFFIX = ".preimport-backup";
++
++function pathsEqual(a: string, b: string): boolean {
++  const caseSensitive = process.platform === "linux";
++  return caseSensitive ? a === b : a.toLowerCase() === b.toLowerCase();
++}
++
++function escapeRegExp(input: string): string {
++  return input.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
++}
++
++interface IRewriteResult {
++  value: string;
++  count: number;
++}
++
++/**
++ * Replaces every occurrence of `from` with `to` inside a value as stored in
++ * the state database (a JSON encoded string). Walks nested structures and
++ * arrays and only reports a change if something actually matched.
++ */
++function rewritePathsInValue(value: string, from: string, to: string): IRewriteResult {
++  let count = 0;
++  const pattern = new RegExp(escapeRegExp(from), process.platform === "linux" ? "g" : "gi");
++
++  const transform = (input: string): string => {
++    const found = input.match(pattern);
++    if (found === null) {
++      return input;
++    }
++    count += found.length;
++    return input.replace(pattern, () => to);
++  };
++
++  const walk = (node: unknown): unknown => {
++    if (typeof node === "string") {
++      return transform(node);
++    } else if (Array.isArray(node)) {
++      return node.map(walk);
++    } else if (node !== null && typeof node === "object") {
++      const out: Record<string, unknown> = {};
++      for (const [key, val] of Object.entries(node)) {
++        out[key] = walk(val);
++      }
++      return out;
++    }
++    return node;
++  };
++
++  try {
++    const result = JSON.stringify(walk(JSON.parse(value)));
++    return { value: result, count };
++  } catch {
++    // not valid json - treat the whole value as one plain string
++    return { value: transform(value), count };
++  }
++}
++
++async function copyTree(source: string, dest: string): Promise<void> {
++  const skipDirs = new Set(["temp", "crashdumps"]);
++  await cp(source, dest, {
++    recursive: true,
++    force: true,
++    filter: (item: string) => {
++      const rel = path.relative(source, item);
++      if (rel === "") {
++        return true;
++      }
++      // volatile data that must not be carried over
++      const top = (rel.split(path.sep)[0] ?? "").toLowerCase();
++      if (skipDirs.has(top)) {
++        return false;
++      }
++      // log files of the official install are of no use here
++      if (/\.log(\.\d+)?$/.test(path.basename(item).toLowerCase())) {
++        return false;
++      }
++      return true;
++    },
++  });
++}
++
++/**
++ * Rewrites absolute paths inside the (already copied) state database from the
++ * official data directory to the Vortex Unlocked one. Returns the number of
++ * replacements made.
++ */
++async function rewriteStoredPaths(
++  statePath: string,
++  fromDir: string,
++  toDir: string,
++): Promise<number> {
++  const persistor = await LevelPersist.create(statePath);
++  try {
++    const updates: Array<{ key: string[]; value: string }> = [];
++    let replacements = 0;
++    for (const kv of await persistor.getAllKVs()) {
++      const { value, count } = rewritePathsInValue(kv.value, fromDir, toDir);
++      if (count > 0) {
++        updates.push({ key: kv.key, value });
++        replacements += count;
++      }
++    }
++    if (updates.length > 0) {
++      await persistor.bulkSetItem(updates);
++    }
++
++    try {
++      const multiUser: unknown = JSON.parse(await persistor.getItem(["user", "multiUser"]));
++      if (multiUser === true) {
++        log(
++          "warn",
++          "the imported data used Vortex' multi-user mode: the shared database is " +
++            "used as-is by both installs and was not migrated",
++        );
++      }
++    } catch {
++      // multi-user flag not present - nothing to report
++    }
++
++    return replacements;
++  } finally {
++    await persistor.close();
++  }
++}
++
++async function runImport(officialDir: string, ourDir: string): Promise<void> {
++  const ourState = path.join(ourDir, currentStatePath);
++  const backupPath = `${ourState}${BACKUP_SUFFIX}`;
++  const hadExistingData = existsSync(ourState);
++
++  // back up the current unlocked database so a failed import can be restored
++  if (hadExistingData) {
++    await rm(backupPath, { force: true });
++    await cp(ourState, backupPath);
++  }
++  // a write-ahead log of the old data must not be replayed over the imported one
++  await rm(`${ourState}.wal`, { force: true });
++
++  try {
++    await copyTree(officialDir, ourDir);
++    const replacements = await rewriteStoredPaths(ourState, officialDir, ourDir);
++    await rm(backupPath, { force: true });
++    await writeFile(
++      path.join(ourDir, MARKER_DONE),
++      JSON.stringify(
++        {
++          when: new Date().toISOString(),
++          source: officialDir,
++          pathRewrites: replacements,
++        },
++        null,
++        2,
++      ) + "\n",
++    );
++    log("info", `imported data from ${officialDir} (${replacements} stored paths rewritten)`);
++  } catch (err) {
++    // restore the previous state (if any) so the application can still start
++    await rm(ourState, { force: true });
++    await rm(`${ourState}.wal`, { force: true });
++    if (hadExistingData) {
++      await cp(backupPath, ourState);
++    }
++    throw err;
++  }
++}
++
++function offerImport(officialDir: string, replace: boolean): Promise<number> {
++  return dialog
++    .showMessageBox({
++      type: "question",
++      title: "Vortex Unlocked",
++      message: replace
++        ? "Import data from your Vortex installation again?"
++        : "Import data from your Vortex installation?",
++      detail:
++        `Vortex Unlocked found data of the official Vortex client at\n  ${officialDir}\n\n` +
++        (replace
++          ? "Importing again replaces the data currently used by Vortex Unlocked. " +
++            "A backup of the current data is created first.\n\n"
++          : "") +
++        "This copies profiles, mod staging folders, settings and download metadata " +
++        "into the Vortex Unlocked data directory. The Vortex installation is not " +
++        "modified. Depending on the size of your mod library this may take a while.",
++      buttons: ["Import", "Not now", "Never ask again"],
++      defaultId: 0,
++      cancelId: 1,
++      noLink: true,
++    })
++    .then((res) => res.response);
++}
++
++/**
++ * Entry point, called from setupPersistence before the state database is
++ * opened for the first time. Prompts (or runs directly when started with
++ * --import-vortex-data, used by the settings dialog) and then imports the
++ * official data, if there is any and the user agrees.
++ */
++export async function maybeImportOfficialVortexData(customUserData: boolean): Promise<void> {
++  try {
++    // never interfere with e2e test runs or unpackaged development builds
++    if (process.env.VORTEX_E2E === "1" || !app.isPackaged) {
++      return;
++    }
++    // a custom --userdata directory means data locations are managed manually
++    if (customUserData) {
++      return;
++    }
++
++    const ourDir = app.getPath("userData");
++    const officialDir = path.join(app.getPath("appData"), "Vortex");
++    if (pathsEqual(ourDir, officialDir)) {
++      return;
++    }
++
++    const officialState = path.join(officialDir, currentStatePath);
++    const forced = process.argv.includes(FORCED_FLAG);
++
++    if (!existsSync(officialState)) {
++      if (forced) {
++        await dialog.showMessageBox({
++          type: "info",
++          title: "Vortex Unlocked",
++          message: "No Vortex data found to import",
++          detail: `No Vortex data was found at\n  ${officialDir}\n\nNothing was changed.`,
++          buttons: ["OK"],
++        });
++      }
++      return;
++    }
++
++    if (!forced) {
++      if (existsSync(path.join(ourDir, MARKER_DONE))) {
++        return;
++      }
++      if (existsSync(path.join(ourDir, MARKER_DECLINED))) {
++        return;
++      }
++      const choice = await offerImport(officialDir, existsSync(path.join(ourDir, currentStatePath)));
++      if (choice === 1) {
++        return;
++      } else if (choice === 2) {
++        await writeFile(path.join(ourDir, MARKER_DECLINED), new Date().toISOString());
++        return;
++      }
++    }
++
++    await runImport(officialDir, ourDir);
++  } catch (err) {
++    log("error", "failed to import data from official Vortex", err);
++    await dialog
++      .showMessageBox({
++        type: "error",
++        title: "Vortex Unlocked",
++        message: "Importing data from Vortex failed",
++        detail:
++          `${err instanceof Error ? err.message : String(err)}\n\n` +
++          "Vortex Unlocked continues with its own data.",
++        buttons: ["OK"],
++      })
++      .catch(() => undefined);
++  }
++}
 diff --git a/src/main/src/telemetry/state.ts b/src/main/src/telemetry/state.ts
 index 0eafd55c9..d918f46a8 100644
 --- a/src/main/src/telemetry/state.ts
@@ -1118,7 +1499,7 @@ index 0492857bd..98a86980b 100644
                </FlexLayout>
              </FlexLayout.Flex>
 diff --git a/src/renderer/src/extensions/settings_interface/SettingsInterface.tsx b/src/renderer/src/extensions/settings_interface/SettingsInterface.tsx
-index e6e05fdf1..401ab6d38 100644
+index e6e05fdf1..b6d7e8f8b 100644
 --- a/src/renderer/src/extensions/settings_interface/SettingsInterface.tsx
 +++ b/src/renderer/src/extensions/settings_interface/SettingsInterface.tsx
 @@ -40,6 +40,7 @@ import {
@@ -1158,7 +1539,7 @@ index e6e05fdf1..401ab6d38 100644
        relativeTimes,
        startup,
        startMinimized,
-@@ -237,6 +242,13 @@ class SettingsInterfaceImpl extends ComponentEx<IProps, {}> {
+@@ -237,6 +242,33 @@ class SettingsInterfaceImpl extends ComponentEx<IProps, {}> {
                {t("Bring Vortex to foreground when starting downloads in browser")}
              </Toggle>
            </div>
@@ -1169,10 +1550,61 @@ index e6e05fdf1..401ab6d38 100644
 +              {t("Hide Dashboard tab")}
 +            </Toggle>
 +          </div>
++        </FormGroup>
++
++        {/* Vortex Unlocked: import data from an existing official Vortex install. */}
++        <FormGroup controlId="unlockedImport">
++          <ControlLabel>{t("Vortex Unlocked")}</ControlLabel>
++
++          <div>
++            <Typography>
++              {t(
++                "Vortex Unlocked keeps its data separate from the official Vortex client, " +
++                  "so both can be used side by side. Import the data of an existing " +
++                  "Vortex installation to carry over profiles, mods, settings and " +
++                  "downloads.",
++              )}
++            </Typography>
++          </div>
++
++          <Button brand="neutral" onClick={this.importVortexData}>
++            {t("Import data from Vortex")}
++          </Button>
          </FormGroup>
  
          <FormGroup controlId="advanced">
-@@ -488,6 +500,7 @@ function mapStateToProps(state: IState): IConnectedProps {
+@@ -467,6 +499,30 @@ class SettingsInterfaceImpl extends ComponentEx<IProps, {}> {
+     onSetAdvancedMode(!advanced);
+   };
+ 
++  private importVortexData = () => {
++    const { t, onShowDialog } = this.props;
++    onShowDialog(
++      "question",
++      t("Import data from Vortex"),
++      {
++        text: t(
++          "This restarts Vortex Unlocked and imports the data of your official Vortex " +
++            "installation - profiles, mods, settings and downloads. The Vortex " +
++            "installation is not modified and a backup of the current Vortex Unlocked " +
++            "data is kept. This may take a while for large mod libraries.",
++        ),
++        options: { translated: true, wrap: true },
++      },
++      [
++        { label: "Cancel" },
++        {
++          label: t("Import and restart"),
++          action: () => relaunch(["--import-vortex-data"]),
++        },
++      ],
++    );
++  };
++
+   private restart = () => {
+     relaunch();
+   };
+@@ -488,6 +544,7 @@ function mapStateToProps(state: IState): IConnectedProps {
      relativeTimes: state.settings.interface.relativeTimes,
      suppressedNotifications: state.settings.notifications.suppress,
      foregroundDL: state.settings.interface.foregroundDL,
@@ -1180,7 +1612,7 @@ index e6e05fdf1..401ab6d38 100644
    };
  }
  
-@@ -533,6 +546,7 @@ function mapDispatchToProps(dispatch: ThunkDispatch<any, null, Redux.Action>): I
+@@ -533,6 +590,7 @@ function mapDispatchToProps(dispatch: ThunkDispatch<any, null, Redux.Action>): I
        dispatch(resetSuppression(null));
      },
      onSetForegroundDL: (enabled: boolean) => dispatch(setForegroundDL(enabled)),
