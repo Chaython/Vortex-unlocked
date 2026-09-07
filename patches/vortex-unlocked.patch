@@ -188,10 +188,10 @@ index ab04007fb..f9e714daa 100644
    const picked = pickRelease(releases, channel);
 diff --git a/src/main/src/migrateOfficialData.ts b/src/main/src/migrateOfficialData.ts
 new file mode 100644
-index 000000000..ff41329e8
+index 000000000..7da1b246b
 --- /dev/null
 +++ b/src/main/src/migrateOfficialData.ts
-@@ -0,0 +1,302 @@
+@@ -0,0 +1,336 @@
 +import { existsSync } from "node:fs";
 +import { cp, rm, writeFile } from "node:fs/promises";
 +import * as path from "node:path";
@@ -232,6 +232,9 @@ index 000000000..ff41329e8
 +const FORCED_FLAG = "--import-vortex-data";
 +/** suffix for the one-generation backup of pre-existing unlocked data */
 +const BACKUP_SUFFIX = ".preimport-backup";
++/** number of rewritten state entries written per bulk statement (matches
++ *  upstream's bulkRemoveItem chunk size so statement sizes stay bounded) */
++const BULK_CHUNK = 256;
 +
 +function pathsEqual(a: string, b: string): boolean {
 +  const caseSensitive = process.platform === "linux";
@@ -335,7 +338,19 @@ index 000000000..ff41329e8
 +      }
 +    }
 +    if (updates.length > 0) {
-+      await persistor.bulkSetItem(updates);
++      // one transaction, chunked: bulkSetItem emits a single multi-row
++      // INSERT, and rewriting a large state in one statement could exceed
++      // practical statement/parameter sizes (upstream chunks at 256 too)
++      await persistor.beginTransaction();
++      try {
++        for (let i = 0; i < updates.length; i += BULK_CHUNK) {
++          await persistor.bulkSetItem(updates.slice(i, i + BULK_CHUNK));
++        }
++        await persistor.commitTransaction();
++      } catch (err) {
++        await persistor.rollbackTransaction().catch(() => undefined);
++        throw err;
++      }
 +    }
 +
 +    try {
@@ -362,18 +377,28 @@ index 000000000..ff41329e8
 +  const backupPath = `${ourState}${BACKUP_SUFFIX}`;
 +  const hadExistingData = existsSync(ourState);
 +
-+  // back up the current unlocked database so a failed import can be restored
++  // back up the current unlocked database so a failed import can be restored.
++  // the state (state.v2) is a directory of database files, so both the
++  // removal of a previous backup and the copy have to be recursive -
++  // copying a directory without { recursive: true } fails with EISDIR.
 +  if (hadExistingData) {
-+    await rm(backupPath, { force: true });
-+    await cp(ourState, backupPath);
++    await rm(backupPath, { force: true, recursive: true });
++    await cp(ourState, backupPath, { recursive: true });
 +  }
-+  // a write-ahead log of the old data must not be replayed over the imported one
-+  await rm(`${ourState}.wal`, { force: true });
 +
 +  try {
++    // replace the current database wholesale instead of merging into it:
++    // mixing database files from two generations in one directory could
++    // corrupt it. the backup taken above is restored if anything below
++    // goes wrong.
++    await rm(ourState, { force: true, recursive: true });
++    // a write-ahead log of the old data must not be replayed over the
++    // imported one
++    await rm(`${ourState}.wal`, { force: true, recursive: true });
++
 +    await copyTree(officialDir, ourDir);
 +    const replacements = await rewriteStoredPaths(ourState, officialDir, ourDir);
-+    await rm(backupPath, { force: true });
++    await rm(backupPath, { force: true, recursive: true });
 +    await writeFile(
 +      path.join(ourDir, MARKER_DONE),
 +      JSON.stringify(
@@ -388,11 +413,17 @@ index 000000000..ff41329e8
 +    );
 +    log("info", `imported data from ${officialDir} (${replacements} stored paths rewritten)`);
 +  } catch (err) {
-+    // restore the previous state (if any) so the application can still start
-+    await rm(ourState, { force: true });
-+    await rm(`${ourState}.wal`, { force: true });
-+    if (hadExistingData) {
-+      await cp(backupPath, ourState);
++    // restore the previous state (if any) so the application can still start.
++    // this must not mask the original error, so restoration failures are
++    // logged and swallowed.
++    try {
++      await rm(ourState, { force: true, recursive: true });
++      await rm(`${ourState}.wal`, { force: true, recursive: true });
++      if (hadExistingData) {
++        await cp(backupPath, ourState, { recursive: true });
++      }
++    } catch (restoreErr) {
++      log("error", "failed to restore the pre-import state", restoreErr);
 +    }
 +    throw err;
 +  }
@@ -414,7 +445,8 @@ index 000000000..ff41329e8
 +          : "") +
 +        "This copies profiles, mod staging folders, settings and download metadata " +
 +        "into the Vortex Unlocked data directory. The Vortex installation is not " +
-+        "modified. Depending on the size of your mod library this may take a while.",
++        "modified. Please close the official Vortex client while the data is " +
++        "imported. Depending on the size of your mod library this may take a while.",
 +      buttons: ["Import", "Not now", "Never ask again"],
 +      defaultId: 0,
 +      cancelId: 1,
@@ -488,7 +520,9 @@ index 000000000..ff41329e8
 +        message: "Importing data from Vortex failed",
 +        detail:
 +          `${err instanceof Error ? err.message : String(err)}\n\n` +
-+          "Vortex Unlocked continues with its own data.",
++          "Vortex Unlocked continues with its own data. If the official Vortex " +
++          "client is running, close it and start the import again " +
++          "(Settings - Interface - Import data from Vortex).",
 +        buttons: ["OK"],
 +      })
 +      .catch(() => undefined);
@@ -1499,7 +1533,7 @@ index 0492857bd..98a86980b 100644
                </FlexLayout>
              </FlexLayout.Flex>
 diff --git a/src/renderer/src/extensions/settings_interface/SettingsInterface.tsx b/src/renderer/src/extensions/settings_interface/SettingsInterface.tsx
-index e6e05fdf1..b6d7e8f8b 100644
+index e6e05fdf1..47bdbeeca 100644
 --- a/src/renderer/src/extensions/settings_interface/SettingsInterface.tsx
 +++ b/src/renderer/src/extensions/settings_interface/SettingsInterface.tsx
 @@ -40,6 +40,7 @@ import {
@@ -1573,7 +1607,7 @@ index e6e05fdf1..b6d7e8f8b 100644
          </FormGroup>
  
          <FormGroup controlId="advanced">
-@@ -467,6 +499,30 @@ class SettingsInterfaceImpl extends ComponentEx<IProps, {}> {
+@@ -467,6 +499,31 @@ class SettingsInterfaceImpl extends ComponentEx<IProps, {}> {
      onSetAdvancedMode(!advanced);
    };
  
@@ -1587,7 +1621,8 @@ index e6e05fdf1..b6d7e8f8b 100644
 +          "This restarts Vortex Unlocked and imports the data of your official Vortex " +
 +            "installation - profiles, mods, settings and downloads. The Vortex " +
 +            "installation is not modified and a backup of the current Vortex Unlocked " +
-+            "data is kept. This may take a while for large mod libraries.",
++            "data is kept. Please close the official Vortex client before continuing. " +
++            "This may take a while for large mod libraries.",
 +        ),
 +        options: { translated: true, wrap: true },
 +      },
@@ -1604,7 +1639,7 @@ index e6e05fdf1..b6d7e8f8b 100644
    private restart = () => {
      relaunch();
    };
-@@ -488,6 +544,7 @@ function mapStateToProps(state: IState): IConnectedProps {
+@@ -488,6 +545,7 @@ function mapStateToProps(state: IState): IConnectedProps {
      relativeTimes: state.settings.interface.relativeTimes,
      suppressedNotifications: state.settings.notifications.suppress,
      foregroundDL: state.settings.interface.foregroundDL,
@@ -1612,7 +1647,7 @@ index e6e05fdf1..b6d7e8f8b 100644
    };
  }
  
-@@ -533,6 +590,7 @@ function mapDispatchToProps(dispatch: ThunkDispatch<any, null, Redux.Action>): I
+@@ -533,6 +591,7 @@ function mapDispatchToProps(dispatch: ThunkDispatch<any, null, Redux.Action>): I
        dispatch(resetSuppression(null));
      },
      onSetForegroundDL: (enabled: boolean) => dispatch(setForegroundDL(enabled)),
