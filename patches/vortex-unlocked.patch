@@ -1,5 +1,5 @@
 diff --git a/extensions/modtype-umm/src/ummDownloader.ts b/extensions/modtype-umm/src/ummDownloader.ts
-index 04527bc3e..6df9873bd 100644
+index 04527bc..6df9873 100644
 --- a/extensions/modtype-umm/src/ummDownloader.ts
 +++ b/extensions/modtype-umm/src/ummDownloader.ts
 @@ -237,9 +237,8 @@ async function download(
@@ -15,7 +15,7 @@ index 04527bc3e..6df9873bd 100644
    const downloadId = genDownloadInfo(api, archiveName).downloadId;
    if (downloadId !== undefined) {
 diff --git a/src/main/electron-builder.config.json b/src/main/electron-builder.config.json
-index 4242d924e..40f07c418 100644
+index 4242d92..40f07c4 100644
 --- a/src/main/electron-builder.config.json
 +++ b/src/main/electron-builder.config.json
 @@ -1,6 +1,6 @@
@@ -55,7 +55,7 @@ index 4242d924e..40f07c418 100644
      "installerHeaderIcon": "nsis/icon.ico"
    },
 diff --git a/src/main/nsis/installer.nsh b/src/main/nsis/installer.nsh
-index 947735168..a80e84c02 100644
+index 9477351..a80e84c 100644
 --- a/src/main/nsis/installer.nsh
 +++ b/src/main/nsis/installer.nsh
 @@ -71,10 +71,37 @@ ignore:
@@ -101,7 +101,7 @@ index 947735168..a80e84c02 100644
    ${endIf}
  !macroend
 diff --git a/src/main/prepare-dist-package.mjs b/src/main/prepare-dist-package.mjs
-index 4ae13de7a..015c80054 100644
+index 4ae13de..015c800 100644
 --- a/src/main/prepare-dist-package.mjs
 +++ b/src/main/prepare-dist-package.mjs
 @@ -50,7 +50,15 @@ async function main() {
@@ -122,7 +122,7 @@ index 4ae13de7a..015c80054 100644
  
    // NOTE(erri120): this is the minimal amount of bullshit required to get the piece of shit software called "electron-builder" to work with PNPM.
 diff --git a/src/main/src/Application.ts b/src/main/src/Application.ts
-index eb196686c..16a905ad3 100644
+index c54d37a..bc3661f 100644
 --- a/src/main/src/Application.ts
 +++ b/src/main/src/Application.ts
 @@ -35,6 +35,7 @@ import { getVortexPath, setVortexPath } from "./getVortexPath";
@@ -131,9 +131,9 @@ index eb196686c..16a905ad3 100644
  import { log, setupLogging, changeLogPath } from "./logging";
 +import { maybeImportOfficialVortexData } from "./migrateOfficialData";
  import MainWindow from "./MainWindow";
+ import { ReloadBudget } from "./reloadBudget";
  import SplashScreen from "./SplashScreen";
- import DuckDBSingleton from "./store/DuckDBSingleton";
-@@ -890,6 +891,11 @@ class Application {
+@@ -918,6 +919,11 @@ class Application {
        return startupSettings;
      });
  
@@ -146,10 +146,10 @@ index eb196686c..16a905ad3 100644
      this.mAppMetadata = {
        commandLine: this.mArgs as unknown as Record<string, unknown>,
 diff --git a/src/main/src/MainWindow.ts b/src/main/src/MainWindow.ts
-index 59dffa1fe..d85321e14 100644
+index 1de32cc..bb3ad00 100644
 --- a/src/main/src/MainWindow.ts
 +++ b/src/main/src/MainWindow.ts
-@@ -404,7 +404,7 @@ class MainWindow {
+@@ -426,7 +426,7 @@ class MainWindow {
        autoHideMenuBar: windowMetrics?.customTitlebar ?? true,
        frame: !(windowMetrics?.customTitlebar ?? true),
        show: false,
@@ -159,7 +159,7 @@ index 59dffa1fe..d85321e14 100644
        webPreferences: {
          preload: path.join(getVortexPath("base"), "preload.cjs"),
 diff --git a/src/main/src/extensions/autoupdater/releaseResolver.ts b/src/main/src/extensions/autoupdater/releaseResolver.ts
-index ab04007fb..f9e714daa 100644
+index ab04007..f9e714d 100644
 --- a/src/main/src/extensions/autoupdater/releaseResolver.ts
 +++ b/src/main/src/extensions/autoupdater/releaseResolver.ts
 @@ -316,6 +316,9 @@ function formatReleaseDate(publishedAt: string): string {
@@ -188,7 +188,7 @@ index ab04007fb..f9e714daa 100644
    const picked = pickRelease(releases, channel);
 diff --git a/src/main/src/migrateOfficialData.ts b/src/main/src/migrateOfficialData.ts
 new file mode 100644
-index 000000000..32a5da286
+index 0000000..32a5da2
 --- /dev/null
 +++ b/src/main/src/migrateOfficialData.ts
 @@ -0,0 +1,779 @@
@@ -972,7 +972,7 @@ index 000000000..32a5da286
 +  }
 +}
 diff --git a/src/main/src/telemetry/state.ts b/src/main/src/telemetry/state.ts
-index 0eafd55c9..d918f46a8 100644
+index 0eafd55..d918f46 100644
 --- a/src/main/src/telemetry/state.ts
 +++ b/src/main/src/telemetry/state.ts
 @@ -15,7 +15,10 @@ export const getProcessor = (): SpanProcessor | undefined => {
@@ -988,7 +988,7 @@ index 0eafd55c9..d918f46a8 100644
  
  export const isTelemetryEnabled = (): boolean => {
 diff --git a/src/renderer/src/extensions/about_dialog/views/AboutPage.tsx b/src/renderer/src/extensions/about_dialog/views/AboutPage.tsx
-index 7645efcb4..96bd53d19 100644
+index 7645efc..96bd53d 100644
 --- a/src/renderer/src/extensions/about_dialog/views/AboutPage.tsx
 +++ b/src/renderer/src/extensions/about_dialog/views/AboutPage.tsx
 @@ -168,11 +168,17 @@ class AboutPage extends ComponentEx<IProps, IComponentState> {
@@ -1011,7 +1011,7 @@ index 7645efcb4..96bd53d19 100644
                  <p>
                    {t("Released under")} <a onClick={this.showOwnLicense}>GPL-3</a> {t("License")}
 diff --git a/src/renderer/src/extensions/analytics/index.ts b/src/renderer/src/extensions/analytics/index.ts
-index def21eec1..2a358d7b6 100644
+index def21ee..2a358d7 100644
 --- a/src/renderer/src/extensions/analytics/index.ts
 +++ b/src/renderer/src/extensions/analytics/index.ts
 @@ -20,11 +20,23 @@ import SettingsAnalytics from "./views/SettingsAnalytics";
@@ -1039,7 +1039,7 @@ index def21eec1..2a358d7b6 100644
      const getUserInfo = () => context.api.store.getState().persistent.nexus.userInfo;
      // `?? true` because state persisted before the setting existed has no value for it.
 diff --git a/src/renderer/src/extensions/collections/index.ts b/src/renderer/src/extensions/collections/index.ts
-index 53777be40..a61c1cc27 100644
+index 53777be..a61c1cc 100644
 --- a/src/renderer/src/extensions/collections/index.ts
 +++ b/src/renderer/src/extensions/collections/index.ts
 @@ -1694,26 +1694,10 @@ function once(api: IExtensionApi, collectionsCB: () => ICallbackMap) {
@@ -1072,7 +1072,7 @@ index 53777be40..a61c1cc27 100644
  }
  
 diff --git a/src/renderer/src/extensions/collections/views/InstallDialog/InstallStartDialog.tsx b/src/renderer/src/extensions/collections/views/InstallDialog/InstallStartDialog.tsx
-index a6378b50d..603d4b58f 100644
+index a6378b5..603d4b5 100644
 --- a/src/renderer/src/extensions/collections/views/InstallDialog/InstallStartDialog.tsx
 +++ b/src/renderer/src/extensions/collections/views/InstallDialog/InstallStartDialog.tsx
 @@ -38,7 +38,6 @@ interface IInstallDialogProps {
@@ -1100,7 +1100,7 @@ index a6378b50d..603d4b58f 100644
      nextProfileId: state.settings.profiles.nextProfileId,
      collectionsInstallWhileDownloading,
 diff --git a/src/renderer/src/extensions/dashboard/index.ts b/src/renderer/src/extensions/dashboard/index.ts
-index 52e62b0bc..1ea050467 100644
+index 52e62b0..1ea0504 100644
 --- a/src/renderer/src/extensions/dashboard/index.ts
 +++ b/src/renderer/src/extensions/dashboard/index.ts
 @@ -39,12 +39,18 @@ function registerDashlet(
@@ -1123,7 +1123,7 @@ index 52e62b0bc..1ea050467 100644
  
    context.registerSettings("Interface", Settings, () => ({ dashlets }), undefined, 1000);
 diff --git a/src/renderer/src/extensions/download_management/views/Settings.tsx b/src/renderer/src/extensions/download_management/views/Settings.tsx
-index 34e57632b..5617e2ed1 100644
+index 34e5763..5617e2e 100644
 --- a/src/renderer/src/extensions/download_management/views/Settings.tsx
 +++ b/src/renderer/src/extensions/download_management/views/Settings.tsx
 @@ -22,7 +22,6 @@ import { ComponentEx, connect, translate } from "../../../controls/ComponentEx";
@@ -1237,7 +1237,7 @@ index 34e57632b..5617e2ed1 100644
      downloads: state.persistent.downloads.files,
      modsInstallPath,
 diff --git a/src/renderer/src/extensions/mod_management/hooks/useModToolbarActions.hook.tsx b/src/renderer/src/extensions/mod_management/hooks/useModToolbarActions.hook.tsx
-index a3a764800..f365e24dc 100644
+index bd3f102..619fce8 100644
 --- a/src/renderer/src/extensions/mod_management/hooks/useModToolbarActions.hook.tsx
 +++ b/src/renderer/src/extensions/mod_management/hooks/useModToolbarActions.hook.tsx
 @@ -420,9 +420,6 @@ const useCheckVersionsAction = (t: TFunction): IPositionedAction => {
@@ -1270,7 +1270,7 @@ index a3a764800..f365e24dc 100644
    return useMemo(
      () => ({
 diff --git a/src/renderer/src/extensions/mod_management/views/CheckModVersionsButton.tsx b/src/renderer/src/extensions/mod_management/views/CheckModVersionsButton.tsx
-index aadc59055..aafb59376 100644
+index aadc590..aafb593 100644
 --- a/src/renderer/src/extensions/mod_management/views/CheckModVersionsButton.tsx
 +++ b/src/renderer/src/extensions/mod_management/views/CheckModVersionsButton.tsx
 @@ -22,7 +22,6 @@ interface IConnectedProps {
@@ -1300,7 +1300,7 @@ index aadc59055..aafb59376 100644
  }
  
 diff --git a/src/renderer/src/extensions/nexus_integration/eventHandlers.ts b/src/renderer/src/extensions/nexus_integration/eventHandlers.ts
-index 26bb74e51..7e2a818b2 100644
+index 26bb74e..7e2a818 100644
 --- a/src/renderer/src/extensions/nexus_integration/eventHandlers.ts
 +++ b/src/renderer/src/extensions/nexus_integration/eventHandlers.ts
 @@ -55,9 +55,9 @@ import { setUpdatingMods } from "../mod_management/actions/session";
@@ -1338,7 +1338,7 @@ index 26bb74e51..7e2a818b2 100644
    const url = nxmModUrl(game, gameId, modId, fileId);
    log("debug", "downloading from generated nxm link", { url, fileName });
 diff --git a/src/renderer/src/extensions/nexus_integration/index.tsx b/src/renderer/src/extensions/nexus_integration/index.tsx
-index 0a10fccea..ef38dad46 100644
+index 0a10fcc..ef38dad 100644
 --- a/src/renderer/src/extensions/nexus_integration/index.tsx
 +++ b/src/renderer/src/extensions/nexus_integration/index.tsx
 @@ -17,24 +17,18 @@ import { TimeoutError } from "@nexusmods/nexus-api";
@@ -1547,7 +1547,7 @@ index 0a10fccea..ef38dad46 100644
    context.registerAttributeExtractor(50, (input: any, modPath: string) => {
      return processAttributes(context.api.store.getState(), input, modPath === undefined);
 diff --git a/src/renderer/src/extensions/nexus_integration/nxmProtocol.ts b/src/renderer/src/extensions/nexus_integration/nxmProtocol.ts
-index 1edb28dac..e4fe35958 100644
+index 61ba6c7..ed66425 100644
 --- a/src/renderer/src/extensions/nexus_integration/nxmProtocol.ts
 +++ b/src/renderer/src/extensions/nexus_integration/nxmProtocol.ts
 @@ -24,7 +24,7 @@ import type { IResolvedURL } from "../download_management/types/ProtocolHandlers
@@ -1643,7 +1643,7 @@ index 1edb28dac..e4fe35958 100644
  
    #queuedFor(inputUrl: string): IQueuedDownload | undefined {
 diff --git a/src/renderer/src/extensions/nexus_integration/selectors.ts b/src/renderer/src/extensions/nexus_integration/selectors.ts
-index 258e85867..34b3cffae 100644
+index 258e858..34b3cff 100644
 --- a/src/renderer/src/extensions/nexus_integration/selectors.ts
 +++ b/src/renderer/src/extensions/nexus_integration/selectors.ts
 @@ -22,28 +22,22 @@ export const userInfo = (state: IState) => {
@@ -1688,10 +1688,10 @@ index 258e85867..34b3cffae 100644
  
  export const isLoggedIn = (state: IState) => {
 diff --git a/src/renderer/src/extensions/nexus_integration/util.ts b/src/renderer/src/extensions/nexus_integration/util.ts
-index c71de692a..3bb7595bb 100644
+index 27176fc..4a010f5 100644
 --- a/src/renderer/src/extensions/nexus_integration/util.ts
 +++ b/src/renderer/src/extensions/nexus_integration/util.ts
-@@ -1795,10 +1795,13 @@ export const MEMBERSHIP_ROLE = {
+@@ -1796,10 +1796,13 @@ export const MEMBERSHIP_ROLE = {
   * Derive the membership-related fields of userInfo from a user payload (API
   * response or decoded JWT). Single source of truth for the role checks, used by
   * both transformUserInfoFromApi and updateUserInfoFromRefreshedToken.
@@ -1707,7 +1707,7 @@ index c71de692a..3bb7595bb 100644
      isLifetime: user.membership_roles.includes(MEMBERSHIP_ROLE.lifetime),
    };
 diff --git a/src/renderer/src/extensions/nexus_integration/util/transformUserInfo.ts b/src/renderer/src/extensions/nexus_integration/util/transformUserInfo.ts
-index bf5318474..63bdd1f6c 100644
+index bf53184..63bdd1f 100644
 --- a/src/renderer/src/extensions/nexus_integration/util/transformUserInfo.ts
 +++ b/src/renderer/src/extensions/nexus_integration/util/transformUserInfo.ts
 @@ -3,10 +3,12 @@ import type { IValidateKeyResponse } from "@nexusmods/nexus-api";
@@ -1725,7 +1725,7 @@ index bf5318474..63bdd1f6c 100644
      name: input.name,
      profileUrl: input.profile_url,
 diff --git a/src/renderer/src/extensions/nexus_integration/views/FreeUserDLDialog.tsx b/src/renderer/src/extensions/nexus_integration/views/FreeUserDLDialog.tsx
-index 53e9496e6..74f1c6657 100644
+index 53e9496..74f1c66 100644
 --- a/src/renderer/src/extensions/nexus_integration/views/FreeUserDLDialog.tsx
 +++ b/src/renderer/src/extensions/nexus_integration/views/FreeUserDLDialog.tsx
 @@ -13,12 +13,10 @@ import type { IState } from "../../../types/IState";
@@ -1834,7 +1834,7 @@ index 53e9496e6..74f1c6657 100644
            positionText={positionText}
            t={t}
 diff --git a/src/renderer/src/extensions/nexus_integration/views/LoginIcon.tsx b/src/renderer/src/extensions/nexus_integration/views/LoginIcon.tsx
-index 0d77c88d3..d9b0012fe 100644
+index 0d77c88..d9b0012 100644
 --- a/src/renderer/src/extensions/nexus_integration/views/LoginIcon.tsx
 +++ b/src/renderer/src/extensions/nexus_integration/views/LoginIcon.tsx
 @@ -22,7 +22,7 @@ import { setUserInfo } from "../actions/persistent";
@@ -1891,7 +1891,7 @@ index 0d77c88d3..d9b0012fe 100644
    private renderLoginName = () => {
      const { t, userInfo } = this.props;
 diff --git a/src/renderer/src/extensions/nexus_integration/views/NewFreeDownloadModal.tsx b/src/renderer/src/extensions/nexus_integration/views/NewFreeDownloadModal.tsx
-index 0492857bd..98a86980b 100644
+index 0492857..98a8698 100644
 --- a/src/renderer/src/extensions/nexus_integration/views/NewFreeDownloadModal.tsx
 +++ b/src/renderer/src/extensions/nexus_integration/views/NewFreeDownloadModal.tsx
 @@ -1,25 +1,21 @@
@@ -1976,18 +1976,18 @@ index 0492857bd..98a86980b 100644
                </FlexLayout>
              </FlexLayout.Flex>
 diff --git a/src/renderer/src/extensions/settings_interface/SettingsInterface.tsx b/src/renderer/src/extensions/settings_interface/SettingsInterface.tsx
-index e6e05fdf1..47bdbeeca 100644
+index 19b8c4d..1d4a2fe 100644
 --- a/src/renderer/src/extensions/settings_interface/SettingsInterface.tsx
 +++ b/src/renderer/src/extensions/settings_interface/SettingsInterface.tsx
-@@ -40,6 +40,7 @@ import {
-   setAdvancedMode,
+@@ -44,6 +44,7 @@ import {
+   setAlwaysCompactHeaders,
    setDesktopNotifications,
    setForegroundDL,
 +  setHideDashboard,
    setHideTopLevelCategory,
    setLanguage,
    setProfilesVisible,
-@@ -69,6 +70,7 @@ interface IConnectedProps {
+@@ -74,6 +75,7 @@ interface IConnectedProps {
    relativeTimes: boolean;
    suppressedNotifications: { [id: string]: boolean };
    foregroundDL: boolean;
@@ -1995,7 +1995,7 @@ index e6e05fdf1..47bdbeeca 100644
  }
  
  interface IActionProps {
-@@ -92,6 +94,7 @@ interface IActionProps {
+@@ -99,6 +101,7 @@ interface IActionProps {
    onSetRelativeTimes: (enabled: boolean) => void;
    onResetNotificationSuppression: () => void;
    onSetForegroundDL: (enabled: boolean) => void;
@@ -2003,7 +2003,7 @@ index e6e05fdf1..47bdbeeca 100644
  }
  
  type IProps = IBaseProps &
-@@ -134,10 +137,12 @@ class SettingsInterfaceImpl extends ComponentEx<IProps, {}> {
+@@ -143,10 +146,12 @@ class SettingsInterfaceImpl extends ComponentEx<IProps, {}> {
        customTitlebar,
        desktopNotifications,
        foregroundDL,
@@ -2013,10 +2013,10 @@ index e6e05fdf1..47bdbeeca 100644
        hideTopLevelCategory,
        onSetForegroundDL,
 +      onSetHideDashboard,
+       onSetReduceMotion,
+       reduceMotion,
        relativeTimes,
-       startup,
-       startMinimized,
-@@ -237,6 +242,33 @@ class SettingsInterfaceImpl extends ComponentEx<IProps, {}> {
+@@ -268,6 +273,33 @@ class SettingsInterfaceImpl extends ComponentEx<IProps, {}> {
                {t("Bring Vortex to foreground when starting downloads in browser")}
              </Toggle>
            </div>
@@ -2050,7 +2050,7 @@ index e6e05fdf1..47bdbeeca 100644
          </FormGroup>
  
          <FormGroup controlId="advanced">
-@@ -467,6 +499,31 @@ class SettingsInterfaceImpl extends ComponentEx<IProps, {}> {
+@@ -503,6 +535,31 @@ class SettingsInterfaceImpl extends ComponentEx<IProps, {}> {
      onSetAdvancedMode(!advanced);
    };
  
@@ -2082,15 +2082,15 @@ index e6e05fdf1..47bdbeeca 100644
    private restart = () => {
      relaunch();
    };
-@@ -488,6 +545,7 @@ function mapStateToProps(state: IState): IConnectedProps {
-     relativeTimes: state.settings.interface.relativeTimes,
+@@ -525,6 +582,7 @@ function mapStateToProps(state: IState): IConnectedProps {
+     alwaysCompactHeaders: state.settings.interface.alwaysCompactHeaders === true,
      suppressedNotifications: state.settings.notifications.suppress,
      foregroundDL: state.settings.interface.foregroundDL,
 +    hideDashboard: (state.settings.interface as any)?.hideDashboard === true,
    };
  }
  
-@@ -533,6 +591,7 @@ function mapDispatchToProps(dispatch: ThunkDispatch<any, null, Redux.Action>): I
+@@ -576,6 +634,7 @@ function mapDispatchToProps(dispatch: ThunkDispatch<any, null, Redux.Action>): I
        dispatch(resetSuppression(null));
      },
      onSetForegroundDL: (enabled: boolean) => dispatch(setForegroundDL(enabled)),
@@ -2099,41 +2099,41 @@ index e6e05fdf1..47bdbeeca 100644
  }
  
 diff --git a/src/renderer/src/extensions/settings_interface/actions/interface.ts b/src/renderer/src/extensions/settings_interface/actions/interface.ts
-index c6bc143a2..513044598 100644
+index cace1c1..81beafb 100644
 --- a/src/renderer/src/extensions/settings_interface/actions/interface.ts
 +++ b/src/renderer/src/extensions/settings_interface/actions/interface.ts
-@@ -39,3 +39,8 @@ export const setRelativeTimes = safeCreateAction(
- );
- 
- export const setForegroundDL = safeCreateAction("SET_FOREGROUND_DL", (enabled: boolean) => enabled);
+@@ -53,3 +53,8 @@ export const setAlwaysCompactHeaders = safeCreateAction(
+  * then the setting is absent and the operating system's preference is followed.
+  */
+ export const setReduceMotion = safeCreateAction("SET_REDUCE_MOTION", (enabled: boolean) => enabled);
 +
 +/**
 + * Vortex Unlocked: hide or show the Dashboard tab in the main navigation.
 + */
 +export const setHideDashboard = safeCreateAction("SET_HIDE_DASHBOARD", (hide: boolean) => hide);
 diff --git a/src/renderer/src/extensions/settings_interface/reducers/interface.ts b/src/renderer/src/extensions/settings_interface/reducers/interface.ts
-index 6df1e4db6..83c999d52 100644
+index e283185..3689ee7 100644
 --- a/src/renderer/src/extensions/settings_interface/reducers/interface.ts
 +++ b/src/renderer/src/extensions/settings_interface/reducers/interface.ts
-@@ -24,6 +24,8 @@ const settingsReducer: IReducerSpec = {
-       update(state, { relativeTimes: { $set: payload } }),
-     [actions.setForegroundDL as any]: (state, payload) =>
-       update(state, { foregroundDL: { $set: payload } }),
+@@ -30,6 +30,8 @@ const settingsReducer: IReducerSpec = {
+     // Deliberately absent from the defaults below: unset means "follow the OS".
+     [actions.setReduceMotion as any]: (state, payload) =>
+       update(state, { reduceMotion: { $set: payload } }),
 +    [actions.setHideDashboard as any]: (state, payload) =>
 +      update(state, { hideDashboard: { $set: payload } }),
    },
    defaults: {
      language: "en",
-@@ -33,6 +35,7 @@ const settingsReducer: IReducerSpec = {
-     hideTopLevelCategory: false,
+@@ -40,6 +42,7 @@ const settingsReducer: IReducerSpec = {
      relativeTimes: true,
      foregroundDL: true,
+     alwaysCompactHeaders: false,
 +    hideDashboard: false,
      usage: {},
    },
  };
 diff --git a/src/renderer/src/index.html b/src/renderer/src/index.html
-index a6ac1a2d0..29437e42e 100644
+index a6ac1a2..29437e4 100644
 --- a/src/renderer/src/index.html
 +++ b/src/renderer/src/index.html
 @@ -6,7 +6,7 @@
@@ -2146,7 +2146,7 @@ index a6ac1a2d0..29437e42e 100644
          <link rel="stylesheet" href="assets/css/tailwind-v4.css" />
      </head>
 diff --git a/src/renderer/src/views/components/Header/Header.tsx b/src/renderer/src/views/components/Header/Header.tsx
-index 62728d103..7224cf943 100644
+index 62728d1..7224cf9 100644
 --- a/src/renderer/src/views/components/Header/Header.tsx
 +++ b/src/renderer/src/views/components/Header/Header.tsx
 @@ -14,7 +14,6 @@ import {
@@ -2167,7 +2167,7 @@ index 62728d103..7224cf943 100644
            <ProfileSection />
  
 diff --git a/src/renderer/src/views/components/Spine/SpineContext.tsx b/src/renderer/src/views/components/Spine/SpineContext.tsx
-index 51fa6f2fc..5053c04c3 100644
+index 51fa6f2..5053c04 100644
 --- a/src/renderer/src/views/components/Spine/SpineContext.tsx
 +++ b/src/renderer/src/views/components/Spine/SpineContext.tsx
 @@ -67,6 +67,11 @@ export const SpineProvider: FC<React.PropsWithChildren<unknown>> = ({
@@ -2199,7 +2199,7 @@ index 51fa6f2fc..5053c04c3 100644
  
    const gamePages: IMainPage[] = useMemo(
 diff --git a/src/renderer/src/views/layout/PageGroup.tsx b/src/renderer/src/views/layout/PageGroup.tsx
-index 65357602d..14a55e4fa 100644
+index 6535760..14a55e4 100644
 --- a/src/renderer/src/views/layout/PageGroup.tsx
 +++ b/src/renderer/src/views/layout/PageGroup.tsx
 @@ -2,10 +2,12 @@ import { getErrorMessageOrDefault } from "@vortex/shared";
