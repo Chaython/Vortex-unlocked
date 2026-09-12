@@ -7,9 +7,15 @@ name: Build Vortex Unlocked
 # packages an unsigned Windows installer and publishes it as a release.
 #
 # Triggers:
-#   - push to master/main (patch updates)
-#   - daily schedule (picks up new upstream commits automatically)
-#   - manual dispatch
+#   - push to master/main (patch updates - always builds)
+#   - daily schedule (picks up new upstream commits automatically; skipped
+#     when upstream has not moved since the last release)
+#   - manual dispatch (always builds)
+#
+# The daily run first checks whether upstream has moved since the last
+# release; if it has not, the job ends successfully without building - this
+# keeps the releases page (and the in-client auto-updater) quiet on days
+# without upstream changes.
 #
 # The source snapshot in this repository is never built directly - the patch
 # is applied to a fresh upstream clone every time, so upstream commits are
@@ -38,16 +44,50 @@ jobs:
       DEBUG: electron-builder
 
     steps:
+      - name: Check for upstream changes
+        id: upstream-check
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Only the daily schedule skips when nothing changed: a push means
+          # the patch/repository itself changed and must be rebuilt, and a
+          # manual dispatch is an explicit build request.
+          if ($env:GITHUB_EVENT_NAME -ne 'schedule') {
+            echo "skip=false" >> $env:GITHUB_OUTPUT
+            Write-Output "Push or manual run - building."
+            exit 0
+          }
+          $head = git ls-remote https://github.com/Nexus-Mods/Vortex.git HEAD
+          if ($LASTEXITCODE -ne 0) {
+            Write-Output "::error::git ls-remote failed"
+            exit 1
+          }
+          $short = ($head -split "`t")[0].Substring(0, 7)
+          $latest = gh api repos/Chaython/Vortex-unlocked/releases/latest --jq ".tag_name" 2>$null
+          if ($LASTEXITCODE -ne 0) { $latest = "" }
+          Write-Output "Upstream HEAD: $short; latest release tag: $latest"
+          if ("$latest" -like "*.$short") {
+            echo "skip=true" >> $env:GITHUB_OUTPUT
+            Write-Output "Latest release $latest was already built from upstream $short - nothing to do."
+          } else {
+            echo "skip=false" >> $env:GITHUB_OUTPUT
+            Write-Output "Upstream changed since the last release - building."
+          }
+
       - name: Checkout Vortex Unlocked (patch repository)
+        if: steps.upstream-check.outputs.skip != 'true'
         uses: actions/checkout@v5
 
       - name: Record upstream base of the snapshot
+        if: steps.upstream-check.outputs.skip != 'true'
         shell: pwsh
         run: |
           $base = Get-Content .upstream-base -ErrorAction SilentlyContinue
           if ($base) { Write-Output "Snapshot built from upstream commit: $base" }
 
       - name: Clone latest upstream Vortex
+        if: steps.upstream-check.outputs.skip != 'true'
         shell: pwsh
         run: |
           git -c core.autocrlf=false clone https://github.com/Nexus-Mods/Vortex.git vortex
@@ -63,6 +103,7 @@ jobs:
           Write-Output "Building upstream commit $sha ($date)"
 
       - name: Apply Vortex Unlocked patch
+        if: steps.upstream-check.outputs.skip != 'true'
         shell: pwsh
         run: |
           # Safety net: some upload paths mangle the patch into CRLF or add a
@@ -90,6 +131,7 @@ jobs:
 
       - name: Read Node.js version from package.json
         id: node-version
+        if: steps.upstream-check.outputs.skip != 'true'
         shell: pwsh
         run: |
           $packageJson = Get-Content vortex\package.json | ConvertFrom-Json
@@ -98,9 +140,11 @@ jobs:
           echo "Using Node.js version: $nodeVersion"
 
       - name: Install pnpm
+        if: steps.upstream-check.outputs.skip != 'true'
         uses: pnpm/action-setup@v6
 
       - name: Use Node.js
+        if: steps.upstream-check.outputs.skip != 'true'
         uses: actions/setup-node@v6
         with:
           node-version: ${{ steps.node-version.outputs.NODE_VERSION }}
@@ -108,17 +152,20 @@ jobs:
           cache-dependency-path: vortex/pnpm-lock.yaml
 
       - name: Setup .NET 9
+        if: steps.upstream-check.outputs.skip != 'true'
         uses: actions/setup-dotnet@v5
         with:
           dotnet-version: "9.0.x"
 
       - name: Setup Python 3.11
+        if: steps.upstream-check.outputs.skip != 'true'
         uses: actions/setup-python@v6
         with:
           python-version: "3.11"
 
       - name: Derive build version
         id: version
+        if: steps.upstream-check.outputs.skip != 'true'
         shell: pwsh
         run: |
           $pkg = Get-Content vortex\package.json | ConvertFrom-Json
@@ -128,11 +175,13 @@ jobs:
           echo "Version: $rawVersion"
 
       - name: Bump versions
+        if: steps.upstream-check.outputs.skip != 'true'
         shell: pwsh
         run: pnpm -F "@vortex/main" -F "@nexusmods/vortex-api" version ${{ steps.version.outputs.RAW_VERSION }} --no-git-tag-version --no-git-checks --allow-same-version
         working-directory: vortex
 
       - name: Install dependencies
+        if: steps.upstream-check.outputs.skip != 'true'
         shell: pwsh
         run: pnpm install --frozen-lockfile
         working-directory: vortex
@@ -140,6 +189,7 @@ jobs:
           VORTEX_ELECTRON_REBUILD: "defer"
 
       - name: Cache Electron native build headers
+        if: steps.upstream-check.outputs.skip != 'true'
         uses: actions/cache@v5
         with:
           path: |
@@ -148,6 +198,7 @@ jobs:
           key: unlocked-native-headers-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('vortex/package.json', 'vortex/pnpm-lock.yaml', 'vortex/src/main/package.json') }}
 
       - name: Build workspace
+        if: steps.upstream-check.outputs.skip != 'true'
         shell: pwsh
         run: pnpm run build
         working-directory: vortex
@@ -155,6 +206,7 @@ jobs:
           NODE_ENV: production
 
       - name: Publish dist package
+        if: steps.upstream-check.outputs.skip != 'true'
         shell: pwsh
         run: pnpm nx run @vortex/main:publish
         working-directory: vortex
@@ -164,6 +216,7 @@ jobs:
 
       - name: Cache packaged Electron native rebuild outputs
         id: packaged-native-cache
+        if: steps.upstream-check.outputs.skip != 'true'
         uses: actions/cache@v5
         with:
           path: |
@@ -182,17 +235,19 @@ jobs:
           key: unlocked-dist-electron-native-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('vortex/pnpm-lock.yaml', 'vortex/pnpm-workspace.yaml', 'vortex/src/main/package.json', 'vortex/src/main/postinstall.mjs') }}
 
       - name: Rebuild packaged Electron native modules
-        if: steps.packaged-native-cache.outputs.cache-hit != 'true'
+        if: steps.upstream-check.outputs.skip != 'true' && steps.packaged-native-cache.outputs.cache-hit != 'true'
         shell: pwsh
         working-directory: vortex/src/main/dist
         run: npx electron-rebuild
 
       - name: Build installer (unsigned)
+        if: steps.upstream-check.outputs.skip != 'true'
         shell: pwsh
         run: pnpm -F @vortex/main run package:nosign
         working-directory: vortex
 
       - name: Validate package creation
+        if: steps.upstream-check.outputs.skip != 'true'
         shell: pwsh
         working-directory: vortex
         run: |
@@ -216,6 +271,7 @@ jobs:
           Write-Output "Package validation successful - installer, latest.yml and asar verified"
 
       - name: Upload installer artifact
+        if: steps.upstream-check.outputs.skip != 'true'
         uses: actions/upload-artifact@v4
         with:
           name: vortex-unlocked-${{ steps.version.outputs.RAW_VERSION }}
@@ -226,6 +282,7 @@ jobs:
           if-no-files-found: error
 
       - name: Create release
+        if: steps.upstream-check.outputs.skip != 'true'
         uses: ncipollo/release-action@v1
         with:
           tag: ${{ steps.version.outputs.TAG_VERSION }}
@@ -240,13 +297,14 @@ jobs:
             **What this build changes**
             - No premium upsell UI (banners, dashlets, dialogs, badges, membership status)
             - No client-side premium gates (parallel download threads, Update All, collection bulk-install)
+            - Parallel downloads on by default: 5 download threads out of the box (Settings -> Downloads -> "Download Threads", adjustable 1-10; installs carried over from older builds may still have it set to 1 - move the slider once)
             - Optional: fully hide the Dashboard tab via Settings -> Interface -> Customisation -> "Hide Dashboard tab"
             - Optional: auto-authorise refused download links through an embedded nexusmods.com website session (Settings -> Interface -> "Auto-authorise downloads via website session"); requests are serialized and paced, any failure falls back to the manual download dialog - downloads remain speed-limited by the account tier
             - On first start: option to import data (profiles, mods, settings, downloads) from an existing official Vortex install; also available later via Settings -> Interface -> "Import data from Vortex" (staging paths inside the data directory are rewritten to the new location; only Vortex' own data is copied - caches/logs are skipped; the import refuses to run while the official client is open; locked files outside the state database are skipped and reported instead of failing the import; existing data is backed up and restored on failure)
             - Keeps its data separate from official Vortex: %APPDATA%\vortex-unlocked (official Vortex uses %APPDATA%\Vortex), so both can run side by side
             - Uninstaller: removes the electron-updater cache (%LOCALAPPDATA%\vortex-unlocked-updater) and asks whether to also delete the application data; the upstream uninstall feedback survey was removed
             - Usage analytics / event reporting disabled
-            - Auto-updater disabled (an official update would overwrite this fork - update by re-running this workflow)
+            - In-app auto-update: the client checks this repository's releases (on launch and every 4 hours, or via Settings -> Application -> "Check for updates") and can download and install the update on restart - updates only ever come from Chaython/Vortex-unlocked, never from upstream
             - Installs side-by-side with official Vortex as "Vortex Unlocked"
           artifacts: |
             vortex/dist/vortex-unlocked-setup-*.exe

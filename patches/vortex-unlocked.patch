@@ -122,17 +122,17 @@ index 4ae13de..015c800 100644
  
    // NOTE(erri120): this is the minimal amount of bullshit required to get the piece of shit software called "electron-builder" to work with PNPM.
 diff --git a/src/main/src/Application.ts b/src/main/src/Application.ts
-index c54d37a..c4a2b96 100644
+index c54d37a..7d2d83d 100644
 --- a/src/main/src/Application.ts
 +++ b/src/main/src/Application.ts
-@@ -35,6 +35,7 @@ import { getVortexPath, setVortexPath } from "./getVortexPath";
- import { shutdownHashWorker } from "./hash/host";
+@@ -36,6 +36,7 @@ import { shutdownHashWorker } from "./hash/host";
  import { betterIpcMain } from "./ipc";
  import { log, setupLogging, changeLogPath } from "./logging";
-+import { maybeImportOfficialVortexData } from "./migrateOfficialData";
  import MainWindow from "./MainWindow";
++import { maybeImportOfficialVortexData } from "./migrateOfficialData";
  import { ReloadBudget } from "./reloadBudget";
  import SplashScreen from "./SplashScreen";
+ import DuckDBSingleton from "./store/DuckDBSingleton";
 @@ -54,6 +55,7 @@ import { isTelemetryEnabled, setTelemetryEnabled } from "./telemetry/state";
  import TrayIcon from "./TrayIcon";
  import { UnleashClient } from "./unleash/client";
@@ -152,7 +152,36 @@ index c54d37a..c4a2b96 100644
      ipcMain.on("show-window", () => this.showMainWindow(args?.startMinimized));
      app.commandLine.appendSwitch("js-flags", `--max-old-space-size=${args.maxMemory || 4096}`);
  
-@@ -918,6 +924,11 @@ class Application {
+@@ -623,13 +629,22 @@ class Application {
+      *
+      */
+ 
+-    try {
+-      await stat(path.join(getVortexPath("application"), "Uninstall Vortex.exe"));
+-      // Collect metadata - renderer will dispatch the action
+-      this.mAppMetadata!.installType = "regular";
+-    } catch {
+-      this.mAppMetadata!.installType = "managed";
++    // Vortex Unlocked: the fork's installer is named after its own product, so
++    // the uninstaller is "Uninstall Vortex Unlocked.exe"; accept either name -
++    // either means the app was installed through an installer we control, which
++    // is what the auto-updater's "regular" install type requires.
++    const uninstallerNames = ["Uninstall Vortex.exe", "Uninstall Vortex Unlocked.exe"];
++    for (const uninstaller of uninstallerNames) {
++      try {
++        await stat(path.join(getVortexPath("application"), uninstaller));
++        // Collect metadata - renderer will dispatch the action
++        this.mAppMetadata!.installType = "regular";
++        return;
++      } catch {
++        // try the next name
++      }
+     }
++    this.mAppMetadata!.installType = "managed";
+   }
+ 
+   private async warnAdmin(): Promise<void> {
+@@ -918,6 +933,11 @@ class Application {
        return startupSettings;
      });
  
@@ -178,27 +207,78 @@ index 1de32cc..bb3ad00 100644
        webPreferences: {
          preload: path.join(getVortexPath("base"), "preload.cjs"),
 diff --git a/src/main/src/extensions/autoupdater/releaseResolver.ts b/src/main/src/extensions/autoupdater/releaseResolver.ts
-index ab04007..f9e714d 100644
+index ab04007..e004cbc 100644
 --- a/src/main/src/extensions/autoupdater/releaseResolver.ts
 +++ b/src/main/src/extensions/autoupdater/releaseResolver.ts
-@@ -316,6 +316,9 @@ function formatReleaseDate(publishedAt: string): string {
+@@ -41,9 +41,12 @@ export class RateLimitError extends Error {
+   }
+ }
+ 
+-const OWNER = "Nexus-Mods";
++const OWNER = "Chaython";
+ const MAX_PAGES = 3;
+-const INSTALLER_ASSET = /^vortex-setup-.*\.exe$/i;
++// Vortex Unlocked: the fork's installers are named vortex-unlocked-setup-*;
++// upstream's vortex-setup-* stays accepted so a build tree can still resolve
++// an upstream release when pointed at one via VORTEX_UPDATER_REPO.
++const INSTALLER_ASSET = /^(vortex|vortex-unlocked)-setup-.*\.exe$/i;
+ 
+ // Overridable so tests and the mock update feed can stand in for GitHub.
+ function apiBase(): string {
+@@ -62,7 +65,9 @@ export function repoForChannel(): string {
+   if (override != null && override !== "") {
+     return override.includes("/") ? override.split("/")[1]! : override;
+   }
+-  return "Vortex";
++  // Vortex Unlocked: updates come from the fork's own releases; upstream
++  // releases are official builds that would silently replace this fork.
++  return "Vortex-unlocked";
+ }
+ 
+ export function repoOwner(): string {
+@@ -79,12 +84,24 @@ function versionFromTag(tag: string): string | null {
+   return semver.valid(tag.replace(/^v/, ""));
+ }
+ 
++/** Vortex Unlocked: whether a version is a fork build (1.0.0-unlocked.date.sha). */
++function isUnlockedVersion(version: string): boolean {
++  return semver.prerelease(version)?.[0] === "unlocked";
++}
++
+ // The prerelease flag and the version suffix are two signals for the same
+ // fact; when they disagree the release was mispublished, don't trust it.
+ // (The whole 1.x era trips this: odd-minor betas were flagged prerelease with
+ // no version suffix, so this is summarized once per fetch, not warned per tag.)
+ function hasMismatchedPrereleaseFlag(release: GithubReleaseLite): boolean {
+   const version = versionFromTag(release.tag_name);
++  if (version != null && isUnlockedVersion(version)) {
++    // Vortex Unlocked: every fork release is a semver prerelease
++    // (1.0.0-unlocked.yyyymmdd.sha) published WITHOUT the GitHub prerelease
++    // flag, deliberately - that way the releases page shows them as regular
++    // releases and the stable channel accepts them.
++    return false;
++  }
+   return version != null && release.prerelease !== (semver.prerelease(version) != null);
+ }
+ 
+@@ -316,6 +333,9 @@ function formatReleaseDate(publishedAt: string): string {
    return new Intl.DateTimeFormat(undefined, { dateStyle: "long" }).format(new Date(publishedAt));
  }
  
-+/** Vortex Unlocked: auto-updates are disabled (see resolveUpdate). */
-+const AUTO_UPDATE_ENABLED: boolean = false;
++/** Vortex Unlocked: self-updates are enabled (see resolveUpdate). */
++const AUTO_UPDATE_ENABLED: boolean = true;
 +
  /**
   * Resolve the update target for a channel. Returns null when no eligible
   * release exists. Network and rate-limit errors propagate, the caller logs
-@@ -325,6 +328,13 @@ export async function resolveUpdate(
+@@ -325,6 +345,13 @@ export async function resolveUpdate(
    channel: ResolveChannel,
    currentVersion: string,
  ): Promise<ResolvedRelease | null> {
-+  // Vortex Unlocked: never resolve an update. Upstream releases are official
-+  // builds, and installing one would silently replace this unlocked fork (and
-+  // reintroduce every premium gate). Updates come from re-running the fork's
-+  // build workflow instead.
++  // Vortex Unlocked: updates resolve from the fork's own releases
++  // (Chaython/Vortex-unlocked - see repoForChannel/repoOwner), never from
++  // upstream: an official release would silently replace this fork and
++  // reintroduce every premium gate.
 +  if (!AUTO_UPDATE_ENABLED) {
 +    return null;
 +  }
@@ -1008,10 +1088,10 @@ index 0eafd55..d918f46 100644
  export const isTelemetryEnabled = (): boolean => {
 diff --git a/src/main/src/websiteSession.ts b/src/main/src/websiteSession.ts
 new file mode 100644
-index 0000000..acccaf8
+index 0000000..7db3063
 --- /dev/null
 +++ b/src/main/src/websiteSession.ts
-@@ -0,0 +1,362 @@
+@@ -0,0 +1,372 @@
 +import { BrowserWindow, session } from "electron";
 +
 +import { betterIpcMain } from "./ipc";
@@ -1058,6 +1138,14 @@ index 0000000..acccaf8
 +  gameId: string;
 +  modId: number;
 +  fileId: number;
++}
++
++/** What the in-page script returns; executeJavaScript is untyped, so this cast is the boundary. */
++interface IPageGenerateResult {
++  ok: boolean;
++  url?: string;
++  status: number;
++  message?: string;
 +}
 +
 +/** Wire shape of a generation reply. */
@@ -1177,7 +1265,9 @@ index 0000000..acccaf8
 +    }
 +  })()`;
 +
-+  const result = await win.webContents.executeJavaScript(script, true);
++  const result = (await win.webContents.executeJavaScript(script, true)) as
++    | IPageGenerateResult
++    | undefined;
 +  return {
 +    ok: result?.ok === true,
 +    url: typeof result?.url === "string" ? result.url : undefined,
@@ -1528,6 +1618,22 @@ index 52e62b0..1ea0504 100644
    });
  
    context.registerSettings("Interface", Settings, () => ({ dashlets }), undefined, 1000);
+diff --git a/src/renderer/src/extensions/download_management/reducers/settings.ts b/src/renderer/src/extensions/download_management/reducers/settings.ts
+index ce7faa5..b07bfa3 100644
+--- a/src/renderer/src/extensions/download_management/reducers/settings.ts
++++ b/src/renderer/src/extensions/download_management/reducers/settings.ts
+@@ -24,7 +24,10 @@ export const settingsReducer: IReducerSpec<ISettingsDownloads> = {
+   defaults: {
+     minChunkSize: 1024 * 1024,
+     maxChunks: 10,
+-    maxParallelDownloads: 1,
++    // Vortex Unlocked: upstream defaults this to 1 and only premium accounts
++    // were allowed to raise it. The premium gate is gone, so start parallel
++    // downloads on by default; adjustable 1-10 in Settings -> Downloads.
++    maxParallelDownloads: 5,
+     maxBandwidth: 0,
+     path: path.join("{USERDATA}", "downloads"),
+     showDropzone: true,
 diff --git a/src/renderer/src/extensions/download_management/views/Settings.tsx b/src/renderer/src/extensions/download_management/views/Settings.tsx
 index 34e5763..5617e2e 100644
 --- a/src/renderer/src/extensions/download_management/views/Settings.tsx
@@ -1953,7 +2059,7 @@ index 0a10fcc..ef38dad 100644
    context.registerAttributeExtractor(50, (input: any, modPath: string) => {
      return processAttributes(context.api.store.getState(), input, modPath === undefined);
 diff --git a/src/renderer/src/extensions/nexus_integration/nxmProtocol.ts b/src/renderer/src/extensions/nexus_integration/nxmProtocol.ts
-index 61ba6c7..b755010 100644
+index 61ba6c7..7d78fbd 100644
 --- a/src/renderer/src/extensions/nexus_integration/nxmProtocol.ts
 +++ b/src/renderer/src/extensions/nexus_integration/nxmProtocol.ts
 @@ -19,12 +19,13 @@ import {
@@ -2074,7 +2180,7 @@ index 61ba6c7..b755010 100644
     */
    #websiteDownload(input: string, url: NXMUrl): Promise<IResolvedURL> {
      // a promise settles once and #dequeue tolerates a repeat, so cancelling after a skip is safe
-@@ -396,9 +378,93 @@ export class NxmProtocol {
+@@ -396,9 +378,96 @@ export class NxmProtocol {
          awaitingLink: false,
        });
        this.#api.store.dispatch(addFreeUserDLItem(input));
@@ -2088,7 +2194,10 @@ index 61ba6c7..b755010 100644
 +   * with the "always" setting, to keep the request pace conservative.
 +   */
 +  #autoGenEnabled(): boolean {
-+    const interfaceSettings = this.#api.getState().settings.interface as Record<string, unknown>;
++    // Vortex Unlocked: the two settings live in the interface reducer but not
++    // in the (upstream) ISettingsInterface type - read them the same way the
++    // hideDashboard toggle reads its setting.
++    const interfaceSettings = this.#api.getState().settings.interface as any;
 +    if (interfaceSettings?.["websiteLinkGen"] !== true) {
 +      return false;
 +    }
@@ -2502,9 +2611,18 @@ index 0492857..98a8698 100644
                </FlexLayout>
              </FlexLayout.Flex>
 diff --git a/src/renderer/src/extensions/settings_interface/SettingsInterface.tsx b/src/renderer/src/extensions/settings_interface/SettingsInterface.tsx
-index 19b8c4d..8993c74 100644
+index 19b8c4d..debfe17 100644
 --- a/src/renderer/src/extensions/settings_interface/SettingsInterface.tsx
 +++ b/src/renderer/src/extensions/settings_interface/SettingsInterface.tsx
+@@ -1,7 +1,7 @@
+ import { readdir } from "node:fs/promises";
+ import * as path from "path";
+ 
+-import { getErrorCode } from "@vortex/shared";
++import { getErrorCode, getErrorMessageOrDefault } from "@vortex/shared";
+ import type { IParameters } from "@vortex/shared/cli";
+ import PromiseBB from "bluebird";
+ import * as React from "react";
 @@ -44,11 +44,14 @@ import {
    setAlwaysCompactHeaders,
    setDesktopNotifications,
@@ -2614,7 +2732,7 @@ index 19b8c4d..8993c74 100644
          </FormGroup>
  
          <FormGroup controlId="advanced">
-@@ -503,11 +568,114 @@ class SettingsInterfaceImpl extends ComponentEx<IProps, {}> {
+@@ -503,11 +568,112 @@ class SettingsInterfaceImpl extends ComponentEx<IProps, {}> {
      onSetAdvancedMode(!advanced);
    };
  
@@ -2669,7 +2787,9 @@ index 19b8c4d..8993c74 100644
 +      const res = await getPreloadApi().websiteSession.status();
 +      setConnected(res?.loggedIn === true);
 +    } catch (err) {
-+      log("warn", "failed to query website session status", { error: String(err) });
++      log("warn", "failed to query website session status", {
++        error: getErrorMessageOrDefault(err),
++      });
 +      setConnected(null);
 +    }
 +  }, []);
@@ -2684,7 +2804,7 @@ index 19b8c4d..8993c74 100644
 +      await getPreloadApi().websiteSession.login();
 +      await refresh();
 +    } catch (err) {
-+      log("warn", "website session login failed", { error: String(err) });
++      log("warn", "website session login failed", { error: getErrorMessageOrDefault(err) });
 +    } finally {
 +      setBusy(false);
 +    }
@@ -2695,7 +2815,7 @@ index 19b8c4d..8993c74 100644
 +    try {
 +      await getPreloadApi().websiteSession.logout();
 +    } catch (err) {
-+      log("warn", "website session logout failed", { error: String(err) });
++      log("warn", "website session logout failed", { error: getErrorMessageOrDefault(err) });
 +    } finally {
 +      await refresh();
 +      setBusy(false);
@@ -2704,11 +2824,7 @@ index 19b8c4d..8993c74 100644
 +
 +  return (
 +    <div className="flex items-center gap-x-4">
-+      <Button
-+        brand="neutral"
-+        disabled={busy}
-+        onClick={connected === true ? disconnect : connect}
-+      >
++      <Button brand="neutral" disabled={busy} onClick={connected === true ? disconnect : connect}>
 +        {connected === true ? t("Disconnect website session") : t("Connect website session")}
 +      </Button>
 +
@@ -2729,7 +2845,7 @@ index 19b8c4d..8993c74 100644
  function mapStateToProps(state: IState): IConnectedProps {
    return {
      profilesVisible: state.settings.interface.profilesVisible,
-@@ -525,6 +693,9 @@ function mapStateToProps(state: IState): IConnectedProps {
+@@ -525,6 +691,9 @@ function mapStateToProps(state: IState): IConnectedProps {
      alwaysCompactHeaders: state.settings.interface.alwaysCompactHeaders === true,
      suppressedNotifications: state.settings.notifications.suppress,
      foregroundDL: state.settings.interface.foregroundDL,
@@ -2739,7 +2855,7 @@ index 19b8c4d..8993c74 100644
    };
  }
  
-@@ -576,6 +747,9 @@ function mapDispatchToProps(dispatch: ThunkDispatch<any, null, Redux.Action>): I
+@@ -576,6 +745,9 @@ function mapDispatchToProps(dispatch: ThunkDispatch<any, null, Redux.Action>): I
        dispatch(resetSuppression(null));
      },
      onSetForegroundDL: (enabled: boolean) => dispatch(setForegroundDL(enabled)),
