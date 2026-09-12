@@ -122,7 +122,7 @@ index 4ae13de..015c800 100644
  
    // NOTE(erri120): this is the minimal amount of bullshit required to get the piece of shit software called "electron-builder" to work with PNPM.
 diff --git a/src/main/src/Application.ts b/src/main/src/Application.ts
-index c54d37a..bc3661f 100644
+index c54d37a..c4a2b96 100644
 --- a/src/main/src/Application.ts
 +++ b/src/main/src/Application.ts
 @@ -35,6 +35,7 @@ import { getVortexPath, setVortexPath } from "./getVortexPath";
@@ -133,7 +133,26 @@ index c54d37a..bc3661f 100644
  import MainWindow from "./MainWindow";
  import { ReloadBudget } from "./reloadBudget";
  import SplashScreen from "./SplashScreen";
-@@ -918,6 +919,11 @@ class Application {
+@@ -54,6 +55,7 @@ import { isTelemetryEnabled, setTelemetryEnabled } from "./telemetry/state";
+ import TrayIcon from "./TrayIcon";
+ import { UnleashClient } from "./unleash/client";
+ import { synchronizeFeatureFlags } from "./unleash/ipc";
++import { initWebsiteSession } from "./websiteSession";
+ 
+ /** test if the running version is a major downgrade (downgrading by a major or minor version,
+ / everything except a patch) compared to what was running last */
+@@ -139,6 +141,10 @@ class Application {
+     // Set up main process extensions IPC handlers
+     setupMainExtensions();
+ 
++    // Vortex Unlocked: website session service used to auto-authorise
++    // download links the api refuses for the account tier
++    initWebsiteSession();
++
+     ipcMain.on("show-window", () => this.showMainWindow(args?.startMinimized));
+     app.commandLine.appendSwitch("js-flags", `--max-old-space-size=${args.maxMemory || 4096}`);
+ 
+@@ -918,6 +924,11 @@ class Application {
        return startupSettings;
      });
  
@@ -987,6 +1006,393 @@ index 0eafd55..d918f46 100644
  };
  
  export const isTelemetryEnabled = (): boolean => {
+diff --git a/src/main/src/websiteSession.ts b/src/main/src/websiteSession.ts
+new file mode 100644
+index 0000000..acccaf8
+--- /dev/null
++++ b/src/main/src/websiteSession.ts
+@@ -0,0 +1,362 @@
++import { BrowserWindow, session } from "electron";
++
++import { betterIpcMain } from "./ipc";
++import { log } from "./logging";
++
++/**
++ * Vortex Unlocked: embedded nexusmods.com website session.
++ *
++ * The Nexus api serves generated download links only to accounts it decides are
++ * entitled to them, but the website will hand a link to any logged-in browser
++ * session ("manual download"). The popular userscript workflow works by calling
++ * the site's link generator from the browser and feeding the keyed link to
++ * Vortex; this module reproduces that round trip inside the client.
++ *
++ * A hidden BrowserWindow shares a persistent session partition with a visible
++ * login window, so the user logs into nexusmods.com once and the generator
++ * window keeps the cookies (including any Cloudflare clearance).
++ *
++ * This talks to an undocumented website endpoint, so it can break whenever the
++ * site changes; every failure falls back to the existing manual download dialog
++ * and is reported as a warning in the log.
++ */
++
++const PARTITION = "persist:nx-web";
++const NEXUS_BASE = "https://www.nexusmods.com";
++const GENERATE_ENDPOINT = `${NEXUS_BASE}/Core/Libs/Common/Managers/Downloads?GenerateDownloadUrl`;
++
++/** The login flow considers the session established when one of these exists. */
++const LOGIN_COOKIE_NAMES = ["sid", "member_id", "nexusid"];
++
++// free accounts can only generate links at a limited pace; the userscript this
++// mirrors paces its requests too, so stay deliberately slow
++const REQUEST_INTERVAL_MS = 5_000;
++const RETRY_ATTEMPTS = 3;
++const RETRY_DELAY_MS = 2_000;
++// after this many consecutive failed requests, stop trying for a while - likely
++// the site refused the session or the endpoint changed
++const CIRCUIT_BREAK_THRESHOLD = 3;
++const CIRCUIT_BREAK_MS = 10 * 60_000;
++
++/** Wire shape of a generation request, as it crosses IPC from the renderer. */
++interface IGenerateRequest {
++  domain: string;
++  gameId: string;
++  modId: number;
++  fileId: number;
++}
++
++/** Wire shape of a generation reply. */
++interface IGenerateReply {
++  ok: boolean;
++  nxmUrl?: string;
++  reason?: string;
++}
++
++const delay = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
++
++let generatorWindow: BrowserWindow | null = null;
++let lastRequestAt = 0;
++let consecutiveFailures = 0;
++let circuitOpenUntil = 0;
++// generation is serialized: one request at a time, spaced at least REQUEST_INTERVAL_MS apart
++let queue: Promise<void> = Promise.resolve();
++
++function getSession(): Electron.Session {
++  return session.fromPartition(PARTITION);
++}
++
++async function isLoggedIn(): Promise<boolean> {
++  try {
++    const cookies = await getSession().cookies.get({ domain: ".nexusmods.com" });
++    return cookies.some((cookie) => LOGIN_COOKIE_NAMES.includes(cookie.name));
++  } catch (err) {
++    log("warn", "failed to read website session cookies", { error: String(err) });
++    return false;
++  }
++}
++
++/**
++ * The hidden page the generator runs in. Created lazily on first use and reused;
++ * a plain page fetch from this context is indistinguishable from the userscript
++ * running in a tab - same cookies, same origin, same Cloudflare clearance.
++ */
++async function getGeneratorWindow(): Promise<BrowserWindow> {
++  if (generatorWindow !== null && !generatorWindow.isDestroyed()) {
++    return generatorWindow;
++  }
++
++  const win = new BrowserWindow({
++    show: false,
++    webPreferences: {
++      partition: PARTITION,
++      contextIsolation: true,
++      nodeIntegration: false,
++      backgroundThrottling: false,
++    },
++  });
++
++  try {
++    await win.loadURL(`${NEXUS_BASE}/`);
++  } catch (err) {
++    log("warn", "failed to load the website session generator page", { error: String(err) });
++    if (!win.isDestroyed()) {
++      win.destroy();
++    }
++    throw err;
++  }
++
++  generatorWindow = win;
++  return win;
++}
++
++/** Extract the authorisation params from a generated (website) url and build an nxm link. */
++function buildNxmLink(request: IGenerateRequest, generatedUrl: string): string | undefined {
++  if (generatedUrl.startsWith("nxm://")) {
++    return generatedUrl;
++  }
++  try {
++    const url = new URL(generatedUrl);
++    const key = url.searchParams.get("key") ?? url.searchParams.get("md5");
++    const expires = url.searchParams.get("expires");
++    const userId = url.searchParams.get("user_id");
++    if (key === null || expires === null || userId === null) {
++      return undefined;
++    }
++    const params = new URLSearchParams({ key, expires, user_id: userId });
++    return `nxm://${request.domain}/mods/${request.modId}/files/${request.fileId}?${params.toString()}`;
++  } catch {
++    return undefined;
++  }
++}
++
++/**
++ * One generation attempt inside the page context. Runs as a fetch from the
++ * nexusmods.com origin with the session's cookies, mirroring the userscript.
++ */
++async function generateOnce(
++  win: BrowserWindow,
++  request: IGenerateRequest,
++): Promise<{ ok: boolean; url?: string; status: number; message?: string }> {
++  const script = `(async () => {
++    try {
++      // the userscript clears the ads cookie before generating; harmless here too
++      const expiry = Math.round(Date.now() / 1000) + 300;
++      document.cookie = "ab=0|" + expiry + ";domain=nexusmods.com;path=/";
++      const res = await fetch(${JSON.stringify(GENERATE_ENDPOINT)}, {
++        method: "POST",
++        headers: { "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8" },
++        credentials: "include",
++        body: new URLSearchParams({
++          fid: String(${request.fileId}),
++          game_id: String(${JSON.stringify(request.gameId)}),
++        }).toString(),
++      });
++      if (!res.ok) {
++        return { ok: false, status: res.status };
++      }
++      const data = await res.json();
++      const url = (data && typeof data.url === "string") ? data.url : "";
++      return { ok: true, url, status: res.status };
++    } catch (err) {
++      return { ok: false, status: 0, message: String((err && err.message) || err) };
++    }
++  })()`;
++
++  const result = await win.webContents.executeJavaScript(script, true);
++  return {
++    ok: result?.ok === true,
++    url: typeof result?.url === "string" ? result.url : undefined,
++    status: typeof result?.status === "number" ? result.status : 0,
++    message: typeof result?.message === "string" ? result.message : undefined,
++  };
++}
++
++/** A full generation: paced, retried with backoff, circuit-broken. */
++async function generateWithRetries(request: IGenerateRequest): Promise<IGenerateReply> {
++  if (Date.now() < circuitOpenUntil) {
++    return { ok: false, reason: "paused" };
++  }
++
++  const sinceLast = Date.now() - lastRequestAt;
++  if (lastRequestAt > 0 && sinceLast < REQUEST_INTERVAL_MS) {
++    await delay(REQUEST_INTERVAL_MS - sinceLast);
++  }
++
++  let win: BrowserWindow;
++  try {
++    win = await getGeneratorWindow();
++  } catch {
++    return { ok: false, reason: "page unavailable" };
++  }
++
++  for (let attempt = 0; attempt < RETRY_ATTEMPTS; ++attempt) {
++    lastRequestAt = Date.now();
++    if (attempt > 0) {
++      await delay(RETRY_DELAY_MS * Math.pow(2, attempt - 1));
++    }
++
++    let result;
++    try {
++      result = await generateOnce(win, request);
++    } catch (err) {
++      // the page may have been closed or navigated; drop it so the next attempt rebuilds it
++      if (!win.isDestroyed()) {
++        win.destroy();
++      }
++      generatorWindow = null;
++      log("warn", "website link generator page failed", { error: String(err) });
++      result = { ok: false, status: 0, message: String(err) };
++    }
++
++    if (result.ok && typeof result.url === "string" && result.url.length > 0) {
++      const nxmUrl = buildNxmLink(request, result.url);
++      if (nxmUrl !== undefined) {
++        consecutiveFailures = 0;
++        return { ok: true, nxmUrl };
++      }
++      // the endpoint answered without usable auth params - not worth retrying
++      log("warn", "website link response missing authorisation params", {
++        modId: request.modId,
++        fileId: request.fileId,
++      });
++      return { ok: false, reason: "malformed response" };
++    }
++
++    if (result.status === 401 || result.status === 403) {
++      // the session is gone or refused; retrying won't help
++      log("warn", "website link generation refused", {
++        status: result.status,
++        modId: request.modId,
++        fileId: request.fileId,
++      });
++      return { ok: false, reason: "refused" };
++    }
++
++    log("info", "website link generation attempt failed", {
++      attempt,
++      status: result.status,
++      message: result.message,
++    });
++  }
++
++  consecutiveFailures += 1;
++  if (consecutiveFailures >= CIRCUIT_BREAK_THRESHOLD) {
++    circuitOpenUntil = Date.now() + CIRCUIT_BREAK_MS;
++    consecutiveFailures = 0;
++    log("warn", "website link generator circuit broken - pausing auto-authorisation", {
++      minutes: CIRCUIT_BREAK_MS / 60_000,
++    });
++  }
++  return { ok: false, reason: "unavailable" };
++}
++
++/** Serialize requests so they are spaced out no matter how many files queue at once. */
++function enqueueGeneration(request: IGenerateRequest): Promise<IGenerateReply> {
++  const run = queue.then(() => generateWithRetries(request));
++  // the chain must survive failed requests
++  queue = run.then(
++    () => undefined,
++    () => undefined,
++  );
++  return run;
++}
++
++/** Open a visible login window and resolve once the session cookie appears (or the window closes). */
++async function openLogin(): Promise<{ ok: boolean; reason?: string }> {
++  if (await isLoggedIn()) {
++    return { ok: true };
++  }
++
++  const win = new BrowserWindow({
++    show: true,
++    width: 1100,
++    height: 800,
++    title: "Log in to Nexus Mods",
++    webPreferences: {
++      partition: PARTITION,
++      contextIsolation: true,
++      nodeIntegration: false,
++    },
++  });
++
++  try {
++    await win.loadURL(`${NEXUS_BASE}/login`);
++  } catch (err) {
++    log("warn", "failed to load the login page", { error: String(err) });
++  }
++
++  return new Promise((resolve) => {
++    let settled = false;
++    const finish = (reply: { ok: boolean; reason?: string }): void => {
++      if (settled) {
++        return;
++      }
++      settled = true;
++      clearInterval(timer);
++      resolve(reply);
++    };
++
++    const timer = setInterval(() => {
++      if (win.isDestroyed()) {
++        finish({ ok: false, reason: "closed" });
++        return;
++      }
++      void isLoggedIn().then((loggedIn) => {
++        if (loggedIn) {
++          if (!win.isDestroyed()) {
++            try {
++              win.close();
++            } catch {
++              // already closing
++            }
++          }
++          finish({ ok: true });
++        }
++      });
++    }, 2_000);
++
++    win.on("closed", () => {
++      void isLoggedIn().then((loggedIn) => finish({ ok: loggedIn, reason: "closed" }));
++    });
++  });
++}
++
++async function logout(): Promise<void> {
++  await getSession().clearStorageData();
++  if (generatorWindow !== null && !generatorWindow.isDestroyed()) {
++    generatorWindow.destroy();
++  }
++  generatorWindow = null;
++}
++
++/** Register the IPC handlers; called once from the Application constructor. */
++export function initWebsiteSession(): void {
++  betterIpcMain.handle("website-session:status", async () => ({
++    loggedIn: await isLoggedIn(),
++  }));
++
++  betterIpcMain.handle("website-session:login", async () => openLogin());
++
++  betterIpcMain.handle("website-session:logout", async () => {
++    await logout();
++  });
++
++  betterIpcMain.handle("website-session:generate", async (_event, request) => {
++    if (
++      request === undefined ||
++      typeof request.modId !== "number" ||
++      typeof request.fileId !== "number" ||
++      typeof request.domain !== "string" ||
++      typeof request.gameId !== "string"
++    ) {
++      return { ok: false, reason: "invalid request" };
++    }
++    if (!(await isLoggedIn())) {
++      return { ok: false, reason: "not logged in" };
++    }
++    return enqueueGeneration(request);
++  });
++
++  log("debug", "website session service initialised");
++}
+diff --git a/src/preload/src/index.ts b/src/preload/src/index.ts
+index 1d99195..0a6e13c 100644
+--- a/src/preload/src/index.ts
++++ b/src/preload/src/index.ts
+@@ -39,6 +39,14 @@ try {
+       showItemInFolder: (filePath) => betterIpcRenderer.send("shell:showItemInFolder", filePath),
+     },
+ 
++    // Vortex Unlocked: the embedded nexusmods.com website session
++    websiteSession: {
++      status: () => betterIpcRenderer.invoke("website-session:status"),
++      login: () => betterIpcRenderer.invoke("website-session:login"),
++      logout: () => betterIpcRenderer.invoke("website-session:logout"),
++      generateLink: (request) => betterIpcRenderer.invoke("website-session:generate", request),
++    },
++
+     persist: {
+       sendDiff: (hive, operations) => betterIpcRenderer.send("persist:diff", hive, operations),
+ 
 diff --git a/src/renderer/src/extensions/about_dialog/views/AboutPage.tsx b/src/renderer/src/extensions/about_dialog/views/AboutPage.tsx
 index 7645efc..96bd53d 100644
 --- a/src/renderer/src/extensions/about_dialog/views/AboutPage.tsx
@@ -1547,10 +1953,16 @@ index 0a10fcc..ef38dad 100644
    context.registerAttributeExtractor(50, (input: any, modPath: string) => {
      return processAttributes(context.api.store.getState(), input, modPath === undefined);
 diff --git a/src/renderer/src/extensions/nexus_integration/nxmProtocol.ts b/src/renderer/src/extensions/nexus_integration/nxmProtocol.ts
-index 61ba6c7..ed66425 100644
+index 61ba6c7..b755010 100644
 --- a/src/renderer/src/extensions/nexus_integration/nxmProtocol.ts
 +++ b/src/renderer/src/extensions/nexus_integration/nxmProtocol.ts
-@@ -24,7 +24,7 @@ import type { IResolvedURL } from "../download_management/types/ProtocolHandlers
+@@ -19,12 +19,13 @@ import {
+ } from "../../util/CustomErrors";
+ import { createKeyedCache } from "../../util/keyedCache";
+ import opn from "../../util/opn";
++import { getPreloadApi } from "../../util/preloadAccess";
+ import { batchDispatch } from "../../util/util";
+ import type { IResolvedURL } from "../download_management/types/ProtocolHandlers";
  import { SITE_ID } from "../gamemode_management/constants";
  import { addFreeUserDLItem, removeFreeUserDLItem } from "./actions/session";
  import { NEXUS_BASE_URL } from "./constants";
@@ -1559,7 +1971,16 @@ index 61ba6c7..ed66425 100644
  import NXMUrl from "./NXMUrl";
  import { isPremium, userInfo } from "./selectors";
  import { bringToFront, ensureLoggedIn, getInfoGraphQL, oauthCallback, startDownload } from "./util";
-@@ -111,30 +111,14 @@ export class NxmProtocol {
+@@ -92,6 +93,8 @@ export class NxmProtocol {
+ 
+   // every parked download, each carrying whether its user has gone to fetch a link for it
+   readonly #freeQueue: IQueuedDownload[] = [];
++  // Vortex Unlocked: files with a website-session link generation in flight
++  readonly #autoGenInFlight = new Set<string>();
+   readonly #urlCache = createKeyedCache<{ urls: string[]; meta: unknown }>(
+     DOWNLOAD_URL_CACHE_DURATION,
+   );
+@@ -111,30 +114,14 @@ export class NxmProtocol {
     * Reading the api is refused during `init` - the extension api is a proxy that throws
     * "extension uses api in init function" - so anything that touches the store waits until here.
     * The constructor only records its arguments for the same reason.
@@ -1594,7 +2015,7 @@ index 61ba6c7..ed66425 100644
    get #nexus(): NexusT {
      return this.#getNexus();
    }
-@@ -303,7 +287,11 @@ export class NxmProtocol {
+@@ -303,7 +290,11 @@ export class NxmProtocol {
      },
    };
  
@@ -1607,7 +2028,7 @@ index 61ba6c7..ed66425 100644
    #canDownloadInApp(url: NXMUrl): boolean {
      if (!needsAuthorisedLink(url)) {
        return true;
-@@ -321,28 +309,15 @@ export class NxmProtocol {
+@@ -321,28 +312,15 @@ export class NxmProtocol {
    }
  
    /**
@@ -1642,6 +2063,111 @@ index 61ba6c7..ed66425 100644
    }
  
    #queuedFor(inputUrl: string): IQueuedDownload | undefined {
+@@ -377,6 +355,10 @@ export class NxmProtocol {
+   /**
+    * Park the download until the user brings back an authorised link from the website (or cancels
+    * or skips it). FreeUserDLDialog renders off the redux queue this dispatches into.
++   *
++   * Vortex Unlocked: when the embedded website session is enabled, an authorised
++   * link is generated automatically and delivered through the same path a
++   * browser handoff uses, so the dialog only stays up as a fallback.
+    */
+   #websiteDownload(input: string, url: NXMUrl): Promise<IResolvedURL> {
+     // a promise settles once and #dequeue tolerates a repeat, so cancelling after a skip is safe
+@@ -396,9 +378,93 @@ export class NxmProtocol {
+         awaitingLink: false,
+       });
+       this.#api.store.dispatch(addFreeUserDLItem(input));
++      void this.#tryAutoGenerate(input, url);
+     });
+   }
+ 
++  /**
++   * Vortex Unlocked: whether automatic link generation applies right now. Off by
++   * default; collection installs qualify on their own and single downloads only
++   * with the "always" setting, to keep the request pace conservative.
++   */
++  #autoGenEnabled(): boolean {
++    const interfaceSettings = this.#api.getState().settings.interface as Record<string, unknown>;
++    if (interfaceSettings?.["websiteLinkGen"] !== true) {
++      return false;
++    }
++    const inCollectionInstall = getCollectionActiveSession(this.#api.getState()) !== undefined;
++    return inCollectionInstall || interfaceSettings?.["websiteLinkGenAlways"] === true;
++  }
++
++  /**
++   * Vortex Unlocked: generate an authorised link for a parked download through the
++   * embedded website session and deliver it to everything waiting on that file.
++   * Any failure leaves the download parked for the manual website flow.
++   */
++  async #tryAutoGenerate(input: string, url: NXMUrl): Promise<void> {
++    if (!this.#autoGenEnabled()) {
++      return;
++    }
++
++    const dedupKey = `${url.gameId}_${url.modId}_${url.fileId}`;
++    if (this.#autoGenInFlight.has(dedupKey)) {
++      return;
++    }
++
++    const queued = this.#freeQueue.find((iter) => iter.input === input);
++    if (queued === undefined || queued.awaitingLink) {
++      // already fetching a link for this one (user clicked the dialog's website button)
++      return;
++    }
++    queued.awaitingLink = true;
++    this.#autoGenInFlight.add(dedupKey);
++
++    try {
++      const pageId = nxmPageId(this.#api.getState(), url.gameId);
++      const reply = await getPreloadApi().websiteSession.generateLink({
++        domain: url.gameId,
++        gameId: pageId,
++        modId: url.modId,
++        fileId: url.fileId,
++      });
++
++      if (
++        reply?.ok === true &&
++        typeof reply.nxmUrl === "string" &&
++        reply.nxmUrl.startsWith("nxm://")
++      ) {
++        log("info", "website session auto-authorised download", {
++          modId: url.modId,
++          fileId: url.fileId,
++        });
++        // deliver to every parked download waiting on this file, not just the first
++        const keyedUrl = new NXMUrl(reply.nxmUrl);
++        let deliveries = 0;
++        while (this.#deliverAwaitedLink(keyedUrl, reply.nxmUrl) && ++deliveries < 32) {
++          // keep delivering while entries for this file are still awaiting
++        }
++        return;
++      }
++
++      log("warn", "website session link generation failed", {
++        modId: url.modId,
++        fileId: url.fileId,
++        reason: reply?.reason,
++      });
++    } catch (err) {
++      log("warn", "website session link generation failed", {
++        error: getErrorMessageOrDefault(err),
++      });
++    } finally {
++      // release the entry for the manual flow (or a later retry) if it is still parked
++      const stillQueued = this.#freeQueue.find((iter) => iter.input === input);
++      if (stillQueued !== undefined && stillQueued.awaitingLink) {
++        stillQueued.awaitingLink = false;
++      }
++      this.#autoGenInFlight.delete(dedupKey);
++    }
++  }
++
+   /**
+    * The file's full update chain. Skipping has to name every file id the chain covers, because a
+    * dependency may reference an older or newer file than the one being skipped and the nxm url
 diff --git a/src/renderer/src/extensions/nexus_integration/selectors.ts b/src/renderer/src/extensions/nexus_integration/selectors.ts
 index 258e858..34b3cff 100644
 --- a/src/renderer/src/extensions/nexus_integration/selectors.ts
@@ -1976,10 +2502,10 @@ index 0492857..98a8698 100644
                </FlexLayout>
              </FlexLayout.Flex>
 diff --git a/src/renderer/src/extensions/settings_interface/SettingsInterface.tsx b/src/renderer/src/extensions/settings_interface/SettingsInterface.tsx
-index 19b8c4d..1d4a2fe 100644
+index 19b8c4d..8993c74 100644
 --- a/src/renderer/src/extensions/settings_interface/SettingsInterface.tsx
 +++ b/src/renderer/src/extensions/settings_interface/SettingsInterface.tsx
-@@ -44,6 +44,7 @@ import {
+@@ -44,11 +44,14 @@ import {
    setAlwaysCompactHeaders,
    setDesktopNotifications,
    setForegroundDL,
@@ -1987,36 +2513,51 @@ index 19b8c4d..1d4a2fe 100644
    setHideTopLevelCategory,
    setLanguage,
    setProfilesVisible,
-@@ -74,6 +75,7 @@ interface IConnectedProps {
+   setReduceMotion,
+   setRelativeTimes,
++  setWebsiteLinkGen,
++  setWebsiteLinkGenAlways,
+ } from "./actions/interface";
+ import { buildLanguageOptions, type ILanguage, type ILanguageOption } from "./languageOptions";
+ import getText from "./texts";
+@@ -74,6 +77,9 @@ interface IConnectedProps {
    relativeTimes: boolean;
    suppressedNotifications: { [id: string]: boolean };
    foregroundDL: boolean;
 +  hideDashboard: boolean;
++  websiteLinkGen: boolean;
++  websiteLinkGenAlways: boolean;
  }
  
  interface IActionProps {
-@@ -99,6 +101,7 @@ interface IActionProps {
+@@ -99,6 +105,9 @@ interface IActionProps {
    onSetRelativeTimes: (enabled: boolean) => void;
    onResetNotificationSuppression: () => void;
    onSetForegroundDL: (enabled: boolean) => void;
 +  onSetHideDashboard: (enabled: boolean) => void;
++  onSetWebsiteLinkGen: (enabled: boolean) => void;
++  onSetWebsiteLinkGenAlways: (enabled: boolean) => void;
  }
  
  type IProps = IBaseProps &
-@@ -143,10 +146,12 @@ class SettingsInterfaceImpl extends ComponentEx<IProps, {}> {
+@@ -143,10 +152,16 @@ class SettingsInterfaceImpl extends ComponentEx<IProps, {}> {
        customTitlebar,
        desktopNotifications,
        foregroundDL,
 +      hideDashboard,
++      websiteLinkGen,
++      websiteLinkGenAlways,
        languages,
        profilesVisible,
        hideTopLevelCategory,
        onSetForegroundDL,
 +      onSetHideDashboard,
++      onSetWebsiteLinkGen,
++      onSetWebsiteLinkGenAlways,
        onSetReduceMotion,
        reduceMotion,
        relativeTimes,
-@@ -268,6 +273,33 @@ class SettingsInterfaceImpl extends ComponentEx<IProps, {}> {
+@@ -268,6 +283,56 @@ class SettingsInterfaceImpl extends ComponentEx<IProps, {}> {
                {t("Bring Vortex to foreground when starting downloads in browser")}
              </Toggle>
            </div>
@@ -2047,10 +2588,33 @@ index 19b8c4d..1d4a2fe 100644
 +          <Button brand="neutral" onClick={this.importVortexData}>
 +            {t("Import data from Vortex")}
 +          </Button>
++
++          <div>
++            <Toggle checked={websiteLinkGen} onToggle={onSetWebsiteLinkGen}>
++              {t("Auto-authorise downloads via website session")}
++
++              <Typography appearance="subdued" typographyType="body-sm">
++                {t(
++                  "When the api refuses a download link, generate an authorised link " +
++                    "automatically through the website session connected below. Applies to " +
++                    "collection installs unless extended below. Downloads stay speed-limited " +
++                    "by the account tier.",
++                )}
++              </Typography>
++            </Toggle>
++          </div>
++
++          <div>
++            <Toggle checked={websiteLinkGenAlways} onToggle={onSetWebsiteLinkGenAlways}>
++              {t("Also auto-authorise downloads outside collections")}
++            </Toggle>
++          </div>
++
++          <WebsiteSessionSection t={t} />
          </FormGroup>
  
          <FormGroup controlId="advanced">
-@@ -503,6 +535,31 @@ class SettingsInterfaceImpl extends ComponentEx<IProps, {}> {
+@@ -503,11 +568,114 @@ class SettingsInterfaceImpl extends ComponentEx<IProps, {}> {
      onSetAdvancedMode(!advanced);
    };
  
@@ -2082,27 +2646,114 @@ index 19b8c4d..1d4a2fe 100644
    private restart = () => {
      relaunch();
    };
-@@ -525,6 +582,7 @@ function mapStateToProps(state: IState): IConnectedProps {
+ }
+ 
++interface IWebsiteSessionSectionProps {
++  t: (key: string) => string;
++}
++
++/**
++ * Vortex Unlocked: connection status and login button for the embedded
++ * nexusmods.com website session the auto-authorisation feature uses. The login
++ * flow opens a window to nexusmods.com; this app only reads the cookies that
++ * the site itself sets - no credentials are handled here.
++ */
++function WebsiteSessionSection(props: IWebsiteSessionSectionProps) {
++  const { t } = props;
++
++  const [connected, setConnected] = React.useState<boolean | null>(null);
++  const [busy, setBusy] = React.useState(false);
++
++  const refresh = React.useCallback(async () => {
++    try {
++      const res = await getPreloadApi().websiteSession.status();
++      setConnected(res?.loggedIn === true);
++    } catch (err) {
++      log("warn", "failed to query website session status", { error: String(err) });
++      setConnected(null);
++    }
++  }, []);
++
++  React.useEffect(() => {
++    void refresh();
++  }, [refresh]);
++
++  const connect = React.useCallback(async () => {
++    setBusy(true);
++    try {
++      await getPreloadApi().websiteSession.login();
++      await refresh();
++    } catch (err) {
++      log("warn", "website session login failed", { error: String(err) });
++    } finally {
++      setBusy(false);
++    }
++  }, [refresh]);
++
++  const disconnect = React.useCallback(async () => {
++    setBusy(true);
++    try {
++      await getPreloadApi().websiteSession.logout();
++    } catch (err) {
++      log("warn", "website session logout failed", { error: String(err) });
++    } finally {
++      await refresh();
++      setBusy(false);
++    }
++  }, [refresh]);
++
++  return (
++    <div className="flex items-center gap-x-4">
++      <Button
++        brand="neutral"
++        disabled={busy}
++        onClick={connected === true ? disconnect : connect}
++      >
++        {connected === true ? t("Disconnect website session") : t("Connect website session")}
++      </Button>
++
++      <Typography appearance="subdued" typographyType="body-sm">
++        {connected === null
++          ? t("Website session status unknown")
++          : connected === true
++            ? t("Website session connected")
++            : t(
++                "Not connected - click connect and log in to nexusmods.com in the window " +
++                  "that opens. Use the same account as in Vortex.",
++              )}
++      </Typography>
++    </div>
++  );
++}
++
+ function mapStateToProps(state: IState): IConnectedProps {
+   return {
+     profilesVisible: state.settings.interface.profilesVisible,
+@@ -525,6 +693,9 @@ function mapStateToProps(state: IState): IConnectedProps {
      alwaysCompactHeaders: state.settings.interface.alwaysCompactHeaders === true,
      suppressedNotifications: state.settings.notifications.suppress,
      foregroundDL: state.settings.interface.foregroundDL,
 +    hideDashboard: (state.settings.interface as any)?.hideDashboard === true,
++    websiteLinkGen: (state.settings.interface as any)?.websiteLinkGen === true,
++    websiteLinkGenAlways: (state.settings.interface as any)?.websiteLinkGenAlways === true,
    };
  }
  
-@@ -576,6 +634,7 @@ function mapDispatchToProps(dispatch: ThunkDispatch<any, null, Redux.Action>): I
+@@ -576,6 +747,9 @@ function mapDispatchToProps(dispatch: ThunkDispatch<any, null, Redux.Action>): I
        dispatch(resetSuppression(null));
      },
      onSetForegroundDL: (enabled: boolean) => dispatch(setForegroundDL(enabled)),
 +    onSetHideDashboard: (enabled: boolean) => dispatch(setHideDashboard(enabled)),
++    onSetWebsiteLinkGen: (enabled: boolean) => dispatch(setWebsiteLinkGen(enabled)),
++    onSetWebsiteLinkGenAlways: (enabled: boolean) => dispatch(setWebsiteLinkGenAlways(enabled)),
    };
  }
  
 diff --git a/src/renderer/src/extensions/settings_interface/actions/interface.ts b/src/renderer/src/extensions/settings_interface/actions/interface.ts
-index cace1c1..81beafb 100644
+index cace1c1..487ded8 100644
 --- a/src/renderer/src/extensions/settings_interface/actions/interface.ts
 +++ b/src/renderer/src/extensions/settings_interface/actions/interface.ts
-@@ -53,3 +53,8 @@ export const setAlwaysCompactHeaders = safeCreateAction(
+@@ -53,3 +53,27 @@ export const setAlwaysCompactHeaders = safeCreateAction(
   * then the setting is absent and the operating system's preference is followed.
   */
  export const setReduceMotion = safeCreateAction("SET_REDUCE_MOTION", (enabled: boolean) => enabled);
@@ -2111,24 +2762,49 @@ index cace1c1..81beafb 100644
 + * Vortex Unlocked: hide or show the Dashboard tab in the main navigation.
 + */
 +export const setHideDashboard = safeCreateAction("SET_HIDE_DASHBOARD", (hide: boolean) => hide);
++
++/**
++ * Vortex Unlocked: automatically authorise refused download links through the
++ * embedded nexusmods.com website session. Applies to collection installs; see
++ * setWebsiteLinkGenAlways for single downloads.
++ */
++export const setWebsiteLinkGen = safeCreateAction(
++  "SET_WEBSITE_LINK_GEN",
++  (enabled: boolean) => enabled,
++);
++
++/**
++ * Vortex Unlocked: extend automatic link generation to downloads outside
++ * collection installs.
++ */
++export const setWebsiteLinkGenAlways = safeCreateAction(
++  "SET_WEBSITE_LINK_GEN_ALWAYS",
++  (enabled: boolean) => enabled,
++);
 diff --git a/src/renderer/src/extensions/settings_interface/reducers/interface.ts b/src/renderer/src/extensions/settings_interface/reducers/interface.ts
-index e283185..3689ee7 100644
+index e283185..19718ac 100644
 --- a/src/renderer/src/extensions/settings_interface/reducers/interface.ts
 +++ b/src/renderer/src/extensions/settings_interface/reducers/interface.ts
-@@ -30,6 +30,8 @@ const settingsReducer: IReducerSpec = {
+@@ -30,6 +30,12 @@ const settingsReducer: IReducerSpec = {
      // Deliberately absent from the defaults below: unset means "follow the OS".
      [actions.setReduceMotion as any]: (state, payload) =>
        update(state, { reduceMotion: { $set: payload } }),
 +    [actions.setHideDashboard as any]: (state, payload) =>
 +      update(state, { hideDashboard: { $set: payload } }),
++    [actions.setWebsiteLinkGen as any]: (state, payload) =>
++      update(state, { websiteLinkGen: { $set: payload } }),
++    [actions.setWebsiteLinkGenAlways as any]: (state, payload) =>
++      update(state, { websiteLinkGenAlways: { $set: payload } }),
    },
    defaults: {
      language: "en",
-@@ -40,6 +42,7 @@ const settingsReducer: IReducerSpec = {
+@@ -40,6 +46,9 @@ const settingsReducer: IReducerSpec = {
      relativeTimes: true,
      foregroundDL: true,
      alwaysCompactHeaders: false,
 +    hideDashboard: false,
++    websiteLinkGen: false,
++    websiteLinkGenAlways: false,
      usage: {},
    },
  };
@@ -2237,3 +2913,77 @@ index 6535760..14a55e4 100644
  
    if (visiblePages.length === 0) {
      return null;
+diff --git a/src/shared/src/types/ipc.ts b/src/shared/src/types/ipc.ts
+index 5ddd14b..8c4e796 100644
+--- a/src/shared/src/types/ipc.ts
++++ b/src/shared/src/types/ipc.ts
+@@ -597,6 +597,28 @@ export interface InvokeChannels {
+     path: string,
+     options: Parameters<FileSystem["stat"]>[1],
+   ) => Promise<Awaited<ReturnType<FileSystem["stat"]>>>;
++
++  // Vortex Unlocked: the embedded nexusmods.com website session, used to
++  // auto-authorise download links the api would refuse for the account tier.
++  /** Whether the website session is logged in (login cookies present). */
++  "website-session:status": () => Promise<{ loggedIn: boolean }>;
++  /** Open the login window; resolves once the session cookie appears or the window is closed. */
++  "website-session:login": () => Promise<{ ok: boolean; reason?: string }>;
++  /** Wipe the website session (cookies and storage of its partition). */
++  "website-session:logout": () => Promise<void>;
++  /**
++   * Generate an authorised download link for one file through the website
++   * session, returning it as a keyed nxm:// url the download pipeline can
++   * resolve directly. Serialized and paced server-side courtesy.
++   */
++  "website-session:generate": (request: {
++    /** game domain, e.g. "fallout4" - used to build the nxm url */
++    domain: string;
++    /** numeric game id, as expected by the website endpoint's game_id param */
++    gameId: string;
++    modId: number;
++    fileId: number;
++  }) => Promise<{ ok: boolean; nxmUrl?: string; reason?: string }>;
+ }
+ 
+ /** Represents all IPC-safe typed arrays */
+diff --git a/src/shared/src/types/preload.ts b/src/shared/src/types/preload.ts
+index 4299c4a..d3b998e 100644
+--- a/src/shared/src/types/preload.ts
++++ b/src/shared/src/types/preload.ts
+@@ -82,6 +82,9 @@ export interface Api {
+   /** Session APIs */
+   session: Session;
+ 
++  /** Vortex Unlocked: embedded nexusmods.com website session APIs */
++  websiteSession: WebsiteSessionApi;
++
+   /** Window APIs */
+   window: WindowAPI;
+ 
+@@ -240,6 +243,26 @@ export interface Session {
+   getCookies(filter: CookiesGetFilter): Promise<Cookie[]>;
+ }
+ 
++/**
++ * Vortex Unlocked: the embedded nexusmods.com website session, used to
++ * auto-authorise download links the api refuses for the account tier.
++ */
++export interface WebsiteSessionApi {
++  /** Whether the website session is logged in (login cookies present). */
++  status(): Promise<{ loggedIn: boolean }>;
++  /** Open the login window; resolves once logged in or the window is closed. */
++  login(): Promise<{ ok: boolean; reason?: string }>;
++  /** Wipe the website session. */
++  logout(): Promise<void>;
++  /** Generate an authorised (keyed) nxm link for one file. */
++  generateLink(request: {
++    domain: string;
++    gameId: string;
++    modId: number;
++    fileId: number;
++  }): Promise<{ ok: boolean; nxmUrl?: string; reason?: string }>;
++}
++
+ export interface WindowAPI {
+   /** Get the current window ID */
+   getId(): Promise<number>;
