@@ -103,7 +103,9 @@ function FreeUserDLDialog(props: IFreeUserDLDialogProps) {
 
   const [fileInfo, setFileInfo] = React.useState<any>(null);
   const [positionText, setPositionText] = React.useState<string>("1/1");
+  const [autoOpenNext, setAutoOpenNext] = React.useState(false);
   const lastFetchUrl = React.useRef<string>();
+  const lastAutoOpenedUrl = React.useRef<string>();
 
   // Vortex Unlocked: the queue dialog shows whenever a download is parked
   // waiting for an authorised link from the website, regardless of membership.
@@ -154,6 +156,21 @@ function FreeUserDLDialog(props: IFreeUserDLDialogProps) {
     }
   }, [urls]);
 
+  React.useEffect(() => {
+    if (!autoOpenNext) {
+      lastAutoOpenedUrl.current = undefined;
+      return;
+    }
+
+    const current = urls[0];
+    if (current === undefined || current === lastAutoOpenedUrl.current) {
+      return;
+    }
+
+    lastAutoOpenedUrl.current = current;
+    onDownload(current);
+  }, [autoOpenNext, onDownload, urls]);
+
   const cancel = React.useCallback(() => {
     onCancel(urls[0]);
   }, [onCancel, urls]);
@@ -177,7 +194,7 @@ function FreeUserDLDialog(props: IFreeUserDLDialogProps) {
   return (
     <Modal id="free-user-dl-dialog" show={show} onHide={nop}>
       <Modal.Header>
-        <Modal.Title>{t("Download mod")}</Modal.Title>
+        <Modal.Title>{t("Download mod ({{count}} remaining)", { count: urls.length })}</Modal.Title>
       </Modal.Header>
 
       <Modal.Body>
@@ -191,6 +208,17 @@ function FreeUserDLDialog(props: IFreeUserDLDialogProps) {
       </Modal.Body>
 
       <Modal.Footer>
+        <Button
+          id="auto-open-next-button"
+          active={autoOpenNext}
+          title={t(
+            "Automatically open the next Nexus file page after each authorised download returns",
+          )}
+          onClick={() => setAutoOpenNext((enabled) => !enabled)}
+        >
+          {autoOpenNext ? t("Auto-open next: On") : t("Auto-open next: Off")}
+        </Button>
+
         <Button id="cancel-button" onClick={cancel}>
           {t("Cancel install")}
         </Button>
