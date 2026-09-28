@@ -3157,3 +3157,467 @@ index 4299c4a..d3b998e 100644
  export interface WindowAPI {
    /** Get the current window ID */
    getId(): Promise<number>;
+diff --git a/src/renderer/src/extensions/health_check/views/HealthCheckPage.tsx b/src/renderer/src/extensions/health_check/views/HealthCheckPage.tsx
+index c063397..a7f3a33 100644
+--- a/src/renderer/src/extensions/health_check/views/HealthCheckPage.tsx
++++ b/src/renderer/src/extensions/health_check/views/HealthCheckPage.tsx
+@@ -16,7 +16,6 @@
+ import type { IState } from "@/types/IState";
+ import { Button } from "@/ui/components/button/Button";
+ import { NoResults } from "@/ui/components/no_results/NoResults";
+-import { PremiumBadge } from "@/ui/components/premium_badge/PremiumBadge";
+ import { TabBar } from "@/ui/components/tabs/TabBar";
+ import { TabButton } from "@/ui/components/tabs/TabButton";
+ import { TabPanel } from "@/ui/components/tabs/TabPanel";
+@@ -31,10 +30,8 @@
+ import { PageHeader } from "@/views/components/Page/PageHeader";
+ import { PageScroll } from "@/views/components/Page/PageScroll";
+ 
+-import { isLoggedIn, shouldShowPremiumAd } from "../../nexus_integration/selectors";
++import { isLoggedIn } from "../../nexus_integration/selectors";
+ import { BetaBadge } from "../components/beta_badge/BetaBadge";
+-import { PremiumBanner } from "../components/premium_banner/PremiumBanner";
+-import { PremiumModal } from "../components/premium_modal/PremiumModal";
+ import { createHealthCheckTracker } from "../hooks/healthCheckTracker";
+ import { HealthCheckTrackingProvider, IssueProvider } from "../hooks/HealthCheckTracking.context";
+ import {
+@@ -131,8 +128,6 @@
+   const modResult = useSelector(modRequirementsCheckResult);
+   const hiddenFile = useSelector(hiddenFileRequirements);
+   const hiddenMod = useSelector(hiddenModRequirements);
+-  const showPremiumAd = useSelector(shouldShowPremiumAd);
+-  const [showInstallAllPremium, setShowInstallAllPremium] = useState(false);
+   const isRefreshing = useSelector(isAnyHealthCheckRunning);
+   // Every check that talks to Nexus Mods skips itself while logged out, so an empty
+   // list then means "we couldn't run the checks", not "your loadout is healthy".
+@@ -229,7 +224,6 @@
+   const activeCount = activeItems.length;
+   const hiddenCount = hiddenItems.length;
+   // Without tabs the active list is all there is, and selectedTab stays on it.
+-  const listIsEmpty = selectedTab === "hidden" ? hiddenCount === 0 : activeCount === 0;
+ 
+   const renderRow = (item: IListedEntry) => {
+     const { content, entry } = item;
+@@ -268,9 +262,9 @@
+     hiddenItems.forEach((item) => item.content.toggleHide?.(api, item.entry));
+   };
+ 
+-  // 1-click install all: premium-gated for free users. Items are de-duplicated first by
+-  // collectInstallAllItems (by key) and again here at execution time via the seen set,
+-  // so a file shared across multiple source reports is only queued once.
++  // Vortex Unlocked: bulk remediation uses the same normal download/install path
++  // for every account. Items are de-duplicated first by collectInstallAllItems
++  // and again here at execution time so shared requirements are queued once.
+   const runInstallAll = () => {
+     const seen = new Set<string>();
+ 
+@@ -288,11 +282,6 @@
+       mod_count: installAllItems.length,
+     });
+ 
+-    if (showPremiumAd) {
+-      setShowInstallAllPremium(true);
+-      return;
+-    }
+-
+     runInstallAll();
+   };
+ 
+@@ -415,7 +404,6 @@
+                       <Button
+                         brand="neutral"
+                         leftIconPath={mdiMonitorArrowDownVariant}
+-                        rightIcon={showPremiumAd ? <PremiumBadge /> : undefined}
+                         size="sm"
+                         onClick={installAll}
+                       >
+@@ -444,20 +432,6 @@
+             activeList
+           )}
+ 
+-          {!listIsEmpty && (
+-            <PremiumBanner api={api} placement="list" totalIssues={activeCount + hiddenCount} />
+-          )}
+-
+-          <PremiumModal
+-            api={api}
+-            downloadScope="all"
+-            isOpen={showInstallAllPremium}
+-            modCount={installAllItems.length}
+-            trigger="install_all"
+-            onClose={() => setShowInstallAllPremium(false)}
+-            onDownload={() => setShowInstallAllPremium(false)}
+-            onPremiumUnlocked={runInstallAll}
+-          />
+         </PageScroll>
+       </Page>
+     </HealthCheckTrackingProvider>
+diff --git a/src/renderer/src/extensions/health_check/hooks/useModRequirementActions.ts b/src/renderer/src/extensions/health_check/hooks/useModRequirementActions.ts
+index c4e7fd8..6e30b80 100644
+--- a/src/renderer/src/extensions/health_check/hooks/useModRequirementActions.ts
++++ b/src/renderer/src/extensions/health_check/hooks/useModRequirementActions.ts
+@@ -2,7 +2,6 @@
+ import { useSelector } from "react-redux";
+ 
+ import { onDownloadRequirement } from "@/extensions/health_check/utils/modRequirements/onDownloadRequirement";
+-import { shouldShowPremiumAd } from "@/extensions/nexus_integration/selectors";
+ import type { IExtensionApi } from "@/types/IExtensionContext";
+ import opn from "@/util/opn";
+ 
+@@ -13,7 +12,7 @@
+ 
+ /**
+  * Shared action logic for a single mod requirement, used by both the listing row
+- * and the detail view: premium-gated 1-click install, thumbs feedback (with
++ * and the detail view: 1-click install, thumbs feedback (with
+  * analytics + the negative-reason modal), and opening the mod page. Keeps the two
+  * call sites behaviourally identical.
+  *
+@@ -34,7 +33,9 @@
+     [feedbackMap, mod.requiredBy.modId, mod.id],
+   );
+ 
+-  const showPremiumAd = useSelector(shouldShowPremiumAd);
++  // Vortex Unlocked: this client-side gate is deliberately open. The actual
++  // download still goes through the normal Nexus resolver and server policy.
++  const showPremiumAd = false;
+ 
+   const openModPage = useCallback(() => {
+     if (mod.modUrl) {
+@@ -42,16 +43,11 @@
+     }
+   }, [mod.modUrl]);
+ 
+-  // 1-click install is a Premium feature; free users get the upgrade prompt
+-  // (which routes them to the mod page) instead of an in-app download.
++  // Vortex Unlocked: use the normal in-app download path for every account.
+   // onDownloadRequirement reports its own failures and never rejects, so the
+   // fire-and-forget call sites have nothing to catch; a failed install leaves the
+   // detail page open rather than navigating away from the issue.
+   const installInApp = useCallback(async () => {
+-    if (showPremiumAd) {
+-      setShowPremiumModal(true);
+-      return;
+-    }
+     if (await onDownloadRequirement(api, mod, undefined, identity)) {
+       onInstalled?.();
+     }
+diff --git a/src/renderer/src/IPCDownloadAdapter.ts b/src/renderer/src/IPCDownloadAdapter.ts
+index b74a8a5..3b15d85 100644
+--- a/src/renderer/src/IPCDownloadAdapter.ts
++++ b/src/renderer/src/IPCDownloadAdapter.ts
+@@ -35,7 +35,6 @@
+   initDownload,
+   pauseDownload,
+   removeDownload,
+-  removeDownloadSilent,
+   setCompatibleGames,
+   setDownloadFilePath,
+   setDownloadHash,
+@@ -144,11 +143,19 @@
+   callback?: (err: Error | null, id?: string) => void;
+   fileNameHint?: string;
+   allowInstall?: boolean;
++  /** CDN host selected from the resolver's authorised URL set. */
++  sourceHost?: string;
+   lastBytesReceived: number;
+   lastProgressDispatch: number;
+   startedEventEmitted: boolean;
+ };
+ 
++type HostHealth = {
++  successes: number;
++  failures: number;
++  lastUsed: number;
++};
++
+ export class IPCDownloadAdapter {
+   readonly #api: IExtensionApi;
+   readonly #handlers: Record<string, ProtocolHandler> = {};
+@@ -158,6 +165,8 @@
+   // into download.modInfo once the downloadId is known. The nxm resolver returns
+   // nexus IDs (modId/fileId or collectionId/revisionId) here.
+   readonly #resolvedMeta = new Map<number, unknown>();
++  readonly #resolvedSourceHosts = new Map<number, string>();
++  readonly #hostHealth = new Map<string, HostHealth>();
+   readonly #activeDownloads = new Map<string, ActiveDownload>();
+   // Ids with a restore in flight. A restore un-pauses the record and clears its checkpoint before
+   // awaiting the fresh start, so without this guard a second resume-download for the same id would
+@@ -168,6 +177,11 @@
+   #nextCollationId = 0;
+   #currentMaxParallelDownloads: number | undefined;
+   #currentMaxBandwidth: number | undefined;
++  #effectiveConcurrency = 1;
++  #adaptiveLastSpeed = 0;
++  #adaptiveLastAdjustment = 0;
++  #adaptiveFailurePressure = 0;
++  #adaptiveStableSamples = 0;
+ 
+   constructor(api: IExtensionApi) {
+     this.#api = api;
+@@ -257,12 +271,113 @@
+     });
+   }
+ 
++  /**
++   * Pick among URLs the resolver already authorised for this account. This does
++   * not discover or manufacture mirrors: it simply learns which returned host
++   * has been reliable for prior transfers and spreads equal-score requests.
++   */
++  #pickResolvedUrl(collationId: number, urls: string[]): string {
++    if (urls.length === 0) {
++      throw new Error("Protocol handler returned no download URLs");
++    }
++
++    const now = Date.now();
++    let selected = urls[0];
++    let selectedHost = "";
++    let selectedScore = Number.NEGATIVE_INFINITY;
++
++    for (const candidate of urls) {
++      let host = "";
++      try {
++        host = new URL(candidate).host;
++      } catch {
++        // Let the downloader report an invalid URL if every candidate is malformed.
++      }
++      const health = this.#hostHealth.get(host) ?? { successes: 0, failures: 0, lastUsed: 0 };
++      // Successful hosts rise; failures are penalised heavily. A small recency
++      // penalty distributes otherwise-equal mirrors instead of pinning one host.
++      const recencyPenalty = health.lastUsed > 0 ? Math.max(0, 1 - (now - health.lastUsed) / 30_000) : 0;
++      const score = health.successes * 2 - health.failures * 5 - recencyPenalty;
++      if (score > selectedScore) {
++        selected = candidate;
++        selectedHost = host;
++        selectedScore = score;
++      }
++    }
++
++    if (selectedHost !== "") {
++      const health = this.#hostHealth.get(selectedHost) ?? { successes: 0, failures: 0, lastUsed: 0 };
++      this.#hostHealth.set(selectedHost, { ...health, lastUsed: now });
++      this.#resolvedSourceHosts.set(collationId, selectedHost);
++    }
++    return selected;
++  }
++
++  #recordHostResult(host: string | undefined, success: boolean): void {
++    if (host === undefined || host === "") return;
++    const health = this.#hostHealth.get(host) ?? { successes: 0, failures: 0, lastUsed: 0 };
++    this.#hostHealth.set(host, {
++      successes: health.successes + (success ? 1 : 0),
++      failures: health.failures + (success ? 0 : 1),
++      lastUsed: health.lastUsed,
++    });
++  }
++
++  /**
++   * Treat the Downloads slider as an upper bound and adapt the effective
++   * concurrency underneath it. Increase only while aggregate throughput is
++   * healthy; back off quickly after failures or a pronounced throughput drop.
++   */
++  #adaptConcurrency(speed: number, now: number): void {
++    const ceiling = Math.max(1, this.#currentMaxParallelDownloads ?? 1);
++    if (ceiling <= 1 || now - this.#adaptiveLastAdjustment < 5_000) {
++      if (speed > 0) this.#adaptiveLastSpeed = speed;
++      return;
++    }
++
++    let next = Math.min(this.#effectiveConcurrency, ceiling);
++    if (this.#adaptiveFailurePressure > 0) {
++      next = Math.max(1, next - 1);
++      this.#adaptiveFailurePressure = 0;
++      this.#adaptiveStableSamples = 0;
++    } else if (
++      this.#adaptiveLastSpeed > 0 &&
++      speed > 0 &&
++      speed < this.#adaptiveLastSpeed * 0.7 &&
++      next > 1
++    ) {
++      next -= 1;
++      this.#adaptiveStableSamples = 0;
++    } else if (
++      speed > 0 &&
++      this.#activeDownloads.size >= next &&
++      next < ceiling
++    ) {
++      const improving =
++        this.#adaptiveLastSpeed === 0 || speed >= this.#adaptiveLastSpeed * 1.05;
++      this.#adaptiveStableSamples = improving ? this.#adaptiveStableSamples + 1 : 0;
++      if (this.#adaptiveStableSamples >= 2) {
++        next += 1;
++        this.#adaptiveStableSamples = 0;
++      }
++    }
++
++    this.#adaptiveLastSpeed = speed > 0 ? speed : this.#adaptiveLastSpeed;
++    this.#adaptiveLastAdjustment = now;
++    if (next !== this.#effectiveConcurrency) {
++      this.#effectiveConcurrency = next;
++      this.#syncDownloadSettings(next, this.#currentMaxBandwidth ?? 0);
++      log("debug", "adapted download concurrency", { effective: next, ceiling, speed });
++    }
++  }
++
+   hydrateFromState(): void {
+     const state = this.#api.getState();
+     const { maxParallelDownloads, maxBandwidth } = state.settings.downloads;
+     this.#currentMaxParallelDownloads = maxParallelDownloads;
+     this.#currentMaxBandwidth = maxBandwidth;
+-    this.#syncDownloadSettings(maxParallelDownloads, maxBandwidth);
++    this.#effectiveConcurrency = Math.max(1, Math.min(maxParallelDownloads, 2));
++    this.#syncDownloadSettings(this.#effectiveConcurrency, maxBandwidth);
+ 
+     this.#api.store.subscribe(() => {
+       const { maxParallelDownloads: concurrency, maxBandwidth: bandwidth } =
+@@ -273,7 +388,8 @@
+       ) {
+         this.#currentMaxParallelDownloads = concurrency;
+         this.#currentMaxBandwidth = bandwidth;
+-        this.#syncDownloadSettings(concurrency, bandwidth);
++        this.#effectiveConcurrency = Math.max(1, Math.min(this.#effectiveConcurrency, concurrency));
++        this.#syncDownloadSettings(this.#effectiveConcurrency, bandwidth);
+       }
+     });
+ 
+@@ -297,33 +413,19 @@
+           this.#api.store.dispatch(setDownloadInterrupted(id, download.received));
+         });
+       } else {
+-        // Without a checkpoint there is no record of which byte ranges completed
+-        // (chunks download in parallel, so the partial file may have holes) nor
+-        // the etag needed to validate it, so the download cannot be resumed. The
+-        // resolved CDN url is also likely expired by now. Discard the stale record
+-        // and its unusable partial file so the collection installer (or the user)
+-        // re-requests a fresh download instead of attempting a resume that is
+-        // guaranteed to fail with "No checkpoint stored for download <id>".
+-        log("debug", "interrupted download has no checkpoint, discarding", { id });
+-        this.#discardStaleDownload(id, download).catch((err) => {
+-          log("error", "failed to discard stale download", { id, err });
++        // A crash can leave no checkpoint even though the Redux record still has
++        // enough identity to rebuild an nxm:// URL. Re-resolve it and restart under
++        // the same download id instead of throwing the record away; #restoreDownload
++        // safely drops the unusable sparse partial before starting again.
++        log("debug", "interrupted download has no checkpoint, restoring", { id });
++        this.#restoreDownload(id, download).catch((err) => {
++          log("error", "failed to restore interrupted download", { id, err });
++          this.#api.store.dispatch(setDownloadInterrupted(id, download.received));
+         });
+       }
+     }
+   }
+ 
+-  async #discardStaleDownload(downloadId: string, download: IDownload): Promise<void> {
+-    if (download.localPath !== undefined) {
+-      const state = this.#api.getState();
+-      const gameId = toInternalGameId(this.#api, download.game?.[0] ?? activeGameId(state));
+-      const dlPath = downloadPathForGame(state, gameId);
+-      await rm(path.join(dlPath, download.localPath), { force: true });
+-    }
+-    // Silent: this is automatic startup cleanup, not a user-initiated removal,
+-    // so it shouldn't raise a "downloads removed" toast.
+-    this.#api.store.dispatch(removeDownloadSilent(downloadId));
+-  }
+-
+   #emitAnalytics(
+     downloadId: string,
+     eventType: "started" | "completed" | "failed" | "canceled",
+@@ -608,11 +710,14 @@
+       const { downloadId } = await window.api.downloader.start(dest, collationId);
+ 
+       const allowInstall = normalizeAllowInstall(options?.allowInstall);
++      const sourceHost = this.#resolvedSourceHosts.get(collationId);
++      this.#resolvedSourceHosts.delete(collationId);
+ 
+       this.#activeDownloads.set(downloadId, {
+         callback,
+         fileNameHint: fileName,
+         allowInstall,
++        sourceHost,
+         lastBytesReceived: 0,
+         lastProgressDispatch: 0,
+         startedEventEmitted: false,
+@@ -650,6 +755,7 @@
+       }
+     } catch (err) {
+       this.#resolvedMeta.delete(collationId);
++      this.#resolvedSourceHosts.delete(collationId);
+       callback?.(unknownToError(err));
+     }
+   }
+@@ -876,10 +982,12 @@
+       await rm(dest, { force: true });
+       this.#api.store.dispatch(clearDownloadCheckpoint(downloadId));
+ 
++      let sourceHost: string | undefined;
+       try {
+         // Passing the existing downloadId makes main replace the previous attempt and start the
+         // transfer from scratch under the same id.
+         await window.api.downloader.start(dest, collationId, downloadId);
++        sourceHost = this.#resolvedSourceHosts.get(collationId);
+       } catch (err) {
+         // The partial and checkpoint are already gone, so mark the record failed rather than
+         // leaving it stuck in an active state the poll loop never tracks.
+@@ -888,6 +996,7 @@
+       } finally {
+         this.#pending.delete(collationId);
+         this.#resolvedMeta.delete(collationId);
++        this.#resolvedSourceHosts.delete(collationId);
+       }
+ 
+       // Register the poll entry after start resolves (as #handleStartDownload does) so the poll
+@@ -897,6 +1006,7 @@
+       this.#activeDownloads.set(downloadId, {
+         callback,
+         allowInstall,
++        sourceHost,
+         lastBytesReceived: 0,
+         lastProgressDispatch: 0,
+         startedEventEmitted: false,
+@@ -980,6 +1090,7 @@
+       this.#api.store.dispatch(clearDownloadCheckpoint(downloadId));
+ 
+       if (state.status === "completed") {
++        this.#recordHostResult(activeDownload.sourceHost, true);
+         this.#emitAnalytics(downloadId, "completed");
+         this.#completeDownload(downloadId, state, activeDownload).catch((err) => {
+           log("error", "failed to finalize download", { downloadId, err });
+@@ -990,6 +1101,8 @@
+         this.#api.store.dispatch(removeDownload(downloadId));
+         activeDownload.callback?.(new UserCanceled(), downloadId);
+       } else {
++        this.#recordHostResult(activeDownload.sourceHost, false);
++        this.#adaptiveFailurePressure += 1;
+         this.#emitAnalytics(downloadId, "failed", err ?? undefined);
+         // Mark record as failed so the UI can show an error state.
+         this.#api.store.dispatch(finishDownload(downloadId, "failed", err));
+@@ -1019,6 +1132,7 @@
+           // Update speed display and speedHistory for the download graph.
+           // Aggregated over 1s to avoid thrashing Redux with every poll tick.
+           this.#api.store.dispatch(setDownloadSpeed(Math.round(speed)));
++          this.#adaptConcurrency(speed, now);
+         }
+       }
+     }
+@@ -1053,12 +1167,19 @@
+         this.#resolvedMeta.set(collationId, resolved.meta);
+       }
+ 
+-      log("debug", "download resolved", { resolvedUrl: resolved.urls[0] });
+-      return { probeEndpoint: { url: resolved.urls[0] } };
++      const selectedUrl = this.#pickResolvedUrl(collationId, resolved.urls);
++      log("debug", "download resolved", {
++        resolvedUrl: selectedUrl,
++        candidates: resolved.urls.length,
++      });
++      return { probeEndpoint: { url: selectedUrl } };
+     }
+ 
+     if (scheme === "http" || scheme === "https") {
+       log("debug", "resolving download directly", { encodedUrl });
++      if (encodedUrl.url.host !== "") {
++        this.#resolvedSourceHosts.set(collationId, encodedUrl.url.host);
++      }
+       return { probeEndpoint: { url: encodedUrl.url.toString(), headers } };
+     }
+ 
