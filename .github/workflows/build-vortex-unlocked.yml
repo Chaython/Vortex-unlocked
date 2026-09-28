@@ -36,6 +36,13 @@ on:
 permissions:
   contents: write
 
+# Only the newest branch build matters. A patch change supersedes any older
+# in-flight build of the same branch, avoiding several expensive Windows
+# packaging jobs racing to publish obsolete releases.
+concurrency:
+  group: vortex-unlocked-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build:
     runs-on: windows-latest
