@@ -3198,7 +3198,7 @@ index a263a5e..2d39953 100644
    configure(options: { concurrency?: number; bytesPerSecond?: number }): Promise<void>;
  
 diff --git a/src/main/src/downloading/manager.ts b/src/main/src/downloading/manager.ts
-index 879f372..25d375c 100644
+index 879f372..528b35d 100644
 --- a/src/main/src/downloading/manager.ts
 +++ b/src/main/src/downloading/manager.ts
 @@ -31,6 +31,9 @@
@@ -3211,15 +3211,39 @@ index 879f372..25d375c 100644
    /**
     * Cancels the download if it is running. Returns the resulting state.
     * If the download is not running, returns the current state unchanged.
-@@ -74,6 +77,7 @@
+@@ -58,6 +61,9 @@
+   /** Optional global bandwidth limit in bytes per second. */
+   bytesPerSecond?: number;
+ 
++  /** Optional bandwidth limit applied independently to each download. */
++  perDownloadBytesPerSecond?: number;
++
+   /** Optional timeout settings. */
+   timeout?: Partial<TimeoutOptions>;
+ 
+@@ -74,17 +80,20 @@
    readonly #userAgent: string | undefined;
    readonly #cookieJar: CookieJar | undefined;
    readonly #downloads: Map<string, DownloadHandle> = new Map();
 +  readonly #queuedByHost = new Map<string, number>();
  
    #rateLimiter: RateLimiter | undefined;
++  #perDownloadBytesPerSecond: number | undefined;
  
-@@ -124,6 +128,10 @@
+   constructor(options: DownloadManagerOptions) {
+     this.#downloadQueue = new PQueue({
+       concurrency: options.concurrency,
+     });
+ 
+-    const { bytesPerSecond, timeout, userAgent, cookieJar } = options;
++    const { bytesPerSecond, perDownloadBytesPerSecond, timeout, userAgent, cookieJar } = options;
+     this.#userAgent = userAgent;
+     this.#cookieJar = cookieJar;
++    this.#perDownloadBytesPerSecond = perDownloadBytesPerSecond;
+ 
+     if (bytesPerSecond && !isNaN(bytesPerSecond)) {
+       this.#rateLimiter = new RateLimiter({
+@@ -124,11 +133,19 @@
      return this.#downloads.get(downloadId)?.getState();
    }
  
@@ -3230,7 +3254,32 @@ index 879f372..25d375c 100644
    /**
     * Updates concurrency and/or bandwidth limit at runtime.
     * In-flight downloads are unaffected; new downloads use the updated settings.
-@@ -176,6 +184,8 @@
+    */
+-  configure(options: { concurrency?: number; bytesPerSecond?: number }): void {
++  configure(options: {
++    concurrency?: number;
++    bytesPerSecond?: number;
++    perDownloadBytesPerSecond?: number;
++  }): void {
+     if (options.concurrency !== undefined) {
+       log("info", "download concurrency changed", {
+         from: this.#downloadQueue.concurrency,
+@@ -137,6 +154,14 @@
+       this.#downloadQueue.concurrency = options.concurrency;
+     }
+ 
++    if (options.perDownloadBytesPerSecond !== undefined) {
++      const value = options.perDownloadBytesPerSecond;
++      this.#perDownloadBytesPerSecond = value > 0 && !isNaN(value) ? value : undefined;
++      log("info", "per-download bandwidth limit changed", {
++        bytesPerSecond: this.#perDownloadBytesPerSecond ?? 0,
++      });
++    }
++
+     if (options.bytesPerSecond !== undefined) {
+       if (options.bytesPerSecond > 0 && !isNaN(options.bytesPerSecond)) {
+         log("info", "download bandwidth limit changed", { bytesPerSecond: options.bytesPerSecond });
+@@ -176,6 +201,8 @@
      resolver: Resolver<T>,
      chunker: Chunker<T>,
      retry: RetryStrategy = defaultRetryStrategy(),
@@ -3239,7 +3288,7 @@ index 879f372..25d375c 100644
    ): DownloadHandle<T> {
      return this.#download(
        checkpoint.resource,
-@@ -185,6 +195,8 @@
+@@ -185,6 +212,8 @@
        retry,
        checkpoint,
        checkpoint.downloadId,
@@ -3248,7 +3297,7 @@ index 879f372..25d375c 100644
      );
    }
  
-@@ -202,8 +214,10 @@
+@@ -202,8 +231,10 @@
      chunker: Chunker<T> = staticChunker(),
      retry: RetryStrategy = defaultRetryStrategy(),
      downloadId?: string,
@@ -3260,7 +3309,7 @@ index 879f372..25d375c 100644
    }
  
    #download<T>(
-@@ -214,14 +228,24 @@
+@@ -214,14 +245,24 @@
      retry: RetryStrategy,
      checkpoint?: DownloadCheckpoint<T>,
      downloadId: string = randomUUID(),
@@ -3287,7 +3336,21 @@ index 879f372..25d375c 100644
        progressReporter.status = "running";
        return download(
          resource,
-@@ -241,7 +265,7 @@
+@@ -229,6 +270,13 @@
+         {
+           chunker,
+           rateLimiter: this.#rateLimiter,
++          perDownloadRateLimiter:
++            this.#perDownloadBytesPerSecond !== undefined
++              ? new RateLimiter({
++                  tokensPerInterval: this.#perDownloadBytesPerSecond,
++                  interval: "second",
++                })
++              : undefined,
+           resolver,
+           retry: retry,
+         },
+@@ -241,7 +289,7 @@
            userAgent: this.#userAgent,
          },
        );
@@ -3296,7 +3359,7 @@ index 879f372..25d375c 100644
  
      // Swallow all rejections on one fork so that pause()/cancel() flows
      // never surface as unhandled rejections.
-@@ -334,6 +358,7 @@
+@@ -334,6 +382,7 @@
        downloadId,
        promise,
        getState,
@@ -4073,3 +4136,82 @@ index c4e7fd8..d54220d 100644
      openModPage,
      installInApp,
      markFeedback,
+diff --git a/src/main/src/downloading/downloader.ts b/src/main/src/downloading/downloader.ts
+index e6423d5..ecaad80 100644
+--- a/src/main/src/downloading/downloader.ts
++++ b/src/main/src/downloading/downloader.ts
+@@ -45,6 +45,7 @@
+     resolver: Resolver<T>;
+     chunker: Chunker<T>;
+     rateLimiter?: RateLimiter;
++    perDownloadRateLimiter?: RateLimiter;
+     retry?: RetryStrategy;
+   },
+   options?: {
+@@ -86,6 +87,10 @@
+     },
+   } satisfies ExtendOptions);
+ 
++  const rateLimiters = [strategy.rateLimiter, strategy.perDownloadRateLimiter].filter(
++    (limiter): limiter is RateLimiter => limiter !== undefined,
++  );
++
+   let resolved: NormalizedResource;
+   try {
+     resolved = normalize(await strategy.resolver(resource));
+@@ -192,7 +197,7 @@
+ 
+                 return downloadChunk(sessionGot, chunk, resolved, probe, handle, {
+                   abortSignal: options?.abortSignal,
+-                  rateLimiter: strategy.rateLimiter,
++                  rateLimiters,
+                   progress: chunkProgress ? chunkProgress.get(chunk.index) : undefined,
+                 });
+               },
+@@ -262,7 +267,7 @@
+           return downloadStream(sessionGot, resolved.probeEndpoint, handle, writePosition, {
+             progress: progress,
+             abortSignal: options?.abortSignal,
+-            rateLimiter: strategy.rateLimiter,
++            rateLimiters,
+             etag: probe.etag ?? undefined,
+             chunk: rangeChunk ?? undefined,
+             expectedRemainingBytes,
+@@ -378,7 +383,7 @@
+   options: {
+     progress?: { bytesReceived: number; bytesWritten: number };
+     abortSignal?: AbortSignal;
+-    rateLimiter?: RateLimiter;
++    rateLimiters?: RateLimiter[];
+     etag?: string;
+     chunk?: Chunk;
+     expectedRemainingBytes?: number;
+@@ -407,8 +412,8 @@
+         remaining -= buffer.length;
+       }
+ 
+-      if (options.rateLimiter) {
+-        await consumeTokens(options.rateLimiter, buffer.length, options.abortSignal);
++      for (const limiter of options.rateLimiters ?? []) {
++        await consumeTokens(limiter, buffer.length, options.abortSignal);
+       }
+ 
+       try {
+@@ -434,7 +439,7 @@
+   handle: FileHandle,
+   options: {
+     progress?: ChunkProgress;
+-    rateLimiter?: RateLimiter;
++    rateLimiters?: RateLimiter[];
+     abortSignal?: AbortSignal;
+   },
+ ): Promise<void> {
+@@ -448,7 +453,7 @@
+     expectedRemainingBytes,
+     etag: probe.etag,
+     progress: options.progress,
+-    rateLimiter: options.rateLimiter,
++    rateLimiters: options.rateLimiters,
+     abortSignal: options.abortSignal,
+   });
+ }
