@@ -3692,7 +3692,7 @@ index 0520c23..7eb4c0f 100644
    });
  }
 diff --git a/src/renderer/src/IPCDownloadAdapter.ts b/src/renderer/src/IPCDownloadAdapter.ts
-index b74a8a5..7e0843a 100644
+index b74a8a5..b97f77c 100644
 --- a/src/renderer/src/IPCDownloadAdapter.ts
 +++ b/src/renderer/src/IPCDownloadAdapter.ts
 @@ -1,8 +1,8 @@
@@ -3756,7 +3756,7 @@ index b74a8a5..7e0843a 100644
  
    constructor(api: IExtensionApi) {
      this.#api = api;
-@@ -251,18 +277,150 @@
+@@ -251,18 +277,155 @@
      log("debug", `registered protocol handler for scheme '${scheme}'`);
    }
  
@@ -3917,17 +3917,20 @@ index b74a8a5..7e0843a 100644
  
      this.#api.store.subscribe(() => {
        const { maxParallelDownloads: concurrency, maxBandwidth: bandwidth } =
-@@ -273,7 +431,8 @@
+@@ -273,8 +436,11 @@
        ) {
          this.#currentMaxParallelDownloads = concurrency;
          this.#currentMaxBandwidth = bandwidth;
 -        this.#syncDownloadSettings(concurrency, bandwidth);
 +        this.#effectiveConcurrency = Math.min(Math.max(1, concurrency), this.#effectiveConcurrency);
-+        this.#syncDownloadSettings(this.#effectiveConcurrency);
        }
++      // Advanced bandwidth fields are intentionally not mirrored into adapter fields.
++      // The config fingerprint makes this cheap while still applying those settings immediately.
++      this.#syncDownloadSettings(this.#effectiveConcurrency);
      });
  
-@@ -290,6 +449,10 @@
+     const files = state.persistent.downloads.files ?? {};
+@@ -290,6 +456,10 @@
            lastBytesReceived: 0,
            lastProgressDispatch: 0,
            startedEventEmitted: false,
@@ -3938,7 +3941,7 @@ index b74a8a5..7e0843a 100644
          });
          window.api.downloader.resume(checkpoint).catch((err) => {
            log("error", "failed to auto-resume download", { id, err });
-@@ -480,6 +643,7 @@
+@@ -480,6 +650,7 @@
          // Hash on a main-process worker_thread so a large file doesn't block the renderer.
          const { hash } = await window.api.hash.compute("md5", finalPath);
          this.#api.store.dispatch(setDownloadHash(downloadId, hash));
@@ -3946,7 +3949,7 @@ index b74a8a5..7e0843a 100644
        } catch (err) {
          log("warn", "failed to compute MD5 for download", { downloadId, err });
        }
-@@ -509,6 +673,37 @@
+@@ -509,6 +680,37 @@
      }
    }
  
@@ -3984,7 +3987,7 @@ index b74a8a5..7e0843a 100644
    async #handleStartDownload(
      rawUrls: string[],
      modInfo: ModInfo,
-@@ -534,6 +729,22 @@
+@@ -534,6 +736,22 @@
  
      const { state, dlPath, gameIds } = await this.#resolveDownloadTarget(modInfo);
  
@@ -4007,7 +4010,7 @@ index b74a8a5..7e0843a 100644
      // Check for an existing file using the caller-supplied name before queuing.
      // We can only do this when a name is provided; temp-named downloads are always new.
      if (fileName !== undefined && redownload !== "always") {
-@@ -605,9 +816,12 @@
+@@ -605,9 +823,12 @@
          collationId,
        });
  
@@ -4021,7 +4024,7 @@ index b74a8a5..7e0843a 100644
  
        this.#activeDownloads.set(downloadId, {
          callback,
-@@ -616,6 +830,11 @@
+@@ -616,6 +837,11 @@
          lastBytesReceived: 0,
          lastProgressDispatch: 0,
          startedEventEmitted: false,
@@ -4033,7 +4036,7 @@ index b74a8a5..7e0843a 100644
        });
        log("debug", "download queued", { downloadId, collationId });
  
-@@ -650,6 +869,7 @@
+@@ -650,6 +876,7 @@
        }
      } catch (err) {
        this.#resolvedMeta.delete(collationId);
@@ -4041,7 +4044,7 @@ index b74a8a5..7e0843a 100644
        callback?.(unknownToError(err));
      }
    }
-@@ -724,6 +944,10 @@
+@@ -724,6 +951,10 @@
          lastBytesReceived: size,
          lastProgressDispatch: 0,
          startedEventEmitted: true,
@@ -4052,7 +4055,7 @@ index b74a8a5..7e0843a 100644
        });
      } catch (err) {
        callback?.(unknownToError(err));
-@@ -834,6 +1058,7 @@
+@@ -834,6 +1065,7 @@
      download: IDownload,
      callback?: (err: Error | null, id?: string) => void,
      allowInstall?: boolean,
@@ -4060,7 +4063,7 @@ index b74a8a5..7e0843a 100644
    ): Promise<void> {
      // A concurrent resume-download for the same id would re-enter and issue a duplicate rm + start.
      if (this.#restoring.has(downloadId)) return;
-@@ -879,7 +1104,7 @@
+@@ -879,7 +1111,7 @@
        try {
          // Passing the existing downloadId makes main replace the previous attempt and start the
          // transfer from scratch under the same id.
@@ -4069,7 +4072,7 @@ index b74a8a5..7e0843a 100644
        } catch (err) {
          // The partial and checkpoint are already gone, so mark the record failed rather than
          // leaving it stuck in an active state the poll loop never tracks.
-@@ -895,17 +1120,56 @@
+@@ -895,17 +1127,56 @@
        // resume caller: the collection installer and mod-update flow pass false because they own the
        // install, while a manual resume leaves it undefined and defers to the automation setting.
        this.#activeDownloads.set(downloadId, {
@@ -4128,7 +4131,7 @@ index b74a8a5..7e0843a 100644
    async #pollLoop(interval: number): Promise<void> {
      for (;;) {
        try {
-@@ -925,6 +1189,7 @@
+@@ -925,6 +1196,7 @@
      const now = Date.now();
  
      let totalDeltaBytes = 0;
@@ -4136,7 +4139,7 @@ index b74a8a5..7e0843a 100644
      // Non-terminal progress updates are collected and dispatched as ONE batched store update per
      // poll tick instead of one per download. Each separate dispatch replaces persistent.downloads
      // and forces every subscriber to recompute; with many concurrent downloads (large collections)
-@@ -937,6 +1202,7 @@
+@@ -937,6 +1209,7 @@
  
        const delta = Math.max(0, state.bytesReceived - activeDownload.lastBytesReceived);
        totalDeltaBytes += delta;
@@ -4144,7 +4147,7 @@ index b74a8a5..7e0843a 100644
        activeDownload.lastBytesReceived = state.bytesReceived;
  
        const isTerminal =
-@@ -976,10 +1242,37 @@
+@@ -976,10 +1249,37 @@
  
        const err = rehydrateDownloadError(state);
        if (err !== null) log("warn", "download ended with error", { downloadId, err });
@@ -4182,7 +4185,7 @@ index b74a8a5..7e0843a 100644
          this.#emitAnalytics(downloadId, "completed");
          this.#completeDownload(downloadId, state, activeDownload).catch((err) => {
            log("error", "failed to finalize download", { downloadId, err });
-@@ -990,6 +1283,8 @@
+@@ -990,6 +1290,8 @@
          this.#api.store.dispatch(removeDownload(downloadId));
          activeDownload.callback?.(new UserCanceled(), downloadId);
        } else {
@@ -4191,7 +4194,7 @@ index b74a8a5..7e0843a 100644
          this.#emitAnalytics(downloadId, "failed", err ?? undefined);
          // Mark record as failed so the UI can show an error state.
          this.#api.store.dispatch(finishDownload(downloadId, "failed", err));
-@@ -1003,6 +1298,16 @@
+@@ -1003,6 +1305,16 @@
        batchDispatch(this.#api.store, progressActions);
      }
  
@@ -4208,7 +4211,7 @@ index b74a8a5..7e0843a 100644
      this.#speedAccumBytes += totalDeltaBytes;
  
      if (totalDeltaBytes > 0 && this.#lastSpeedDispatch === null) {
-@@ -1053,8 +1358,16 @@
+@@ -1053,8 +1365,16 @@
          this.#resolvedMeta.set(collationId, resolved.meta);
        }
  
