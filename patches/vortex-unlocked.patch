@@ -3413,3 +3413,398 @@ index 0520c23..86486d9 100644
    betterIpcMain.handle("download:configure", (_event, options) => {
      manager.configure({
        concurrency: options.concurrency !== undefined ? Number(options.concurrency) : undefined,
+diff --git a/src/renderer/src/IPCDownloadAdapter.ts b/src/renderer/src/IPCDownloadAdapter.ts
+index b74a8a5..afa6ac9 100644
+--- a/src/renderer/src/IPCDownloadAdapter.ts
++++ b/src/renderer/src/IPCDownloadAdapter.ts
+@@ -1,5 +1,5 @@
+ import { randomUUID } from "node:crypto";
+-import { access, copyFile, mkdir, rename, rm, stat } from "node:fs/promises";
++import { access, copyFile, link, mkdir, rename, rm, stat } from "node:fs/promises";
+ import * as path from "node:path";
+ 
+ import { unknownToError } from "@vortex/shared";
+@@ -147,8 +147,24 @@
+   lastBytesReceived: number;
+   lastProgressDispatch: number;
+   startedEventEmitted: boolean;
++  priority: number;
++  host?: string;
++  startedAt: number;
+ };
+ 
++type MirrorHealth = {
++  successes: number;
++  failures: number;
++  ewmaBytesPerSecond: number;
++  lastFailure?: number;
++};
++
++const CHECKPOINT_INTERVAL_MS = 5_000;
++const TUNE_INTERVAL_MS = 10_000;
++const HIGH_DISK_BACKLOG = 64 * 1024 * 1024;
++const LOW_DISK_BACKLOG = 8 * 1024 * 1024;
++const MIRROR_HEALTH_KEY = "vortex-unlocked:mirror-health-v1";
++
+ export class IPCDownloadAdapter {
+   readonly #api: IExtensionApi;
+   readonly #handlers: Record<string, ProtocolHandler> = {};
+@@ -158,7 +174,9 @@
+   // into download.modInfo once the downloadId is known. The nxm resolver returns
+   // nexus IDs (modId/fileId or collectionId/revisionId) here.
+   readonly #resolvedMeta = new Map<number, unknown>();
++  readonly #resolvedHost = new Map<number, string>();
+   readonly #activeDownloads = new Map<string, ActiveDownload>();
++  readonly #mirrorHealth = this.#loadMirrorHealth();
+   // Ids with a restore in flight. A restore un-pauses the record and clears its checkpoint before
+   // awaiting the fresh start, so without this guard a second resume-download for the same id would
+   // re-enter and issue a duplicate rm + start racing the first.
+@@ -168,6 +186,10 @@
+   #nextCollationId = 0;
+   #currentMaxParallelDownloads: number | undefined;
+   #currentMaxBandwidth: number | undefined;
++  #effectiveConcurrency = 1;
++  #lastCheckpointPersist = 0;
++  #lastConcurrencyTune = 0;
++  readonly #recentFailures: number[] = [];
+ 
+   constructor(api: IExtensionApi) {
+     this.#api = api;
+@@ -257,12 +279,112 @@
+     });
+   }
+ 
++  #loadMirrorHealth(): Record<string, MirrorHealth> {
++    try {
++      const raw = localStorage.getItem(MIRROR_HEALTH_KEY);
++      return raw === null ? {} : (JSON.parse(raw) as Record<string, MirrorHealth>);
++    } catch {
++      return {};
++    }
++  }
++
++  #saveMirrorHealth(): void {
++    try {
++      localStorage.setItem(MIRROR_HEALTH_KEY, JSON.stringify(this.#mirrorHealth));
++    } catch {
++      // Performance history is best-effort.
++    }
++  }
++
++  #rankMirrors(urls: string[]): string[] {
++    const now = Date.now();
++    const score = (raw: string) => {
++      try {
++        const health = this.#mirrorHealth[new URL(raw).host];
++        if (health === undefined) return 0;
++        const recentFailure =
++          health.lastFailure !== undefined && now - health.lastFailure < 60_000 ? 20 : 0;
++        return (
++          Math.log10(Math.max(1, health.ewmaBytesPerSecond)) +
++          health.successes * 0.25 -
++          health.failures * 1.5 -
++          recentFailure
++        );
++      } catch {
++        return -100;
++      }
++    };
++    return urls.toSorted((a, b) => score(b) - score(a));
++  }
++
++  #recordMirror(host: string | undefined, success: boolean, bytes = 0, elapsedMs = 0): void {
++    if (host === undefined) return;
++    const health = this.#mirrorHealth[host] ?? {
++      successes: 0,
++      failures: 0,
++      ewmaBytesPerSecond: 0,
++    };
++    if (success) {
++      health.successes += 1;
++      if (bytes > 0 && elapsedMs > 0) {
++        const speed = (bytes * 1000) / elapsedMs;
++        health.ewmaBytesPerSecond =
++          health.ewmaBytesPerSecond === 0 ? speed : health.ewmaBytesPerSecond * 0.7 + speed * 0.3;
++      }
++    } else {
++      health.failures += 1;
++      health.lastFailure = Date.now();
++    }
++    this.#mirrorHealth[host] = health;
++    this.#saveMirrorHealth();
++  }
++
++  #priorityFor(modInfo: ModInfo): number {
++    const info = modInfo as ModInfo & {
++      startedAsUpdate?: boolean;
++      nexus?: { parentCollectionId?: unknown; ids?: { collectionId?: unknown } };
++    };
++    if (info.nexus?.parentCollectionId !== undefined) return 30;
++    if (info.nexus?.ids?.collectionId !== undefined) return 20;
++    if (info.startedAsUpdate === true) return 10;
++    return 0;
++  }
++
++  #tuneConcurrency(now: number, diskBacklog: number): void {
++    if (now - this.#lastConcurrencyTune < TUNE_INTERVAL_MS) return;
++    this.#lastConcurrencyTune = now;
++    while (this.#recentFailures.length > 0 && now - this.#recentFailures[0] > 60_000) {
++      this.#recentFailures.shift();
++    }
++    const max = Math.max(1, this.#currentMaxParallelDownloads ?? 1);
++    let next = Math.min(max, Math.max(1, this.#effectiveConcurrency));
++    if (diskBacklog >= HIGH_DISK_BACKLOG || this.#recentFailures.length >= 2) {
++      next = Math.max(1, next - 1);
++    } else if (
++      diskBacklog <= LOW_DISK_BACKLOG &&
++      this.#recentFailures.length === 0 &&
++      this.#activeDownloads.size > next
++    ) {
++      next = Math.min(max, next + 1);
++    }
++    if (next !== this.#effectiveConcurrency) {
++      log("info", "adaptive download concurrency changed", {
++        from: this.#effectiveConcurrency,
++        to: next,
++        diskBacklog,
++      });
++      this.#effectiveConcurrency = next;
++      this.#syncDownloadSettings(next, this.#currentMaxBandwidth ?? 0);
++    }
++  }
++
+   hydrateFromState(): void {
+     const state = this.#api.getState();
+     const { maxParallelDownloads, maxBandwidth } = state.settings.downloads;
+     this.#currentMaxParallelDownloads = maxParallelDownloads;
+     this.#currentMaxBandwidth = maxBandwidth;
+-    this.#syncDownloadSettings(maxParallelDownloads, maxBandwidth);
++    this.#effectiveConcurrency = Math.max(1, maxParallelDownloads);
++    this.#syncDownloadSettings(this.#effectiveConcurrency, maxBandwidth);
+ 
+     this.#api.store.subscribe(() => {
+       const { maxParallelDownloads: concurrency, maxBandwidth: bandwidth } =
+@@ -273,7 +395,8 @@
+       ) {
+         this.#currentMaxParallelDownloads = concurrency;
+         this.#currentMaxBandwidth = bandwidth;
+-        this.#syncDownloadSettings(concurrency, bandwidth);
++        this.#effectiveConcurrency = Math.min(Math.max(1, concurrency), this.#effectiveConcurrency);
++        this.#syncDownloadSettings(this.#effectiveConcurrency, bandwidth);
+       }
+     });
+ 
+@@ -290,6 +413,8 @@
+           lastBytesReceived: 0,
+           lastProgressDispatch: 0,
+           startedEventEmitted: false,
++          priority: 0,
++          startedAt: Date.now(),
+         });
+         window.api.downloader.resume(checkpoint).catch((err) => {
+           log("error", "failed to auto-resume download", { id, err });
+@@ -480,6 +605,7 @@
+         // Hash on a main-process worker_thread so a large file doesn't block the renderer.
+         const { hash } = await window.api.hash.compute("md5", finalPath);
+         this.#api.store.dispatch(setDownloadHash(downloadId, hash));
++        await this.#hardlinkDuplicate(downloadId, finalPath, hash, wireState.size ?? 0);
+       } catch (err) {
+         log("warn", "failed to compute MD5 for download", { downloadId, err });
+       }
+@@ -509,6 +635,37 @@
+     }
+   }
+ 
++  async #hardlinkDuplicate(downloadId: string, finalPath: string, hash: string, size: number) {
++    const state = this.#api.getState();
++    const match = Object.entries(state.persistent.downloads.files).find(([id, candidate]) =>
++      id !== downloadId &&
++      candidate.state === "finished" &&
++      candidate.localPath !== undefined &&
++      candidate.fileMD5?.toLowerCase() === hash.toLowerCase() &&
++      (size <= 0 || candidate.size === size),
++    );
++    if (match === undefined) return;
++    const [existingId, existing] = match;
++    const gameId = toInternalGameId(this.#api, existing.game?.[0] ?? activeGameId(state));
++    const existingPath = path.join(downloadPathForGame(state, gameId), existing.localPath!);
++    if (existingPath === finalPath) return;
++    const backup = `${finalPath}.dedupe-${randomUUID()}`;
++    try {
++      await access(existingPath);
++      await rename(finalPath, backup);
++      try {
++        await link(existingPath, finalPath);
++        await rm(backup, { force: true });
++        log("info", "deduplicated archive using hardlink", { downloadId, existingId, hash });
++      } catch (err) {
++        await rename(backup, finalPath).catch(() => undefined);
++        log("debug", "archive hardlink dedupe unavailable", { downloadId, err });
++      }
++    } catch {
++      // Existing record no longer has a backing file.
++    }
++  }
++
+   async #handleStartDownload(
+     rawUrls: string[],
+     modInfo: ModInfo,
+@@ -534,6 +691,22 @@
+ 
+     const { state, dlPath, gameIds } = await this.#resolveDownloadTarget(modInfo);
+ 
++    const expectedHash = (modInfo as ModInfo & { fileMD5?: string }).fileMD5?.toLowerCase();
++    if (expectedHash !== undefined && redownload !== "always") {
++      const existingId = Object.keys(state.persistent.downloads.files).find((id) => {
++        const existing = state.persistent.downloads.files[id];
++        return (
++          existing.state === "finished" &&
++          existing.localPath !== undefined &&
++          existing.fileMD5?.toLowerCase() === expectedHash
++        );
++      });
++      if (existingId !== undefined) {
++        callback?.(new AlreadyDownloaded(fileName ?? expectedHash, existingId));
++        return;
++      }
++    }
++
+     // Check for an existing file using the caller-supplied name before queuing.
+     // We can only do this when a name is provided; temp-named downloads are always new.
+     if (fileName !== undefined && redownload !== "always") {
+@@ -605,9 +778,12 @@
+         collationId,
+       });
+ 
+-      const { downloadId } = await window.api.downloader.start(dest, collationId);
++      const priority = this.#priorityFor(modInfo);
++      const { downloadId } = await window.api.downloader.start(dest, collationId, undefined, priority);
+ 
+       const allowInstall = normalizeAllowInstall(options?.allowInstall);
++      const host = this.#resolvedHost.get(collationId);
++      this.#resolvedHost.delete(collationId);
+ 
+       this.#activeDownloads.set(downloadId, {
+         callback,
+@@ -616,6 +792,9 @@
+         lastBytesReceived: 0,
+         lastProgressDispatch: 0,
+         startedEventEmitted: false,
++        priority,
++        host,
++        startedAt: Date.now(),
+       });
+       log("debug", "download queued", { downloadId, collationId });
+ 
+@@ -650,6 +829,7 @@
+       }
+     } catch (err) {
+       this.#resolvedMeta.delete(collationId);
++      this.#resolvedHost.delete(collationId);
+       callback?.(unknownToError(err));
+     }
+   }
+@@ -724,6 +904,8 @@
+         lastBytesReceived: size,
+         lastProgressDispatch: 0,
+         startedEventEmitted: true,
++        priority: 0,
++        startedAt: Date.now(),
+       });
+     } catch (err) {
+       callback?.(unknownToError(err));
+@@ -879,7 +1061,7 @@
+       try {
+         // Passing the existing downloadId makes main replace the previous attempt and start the
+         // transfer from scratch under the same id.
+-        await window.api.downloader.start(dest, collationId, downloadId);
++        await window.api.downloader.start(dest, collationId, downloadId, 0);
+       } catch (err) {
+         // The partial and checkpoint are already gone, so mark the record failed rather than
+         // leaving it stuck in an active state the poll loop never tracks.
+@@ -900,7 +1082,11 @@
+         lastBytesReceived: 0,
+         lastProgressDispatch: 0,
+         startedEventEmitted: false,
++        priority: 0,
++        host: this.#resolvedHost.get(collationId),
++        startedAt: Date.now(),
+       });
++      this.#resolvedHost.delete(collationId);
+     } finally {
+       this.#restoring.delete(downloadId);
+     }
+@@ -925,6 +1111,7 @@
+     const now = Date.now();
+ 
+     let totalDeltaBytes = 0;
++    let diskBacklog = 0;
+     // Non-terminal progress updates are collected and dispatched as ONE batched store update per
+     // poll tick instead of one per download. Each separate dispatch replaces persistent.downloads
+     // and forces every subscriber to recompute; with many concurrent downloads (large collections)
+@@ -937,6 +1124,7 @@
+ 
+       const delta = Math.max(0, state.bytesReceived - activeDownload.lastBytesReceived);
+       totalDeltaBytes += delta;
++      diskBacklog += Math.max(0, state.bytesReceived - state.bytesWritten);
+       activeDownload.lastBytesReceived = state.bytesReceived;
+ 
+       const isTerminal =
+@@ -980,6 +1168,12 @@
+       this.#api.store.dispatch(clearDownloadCheckpoint(downloadId));
+ 
+       if (state.status === "completed") {
++        this.#recordMirror(
++          activeDownload.host,
++          true,
++          state.bytesReceived,
++          Math.max(1, now - activeDownload.startedAt),
++        );
+         this.#emitAnalytics(downloadId, "completed");
+         this.#completeDownload(downloadId, state, activeDownload).catch((err) => {
+           log("error", "failed to finalize download", { downloadId, err });
+@@ -990,6 +1184,8 @@
+         this.#api.store.dispatch(removeDownload(downloadId));
+         activeDownload.callback?.(new UserCanceled(), downloadId);
+       } else {
++        this.#recordMirror(activeDownload.host, false);
++        this.#recentFailures.push(now);
+         this.#emitAnalytics(downloadId, "failed", err ?? undefined);
+         // Mark record as failed so the UI can show an error state.
+         this.#api.store.dispatch(finishDownload(downloadId, "failed", err));
+@@ -1003,6 +1199,16 @@
+       batchDispatch(this.#api.store, progressActions);
+     }
+ 
++    if (now - this.#lastCheckpointPersist >= CHECKPOINT_INTERVAL_MS) {
++      this.#lastCheckpointPersist = now;
++      const checkpoints = await window.api.downloader.getCheckpoints(downloadIds);
++      const actions = Object.entries(checkpoints).map(([id, checkpoint]) =>
++        setDownloadCheckpoint(id, checkpoint),
++      );
++      if (actions.length > 0) batchDispatch(this.#api.store, actions);
++    }
++
++    this.#tuneConcurrency(now, diskBacklog);
+     this.#speedAccumBytes += totalDeltaBytes;
+ 
+     if (totalDeltaBytes > 0 && this.#lastSpeedDispatch === null) {
+@@ -1053,8 +1259,16 @@
+         this.#resolvedMeta.set(collationId, resolved.meta);
+       }
+ 
+-      log("debug", "download resolved", { resolvedUrl: resolved.urls[0] });
+-      return { probeEndpoint: { url: resolved.urls[0] } };
++      const ranked = this.#rankMirrors(resolved.urls);
++      const selected = ranked[0];
++      if (selected === undefined) throw new Error("Protocol handler returned no download URLs");
++      try {
++        this.#resolvedHost.set(collationId, new URL(selected).host);
++      } catch {
++        this.#resolvedHost.delete(collationId);
++      }
++      log("debug", "download resolved", { resolvedUrl: selected, mirrorCount: ranked.length });
++      return { probeEndpoint: { url: selected } };
+     }
+ 
+     if (scheme === "http" || scheme === "https") {
