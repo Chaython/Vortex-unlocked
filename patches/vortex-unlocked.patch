@@ -4766,15 +4766,15 @@ index 0d78613..9f6a743 100644
    const file = decodeUID(candidate.fileUID);
  
 diff --git a/src/renderer/src/extensions/health_check/components/file_requirement/ListingRow.tsx b/src/renderer/src/extensions/health_check/components/file_requirement/ListingRow.tsx
-index 091267a..943dc47 100644
+index 091267a..b6d4484 100644
 --- a/src/renderer/src/extensions/health_check/components/file_requirement/ListingRow.tsx
 +++ b/src/renderer/src/extensions/health_check/components/file_requirement/ListingRow.tsx
-@@ -1,12 +1,11 @@
+@@ -1,12 +1,10 @@
  import { mdiCallSplit, mdiCheck, mdiMonitorArrowDownVariant, mdiSwapHorizontal } from "@mdi/js";
 -import React, { useState } from "react";
 +import React from "react";
  import { useTranslation } from "react-i18next";
- import { useSelector } from "react-redux";
+-import { useSelector } from "react-redux";
  
  import {
    downloadFileRequirement,
@@ -4783,7 +4783,7 @@ index 091267a..943dc47 100644
    switchActiveVersions,
  } from "@/extensions/health_check/utils/fileRequirements/fileRequirementActions";
  import {
-@@ -20,24 +19,19 @@
+@@ -20,24 +18,19 @@
  import { sharedRequirementState } from "@/extensions/health_check/utils/shared/tracking";
  import { decodeUID } from "@/extensions/nexus_integration/util/UIDs";
  import { Button } from "@/ui/components/button/Button";
@@ -4808,7 +4808,7 @@ index 091267a..943dc47 100644
    const { givenFeedback, markFeedback } = useFileRequirementFeedback(api, report.sourceFileUID);
  
    const {
-@@ -107,11 +101,6 @@
+@@ -107,11 +100,6 @@
        });
      }
  
@@ -4820,7 +4820,7 @@ index 091267a..943dc47 100644
      runQuickInstall();
    };
  
-@@ -124,7 +113,6 @@
+@@ -124,7 +112,6 @@
                appearance="moderate"
                brand="neutral"
                leftIconPath={mdiMonitorArrowDownVariant}
@@ -4828,7 +4828,7 @@ index 091267a..943dc47 100644
                size="sm"
                onClick={doQuickInstall}
              >
-@@ -207,28 +195,6 @@
+@@ -207,28 +194,6 @@
          title={title}
          onOpen={onOpen}
        />
@@ -4858,7 +4858,7 @@ index 091267a..943dc47 100644
    );
  };
 diff --git a/src/renderer/src/extensions/health_check/components/file_requirement/DetailView.tsx b/src/renderer/src/extensions/health_check/components/file_requirement/DetailView.tsx
-index d70e710..14e8b19 100644
+index d70e710..d608ba0 100644
 --- a/src/renderer/src/extensions/health_check/components/file_requirement/DetailView.tsx
 +++ b/src/renderer/src/extensions/health_check/components/file_requirement/DetailView.tsx
 @@ -15,7 +15,6 @@
@@ -4869,7 +4869,15 @@ index d70e710..14e8b19 100644
  import { setFileRequirementHidden } from "../../actions/persistent";
  import { useIssue, useIssueTracking } from "../../hooks/HealthCheckTracking.context";
  import { useFileRequirementFeedback } from "../../hooks/useFileRequirementFeedback";
-@@ -78,8 +77,6 @@
+@@ -36,7 +35,6 @@
+     trackDetailViewed,
+     trackOneClickInstallClicked,
+     trackInstallAllInGroupClicked,
+-    trackInstallViaModPageClicked,
+     trackViewModPageClicked,
+     trackEnableClicked,
+     trackEnableThisVersionClicked,
+@@ -78,8 +76,6 @@
      onBack();
    };
  
@@ -4878,7 +4886,7 @@ index d70e710..14e8b19 100644
    // Feedback is keyed per source file (see useFileRequirementFeedback); EntryActions
    // emits the analytics, this only records that feedback was given.
    const { givenFeedback, markFeedback } = useFileRequirementFeedback(api, report.sourceFileUID);
-@@ -138,7 +135,7 @@
+@@ -138,7 +134,7 @@
              api={api}
              ctx={{
                api,
@@ -4887,7 +4895,15 @@ index d70e710..14e8b19 100644
                identity,
                requestDownload: (candidate, enabledFile) =>
                  downloadFileRequirement(api, candidate, identity, enabledFile),
-@@ -163,17 +160,9 @@
+@@ -156,24 +152,16 @@
+                   mod_count: candidates.length,
+                   requirement_state: requirementState,
+                 }),
+-              onOpenModPage: (candidate, resolution) => {
++              onOpenModPage: (candidate) => {
+                 const modPageProps = {
+                   mod_id: decodeUID(candidate.modUID)?.id ?? 0,
+                   mod_name: candidate.modName,
                    mod_version: candidate.version,
                  };
  
