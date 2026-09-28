@@ -4508,3 +4508,113 @@ index e328a2c..1e1f63a 100644
    path: string;
    showDropzone: boolean;
    showGraph: boolean;
+diff --git a/src/renderer/src/extensions/collections/util/InstallDriver.ts b/src/renderer/src/extensions/collections/util/InstallDriver.ts
+index b4e2e2a..3753dc9 100644
+--- a/src/renderer/src/extensions/collections/util/InstallDriver.ts
++++ b/src/renderer/src/extensions/collections/util/InstallDriver.ts
+@@ -923,6 +923,52 @@
+       }
+       return accum;
+     }, []);
++
++    // Vortex Unlocked preflight: tell the user what the collection will actually need
++    // before the dependency engine starts. fileSize is available on modern collection
++    // references; unknown sizes stay out of the estimate rather than being guessed.
++    const cachedHashes = new Set(
++      Object.values(state.persistent.downloads.files)
++        .filter((download) => download.state === "finished" && download.fileMD5 !== undefined)
++        .map((download) => download.fileMD5.toLowerCase()),
++    );
++    const cached = dependencies.filter(
++      (rule) =>
++        rule.reference.fileMD5 !== undefined &&
++        cachedHashes.has(rule.reference.fileMD5.toLowerCase()),
++    ).length;
++    const knownBytes = dependencies.reduce(
++      (total, rule) => total + Math.max(0, Number(rule.reference.fileSize ?? 0)),
++      0,
++    );
++    const formatBytes = (bytes: number) => {
++      if (bytes <= 0) return "unknown size";
++      const units = ["B", "KiB", "MiB", "GiB", "TiB"];
++      let value = bytes;
++      let idx = 0;
++      while (value >= 1024 && idx < units.length - 1) {
++        value /= 1024;
++        idx += 1;
++      }
++      return `${value.toFixed(value >= 10 || idx === 0 ? 0 : 1)} ${units[idx]}`;
++    };
++    this.mApi.sendNotification({
++      id: `collection-preflight-${collection.id}`,
++      type: "info",
++      title: "Collection preflight",
++      message:
++        `${dependencies.length} downloads needed, ${cached} already cached, ` +
++        `${required.length - dependencies.length} already installed; ` +
++        `${formatBytes(knownBytes)} known download size.`,
++      displayMS: 8000,
++      actions: [
++        {
++          title: "Show",
++          action: () => this.mApi.events.emit("view-collection", collection.id),
++        },
++      ],
++    });
++
+     this.setDependentMods(dependencies);
+     // log('debug', 'dependent mods', JSON.stringify(dependencies));
+ 
+@@ -1095,12 +1141,51 @@
+     // completed = every required member installed; failed = finished with required failures
+     // (partial) or force-resolved by the stall watchdog. Both reach here via the review step; the
+     // state comes from the session SSOT while the collection is still set (before teardown below).
++    const failedRequired = getFailedRequiredMods(this.mApi.getState());
+     const outcome: CollectionInstallOutcome =
+       this.isInstallComplete(true) &&
+-      getFailedRequiredMods(this.mApi.getState()).length === 0 &&
++      failedRequired.length === 0 &&
+       !isActiveSessionStalled(this.mApi.getState())
+         ? "completed"
+         : "failed";
++
++    // Keep failed members recoverable without making the user restart the entire
++    // collection. The dependency engine reconstructs reality and skips everything
++    // already installed/downloaded, so this retries only what is still unresolved.
++    if (
++      outcome === "failed" &&
++      failedRequired.length > 0 &&
++      this.mProfile?.id !== undefined &&
++      this.mCollection !== undefined
++    ) {
++      const profileId = this.mProfile.id;
++      const gameId = this.mGameId;
++      const collectionId = this.mCollection.id;
++      this.mApi.sendNotification({
++        id: `collection-retry-failed-${collectionId}`,
++        type: "warning",
++        title: "Collection has failed required mods",
++        message: `${failedRequired.length} required mod(s) failed. Retry only unresolved members?`,
++        actions: [
++          {
++            title: "Retry failed",
++            action: () =>
++              this.mApi.events.emit(
++                "install-dependencies",
++                profileId,
++                gameId,
++                [collectionId],
++                true,
++              ),
++          },
++          {
++            title: "Show",
++            action: () => this.mApi.events.emit("view-collection", collectionId),
++          },
++        ],
++      });
++    }
++
+     this.completeInstallationTracking(outcome);
+     this.mCollection = undefined;
+     this.setDependentMods([]);
