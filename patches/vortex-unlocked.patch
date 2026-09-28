@@ -4926,3 +4926,73 @@ index d70e710..d608ba0 100644
                },
                onEnable: (correctFile, enabledFile, resolution) => {
                  const resolutionProps = {
+diff --git a/src/renderer/src/extensions/health_check/utils/fileRequirements/fileRequirementActions.test.ts b/src/renderer/src/extensions/health_check/utils/fileRequirements/fileRequirementActions.test.ts
+index 3817b2f..bc6dd7c 100644
+--- a/src/renderer/src/extensions/health_check/utils/fileRequirements/fileRequirementActions.test.ts
++++ b/src/renderer/src/extensions/health_check/utils/fileRequirements/fileRequirementActions.test.ts
+@@ -3,7 +3,6 @@
+ // The action layer is tested against mocked boundaries: the store selectors, the
+ // enable/disable action and the download events. What matters here is which mods end up
+ // enabled and disabled, so `setModsEnabled` is the assertion surface.
+-vi.mock("@/extensions/nexus_integration/selectors", () => ({ shouldShowPremiumAd: vi.fn() }));
+ vi.mock("@/extensions/nexus_integration/util", () => ({ nexusGames: vi.fn(() => []) }));
+ vi.mock("@/extensions/nexus_integration/util/convertGameId", () => ({
+   convertGameIdReverse: vi.fn(() => "skyrimse"),
+@@ -22,19 +21,16 @@
+ }));
+ 
+ import { knownGames } from "@/extensions/gamemode_management/selectors";
+-import { shouldShowPremiumAd } from "@/extensions/nexus_integration/selectors";
+ import { nexusGames } from "@/extensions/nexus_integration/util";
+ import { setModsEnabled } from "@/extensions/profile_management/actions/profiles";
+ import { activeProfile } from "@/extensions/profile_management/selectors";
+ import type { IExtensionApi } from "@/types/IExtensionContext";
+-import opn from "@/util/opn";
+ 
+ import { trackedInstall } from "../shared/installTracking";
+ import { downloadFileRequirement, installDownloadedFile } from "./fileRequirementActions";
+ import type { IDownloadedFile, IInstalledFile } from "./installedFiles";
+ import type { IFileRequirementCandidate } from "./mapRequirementsReport";
+ 
+-const mockPremiumAd = vi.mocked(shouldShowPremiumAd);
+ const mockActiveProfile = vi.mocked(activeProfile);
+ const mockSetModsEnabled = vi.mocked(setModsEnabled);
+ const mockTrackedInstall = vi.mocked(trackedInstall);
+@@ -105,7 +101,6 @@
+ 
+ beforeEach(() => {
+   vi.clearAllMocks();
+-  mockPremiumAd.mockReturnValue(false);
+   mockSetModsEnabled.mockReturnValue(Promise.resolve() as never);
+   mockTrackedInstall.mockImplementation((_api, _identity, run) => run());
+   vi.mocked(nexusGames).mockReturnValue([{ id: NEXUS_GAME_ID, domain_name: "skyrimse" }] as never);
+@@ -162,14 +157,10 @@
+     ]);
+   });
+ 
+-  test("routes free users to the file page instead of downloading", async () => {
+-    mockPremiumAd.mockReturnValue(true);
+-
+-    expect(await downloadFileRequirement(makeApi(), CANDIDATE)).toBe(false);
+-
+-    expect(opn).toHaveBeenCalledOnce();
+-    expect(mockTrackedInstall).not.toHaveBeenCalled();
+-    expect(mockSetModsEnabled).not.toHaveBeenCalled();
++  test("always uses the in-app download/install path", async () => {
++    expect(await downloadFileRequirement(makeApi(), CANDIDATE)).toBe(true);
++    expect(mockTrackedInstall).toHaveBeenCalledOnce();
++    expect(mockSetModsEnabled).toHaveBeenCalled();
+   });
+ 
+   test("reports a failed install rather than throwing", async () => {
+@@ -195,9 +186,7 @@
+     ]);
+   });
+ 
+-  test("installs a downloaded file for free users too", async () => {
+-    mockPremiumAd.mockReturnValue(true);
+-
++  test("installs a downloaded file without membership gating", async () => {
+     expect(await installDownloadedFile(makeApi(), DOWNLOADED)).toBe(true);
+   });
+ });
