@@ -70,6 +70,15 @@ jobs:
           VORTEX_ELECTRON_REBUILD: "defer"
         run: pnpm install --frozen-lockfile
 
+      - name: Focused Vortex Unlocked tests
+        shell: pwsh
+        working-directory: vortex
+        run: |
+          pnpm -F @vortex/renderer exec vitest run src/extensions/health_check/utils/fileRequirements/fileRequirementActions.test.ts
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          pnpm -F @vortex/main exec vitest run --config ./vitest.integration.config.ts src/downloading/manager.test.integration.ts
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+
       - name: Build, lint, and typecheck workspace
         shell: pwsh
         working-directory: vortex
