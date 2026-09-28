@@ -1815,7 +1815,7 @@ diff --git a/src/renderer/src/extensions/nexus_integration/eventHandlers.ts b/sr
 index a8e16fc..ad06d00 100644
 --- a/src/renderer/src/extensions/nexus_integration/eventHandlers.ts
 +++ b/src/renderer/src/extensions/nexus_integration/eventHandlers.ts
-@@ -55,10 +55,10 @@ import type { IModListItem } from "../news_dashlet/types";
+@@ -55,9 +55,9 @@ import type { IModListItem } from "../news_dashlet/types";
  import { setUserInfo } from "./actions/persistent";
  import { NEXUS_BASE_URL, NEXUS_GAMES_URL } from "./constants";
 -import { ensureFreshMembership, refreshMembership } from "./membership";
