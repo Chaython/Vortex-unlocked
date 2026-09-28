@@ -3414,21 +3414,27 @@ index 0520c23..86486d9 100644
      manager.configure({
        concurrency: options.concurrency !== undefined ? Number(options.concurrency) : undefined,
 diff --git a/src/renderer/src/IPCDownloadAdapter.ts b/src/renderer/src/IPCDownloadAdapter.ts
-index b74a8a5..afa6ac9 100644
+index b74a8a5..58390f1 100644
 --- a/src/renderer/src/IPCDownloadAdapter.ts
 +++ b/src/renderer/src/IPCDownloadAdapter.ts
-@@ -1,5 +1,5 @@
+@@ -1,8 +1,8 @@
  import { randomUUID } from "node:crypto";
 -import { access, copyFile, mkdir, rename, rm, stat } from "node:fs/promises";
 +import { access, copyFile, link, mkdir, rename, rm, stat } from "node:fs/promises";
  import * as path from "node:path";
  
- import { unknownToError } from "@vortex/shared";
-@@ -147,8 +147,24 @@
+-import { unknownToError } from "@vortex/shared";
++import { parseError, unknownToError } from "@vortex/shared";
+ import {
+   AlreadyDownloaded,
+   deserializeVortexError,
+@@ -147,8 +147,27 @@
    lastBytesReceived: number;
    lastProgressDispatch: number;
    startedEventEmitted: boolean;
 +  priority: number;
++  retryCount: number;
++  retryScheduled: boolean;
 +  host?: string;
 +  startedAt: number;
  };
@@ -3441,6 +3447,7 @@ index b74a8a5..afa6ac9 100644
 +};
 +
 +const CHECKPOINT_INTERVAL_MS = 5_000;
++const MAX_AUTO_RETRIES = 2;
 +const TUNE_INTERVAL_MS = 10_000;
 +const HIGH_DISK_BACKLOG = 64 * 1024 * 1024;
 +const LOW_DISK_BACKLOG = 8 * 1024 * 1024;
@@ -3449,7 +3456,7 @@ index b74a8a5..afa6ac9 100644
  export class IPCDownloadAdapter {
    readonly #api: IExtensionApi;
    readonly #handlers: Record<string, ProtocolHandler> = {};
-@@ -158,7 +174,9 @@
+@@ -158,7 +177,9 @@
    // into download.modInfo once the downloadId is known. The nxm resolver returns
    // nexus IDs (modId/fileId or collectionId/revisionId) here.
    readonly #resolvedMeta = new Map<number, unknown>();
@@ -3459,7 +3466,7 @@ index b74a8a5..afa6ac9 100644
    // Ids with a restore in flight. A restore un-pauses the record and clears its checkpoint before
    // awaiting the fresh start, so without this guard a second resume-download for the same id would
    // re-enter and issue a duplicate rm + start racing the first.
-@@ -168,6 +186,10 @@
+@@ -168,6 +189,10 @@
    #nextCollationId = 0;
    #currentMaxParallelDownloads: number | undefined;
    #currentMaxBandwidth: number | undefined;
@@ -3470,7 +3477,7 @@ index b74a8a5..afa6ac9 100644
  
    constructor(api: IExtensionApi) {
      this.#api = api;
-@@ -257,12 +279,112 @@
+@@ -257,12 +282,119 @@
      });
    }
  
@@ -3545,6 +3552,13 @@ index b74a8a5..afa6ac9 100644
 +    return 0;
 +  }
 +
++  #isRetryable(err: Error | null): boolean {
++    if (err === null) return false;
++    const parsed = parseError(err);
++    if (parsed.isTransient) return true;
++    return parsed.data.kind === "http:generic" || parsed.data.kind === "download:resolver-error";
++  }
++
 +  #tuneConcurrency(now: number, diskBacklog: number): void {
 +    if (now - this.#lastConcurrencyTune < TUNE_INTERVAL_MS) return;
 +    this.#lastConcurrencyTune = now;
@@ -3584,7 +3598,7 @@ index b74a8a5..afa6ac9 100644
  
      this.#api.store.subscribe(() => {
        const { maxParallelDownloads: concurrency, maxBandwidth: bandwidth } =
-@@ -273,7 +395,8 @@
+@@ -273,7 +405,8 @@
        ) {
          this.#currentMaxParallelDownloads = concurrency;
          this.#currentMaxBandwidth = bandwidth;
@@ -3594,16 +3608,18 @@ index b74a8a5..afa6ac9 100644
        }
      });
  
-@@ -290,6 +413,8 @@
+@@ -290,6 +423,10 @@
            lastBytesReceived: 0,
            lastProgressDispatch: 0,
            startedEventEmitted: false,
 +          priority: 0,
++          retryCount: 0,
++          retryScheduled: false,
 +          startedAt: Date.now(),
          });
          window.api.downloader.resume(checkpoint).catch((err) => {
            log("error", "failed to auto-resume download", { id, err });
-@@ -480,6 +605,7 @@
+@@ -480,6 +617,7 @@
          // Hash on a main-process worker_thread so a large file doesn't block the renderer.
          const { hash } = await window.api.hash.compute("md5", finalPath);
          this.#api.store.dispatch(setDownloadHash(downloadId, hash));
@@ -3611,7 +3627,7 @@ index b74a8a5..afa6ac9 100644
        } catch (err) {
          log("warn", "failed to compute MD5 for download", { downloadId, err });
        }
-@@ -509,6 +635,37 @@
+@@ -509,6 +647,37 @@
      }
    }
  
@@ -3649,7 +3665,7 @@ index b74a8a5..afa6ac9 100644
    async #handleStartDownload(
      rawUrls: string[],
      modInfo: ModInfo,
-@@ -534,6 +691,22 @@
+@@ -534,6 +703,22 @@
  
      const { state, dlPath, gameIds } = await this.#resolveDownloadTarget(modInfo);
  
@@ -3672,7 +3688,7 @@ index b74a8a5..afa6ac9 100644
      // Check for an existing file using the caller-supplied name before queuing.
      // We can only do this when a name is provided; temp-named downloads are always new.
      if (fileName !== undefined && redownload !== "always") {
-@@ -605,9 +778,12 @@
+@@ -605,9 +790,12 @@
          collationId,
        });
  
@@ -3686,17 +3702,19 @@ index b74a8a5..afa6ac9 100644
  
        this.#activeDownloads.set(downloadId, {
          callback,
-@@ -616,6 +792,9 @@
+@@ -616,6 +804,11 @@
          lastBytesReceived: 0,
          lastProgressDispatch: 0,
          startedEventEmitted: false,
 +        priority,
++        retryCount: 0,
++        retryScheduled: false,
 +        host,
 +        startedAt: Date.now(),
        });
        log("debug", "download queued", { downloadId, collationId });
  
-@@ -650,6 +829,7 @@
+@@ -650,6 +843,7 @@
        }
      } catch (err) {
        this.#resolvedMeta.delete(collationId);
@@ -3704,29 +3722,49 @@ index b74a8a5..afa6ac9 100644
        callback?.(unknownToError(err));
      }
    }
-@@ -724,6 +904,8 @@
+@@ -724,6 +918,10 @@
          lastBytesReceived: size,
          lastProgressDispatch: 0,
          startedEventEmitted: true,
 +        priority: 0,
++        retryCount: 0,
++        retryScheduled: false,
 +        startedAt: Date.now(),
        });
      } catch (err) {
        callback?.(unknownToError(err));
-@@ -879,7 +1061,7 @@
+@@ -834,6 +1032,7 @@
+     download: IDownload,
+     callback?: (err: Error | null, id?: string) => void,
+     allowInstall?: boolean,
++    previous?: ActiveDownload,
+   ): Promise<void> {
+     // A concurrent resume-download for the same id would re-enter and issue a duplicate rm + start.
+     if (this.#restoring.has(downloadId)) return;
+@@ -879,7 +1078,7 @@
        try {
          // Passing the existing downloadId makes main replace the previous attempt and start the
          // transfer from scratch under the same id.
 -        await window.api.downloader.start(dest, collationId, downloadId);
-+        await window.api.downloader.start(dest, collationId, downloadId, 0);
++        await window.api.downloader.start(dest, collationId, downloadId, previous?.priority ?? 0);
        } catch (err) {
          // The partial and checkpoint are already gone, so mark the record failed rather than
          // leaving it stuck in an active state the poll loop never tracks.
-@@ -900,7 +1082,11 @@
+@@ -895,17 +1094,56 @@
+       // resume caller: the collection installer and mod-update flow pass false because they own the
+       // install, while a manual resume leaves it undefined and defers to the automation setting.
+       this.#activeDownloads.set(downloadId, {
+-        callback,
+-        allowInstall,
++        callback: previous?.callback ?? callback,
++        fileNameHint: previous?.fileNameHint,
++        allowInstall: previous?.allowInstall ?? allowInstall,
          lastBytesReceived: 0,
          lastProgressDispatch: 0,
          startedEventEmitted: false,
-+        priority: 0,
++        priority: previous?.priority ?? 0,
++        retryCount: previous?.retryCount ?? 0,
++        retryScheduled: false,
 +        host: this.#resolvedHost.get(collationId),
 +        startedAt: Date.now(),
        });
@@ -3734,7 +3772,44 @@ index b74a8a5..afa6ac9 100644
      } finally {
        this.#restoring.delete(downloadId);
      }
-@@ -925,6 +1111,7 @@
+   }
+ 
++  async #retryFailedDownload(downloadId: string, active: ActiveDownload): Promise<void> {
++    await new Promise<void>((resolve) =>
++      setTimeout(resolve, Math.min(8_000, 1_000 * Math.pow(2, active.retryCount - 1))),
++    );
++    const state = this.#api.getState();
++    const download = state.persistent.downloads.files?.[downloadId];
++    if (download === undefined) return;
++    try {
++      const checkpoint = state.persistent.downloads.checkpoints[downloadId];
++      if (active.retryCount === 1 && isResumableCheckpoint(checkpoint)) {
++        await window.api.downloader.resume(checkpoint);
++        active.retryScheduled = false;
++        active.startedAt = Date.now();
++      } else {
++        await this.#restoreDownload(
++          downloadId,
++          download,
++          active.callback,
++          active.allowInstall,
++          active,
++        );
++      }
++    } catch (err) {
++      active.retryScheduled = false;
++      log("warn", "automatic download retry could not start", {
++        downloadId,
++        attempt: active.retryCount,
++        err,
++      });
++    }
++  }
++
+   async #pollLoop(interval: number): Promise<void> {
+     for (;;) {
+       try {
+@@ -925,6 +1163,7 @@
      const now = Date.now();
  
      let totalDeltaBytes = 0;
@@ -3742,7 +3817,7 @@ index b74a8a5..afa6ac9 100644
      // Non-terminal progress updates are collected and dispatched as ONE batched store update per
      // poll tick instead of one per download. Each separate dispatch replaces persistent.downloads
      // and forces every subscriber to recompute; with many concurrent downloads (large collections)
-@@ -937,6 +1124,7 @@
+@@ -937,6 +1176,7 @@
  
        const delta = Math.max(0, state.bytesReceived - activeDownload.lastBytesReceived);
        totalDeltaBytes += delta;
@@ -3750,7 +3825,32 @@ index b74a8a5..afa6ac9 100644
        activeDownload.lastBytesReceived = state.bytesReceived;
  
        const isTerminal =
-@@ -980,6 +1168,12 @@
+@@ -976,10 +1216,37 @@
+ 
+       const err = rehydrateDownloadError(state);
+       if (err !== null) log("warn", "download ended with error", { downloadId, err });
++
++      if (
++        state.status === "failed" &&
++        this.#isRetryable(err) &&
++        activeDownload.retryCount < MAX_AUTO_RETRIES
++      ) {
++        this.#recordMirror(activeDownload.host, false);
++        this.#recentFailures.push(now);
++        if (!activeDownload.retryScheduled) {
++          activeDownload.retryCount += 1;
++          activeDownload.retryScheduled = true;
++          log("info", "scheduling automatic download retry", {
++            downloadId,
++            attempt: activeDownload.retryCount,
++            host: activeDownload.host,
++          });
++          void this.#retryFailedDownload(downloadId, activeDownload);
++        }
++        continue;
++      }
++
+       this.#activeDownloads.delete(downloadId);
        this.#api.store.dispatch(clearDownloadCheckpoint(downloadId));
  
        if (state.status === "completed") {
@@ -3763,7 +3863,7 @@ index b74a8a5..afa6ac9 100644
          this.#emitAnalytics(downloadId, "completed");
          this.#completeDownload(downloadId, state, activeDownload).catch((err) => {
            log("error", "failed to finalize download", { downloadId, err });
-@@ -990,6 +1184,8 @@
+@@ -990,6 +1257,8 @@
          this.#api.store.dispatch(removeDownload(downloadId));
          activeDownload.callback?.(new UserCanceled(), downloadId);
        } else {
@@ -3772,7 +3872,7 @@ index b74a8a5..afa6ac9 100644
          this.#emitAnalytics(downloadId, "failed", err ?? undefined);
          // Mark record as failed so the UI can show an error state.
          this.#api.store.dispatch(finishDownload(downloadId, "failed", err));
-@@ -1003,6 +1199,16 @@
+@@ -1003,6 +1272,16 @@
        batchDispatch(this.#api.store, progressActions);
      }
  
@@ -3789,7 +3889,7 @@ index b74a8a5..afa6ac9 100644
      this.#speedAccumBytes += totalDeltaBytes;
  
      if (totalDeltaBytes > 0 && this.#lastSpeedDispatch === null) {
-@@ -1053,8 +1259,16 @@
+@@ -1053,8 +1332,16 @@
          this.#resolvedMeta.set(collationId, resolved.meta);
        }
  
