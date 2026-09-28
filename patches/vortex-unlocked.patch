@@ -3793,3 +3793,84 @@ index ca10f57..88ab5de 100644
        pause: (downloadId) => betterIpcRenderer.invoke("download:pause", downloadId),
        resume: (checkpoint) => betterIpcRenderer.invoke("download:resume", checkpoint),
        cancel: (downloadId) => betterIpcRenderer.invoke("download:cancel", downloadId),
+diff --git a/src/renderer/src/extensions/collections/util/InstallDriver.ts b/src/renderer/src/extensions/collections/util/InstallDriver.ts
+index b4e2e2a..89c554c 100644
+--- a/src/renderer/src/extensions/collections/util/InstallDriver.ts
++++ b/src/renderer/src/extensions/collections/util/InstallDriver.ts
+@@ -542,6 +542,47 @@
+     this.triggerUpdate();
+   }
+ 
++  /**
++   * Requeue only members that actually failed. This deliberately re-enters the
++   * normal dependency pipeline so resolution, shared-download reuse, retries,
++   * hashing and install ordering stay single-sourced.
++   */
++  public retryFailed() {
++    const session = getCollectionActiveSession(this.mApi.getState());
++    if (
++      session === undefined ||
++      this.mCollection === undefined ||
++      this.mProfile === undefined ||
++      session.collectionId !== this.mCollection.id
++    ) {
++      return;
++    }
++
++    const failed = Object.entries(session.mods).filter(([, info]) => info.status === "failed");
++    if (failed.length === 0) {
++      return;
++    }
++
++    batchDispatch(
++      this.mApi.store,
++      failed.map(([ruleId]) => installActions.updateModStatus(session.sessionId, ruleId, "pending")),
++    );
++    this.mApi.store.dispatch(installActions.markSessionStalled(session.sessionId, false));
++
++    this.mInstallDone = false;
++    this.mInstallingMod = undefined;
++    this.mStep = "installing";
++    this.triggerUpdate();
++
++    this.mApi.events.emit(
++      "install-dependencies",
++      this.mProfile.id,
++      this.mGameId,
++      [this.mCollection.id],
++      true,
++    );
++  }
++
+   public installRecommended() {
+     if (this.mCollection === undefined || this.mProfile?.id === undefined) {
+       return;
+diff --git a/src/renderer/src/extensions/collections/views/InstallDialog/InstallFinishedDialog.tsx b/src/renderer/src/extensions/collections/views/InstallDialog/InstallFinishedDialog.tsx
+index 89a54b7..bbce868 100644
+--- a/src/renderer/src/extensions/collections/views/InstallDialog/InstallFinishedDialog.tsx
++++ b/src/renderer/src/extensions/collections/views/InstallDialog/InstallFinishedDialog.tsx
+@@ -87,6 +87,13 @@
+   // Open the collection's Mods tab filtered to the failed members. Navigate, clear any existing
+   // filter, then set the status column ("collection_status") filter to "Failed" (a multi-select
+   // OptionsFilter, so the value is an array).
++  const retryFailed = React.useCallback(() => {
++    if (driver.collection !== undefined && driver.step === "review") {
++      driver.retryFailed();
++    }
++    forceUpdate((i) => i + 1);
++  }, [driver]);
++
+   const viewFailed = React.useCallback(async () => {
+     if (driver.collection !== undefined) {
+       api.events.emit("view-collection", driver.collection.id, "mods");
+@@ -277,6 +284,10 @@
+ 
+       {hasFailures ? (
+         <Modal.Footer>
++          <Button disabled={finalizing} onClick={retryFailed}>
++            {t("Retry failed")}
++          </Button>
++
+           <Button disabled={finalizing} onClick={viewFailed}>
+             {t("View failed mods")}
+           </Button>
