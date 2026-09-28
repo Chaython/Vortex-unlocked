@@ -3297,10 +3297,10 @@ index 6535760..14a55e4 100644
    if (visiblePages.length === 0) {
      return null;
 diff --git a/src/shared/src/types/ipc.ts b/src/shared/src/types/ipc.ts
-index 2fad8d6..436db3d 100644
+index 2fad8d6..cabc3ae 100644
 --- a/src/shared/src/types/ipc.ts
 +++ b/src/shared/src/types/ipc.ts
-@@ -521,12 +521,16 @@
+@@ -521,15 +521,20 @@
      dest: string,
      collationId: number,
      downloadId?: string,
@@ -3317,7 +3317,11 @@ index 2fad8d6..436db3d 100644
    "download:configure": (options: {
      concurrency?: number | string;
      bytesPerSecond?: number | string;
-@@ -597,6 +601,17 @@
++    perDownloadBytesPerSecond?: number | string;
+   }) => Promise<void>;
+ 
+   // Upload channels
+@@ -597,6 +602,17 @@
      path: QualifiedPathWire,
      options: Parameters<FileSystem["stat"]>[1],
    ) => Promise<Awaited<ReturnType<FileSystem["stat"]>>>;
@@ -3336,7 +3340,7 @@ index 2fad8d6..436db3d 100644
  
  /** Represents all IPC-safe typed arrays */
 diff --git a/src/shared/src/types/preload.ts b/src/shared/src/types/preload.ts
-index a263a5e..2d39953 100644
+index a263a5e..a1c4b44 100644
 --- a/src/shared/src/types/preload.ts
 +++ b/src/shared/src/types/preload.ts
 @@ -81,6 +81,9 @@
@@ -3382,7 +3386,7 @@ index a263a5e..2d39953 100644
  
    /** Pauses an active download and returns a checkpoint for later resumption. */
    pause(downloadId: string): Promise<WireDownloadCheckpoint>;
-@@ -540,6 +560,9 @@
+@@ -540,8 +560,15 @@
    /** Returns the current state for multiple downloads in one call. Unknown IDs are omitted. */
    getStates(downloadIds: string[]): Promise<Record<string, WireDownloadState>>;
  
@@ -3390,8 +3394,15 @@ index a263a5e..2d39953 100644
 +  getCheckpoints(downloadIds: string[]): Promise<Record<string, WireDownloadCheckpoint>>;
 +
    /** Updates concurrency and/or bandwidth limit on the main-process DownloadManager. */
-   configure(options: { concurrency?: number; bytesPerSecond?: number }): Promise<void>;
+-  configure(options: { concurrency?: number; bytesPerSecond?: number }): Promise<void>;
++  configure(options: {
++    concurrency?: number;
++    bytesPerSecond?: number;
++    perDownloadBytesPerSecond?: number;
++  }): Promise<void>;
  
+   /**
+    * Registers a handler invoked by main when it needs the renderer to resolve a download URL.
 diff --git a/src/main/src/downloading/manager.ts b/src/main/src/downloading/manager.ts
 index 879f372..528b35d 100644
 --- a/src/main/src/downloading/manager.ts
@@ -3563,7 +3574,7 @@ index 879f372..528b35d 100644
        pause,
      };
 diff --git a/src/main/src/downloading/ipc.ts b/src/main/src/downloading/ipc.ts
-index 0520c23..86486d9 100644
+index 0520c23..7eb4c0f 100644
 --- a/src/main/src/downloading/ipc.ts
 +++ b/src/main/src/downloading/ipc.ts
 @@ -34,6 +34,25 @@
@@ -3653,7 +3664,7 @@ index 0520c23..86486d9 100644
      webContentsByDownloadId.set(wireCheckpoint.downloadId, webContents);
      handle.promise.catch((err) =>
        log("error", "download failed", {
-@@ -120,6 +148,17 @@
+@@ -120,11 +148,26 @@
      return result;
    });
  
@@ -3671,8 +3682,17 @@ index 0520c23..86486d9 100644
    betterIpcMain.handle("download:configure", (_event, options) => {
      manager.configure({
        concurrency: options.concurrency !== undefined ? Number(options.concurrency) : undefined,
+       bytesPerSecond:
+         options.bytesPerSecond !== undefined ? Number(options.bytesPerSecond) : undefined,
++      perDownloadBytesPerSecond:
++        options.perDownloadBytesPerSecond !== undefined
++          ? Number(options.perDownloadBytesPerSecond)
++          : undefined,
+     });
+   });
+ }
 diff --git a/src/renderer/src/IPCDownloadAdapter.ts b/src/renderer/src/IPCDownloadAdapter.ts
-index b74a8a5..58390f1 100644
+index b74a8a5..7e0843a 100644
 --- a/src/renderer/src/IPCDownloadAdapter.ts
 +++ b/src/renderer/src/IPCDownloadAdapter.ts
 @@ -1,8 +1,8 @@
@@ -3724,7 +3744,7 @@ index b74a8a5..58390f1 100644
    // Ids with a restore in flight. A restore un-pauses the record and clears its checkpoint before
    // awaiting the fresh start, so without this guard a second resume-download for the same id would
    // re-enter and issue a duplicate rm + start racing the first.
-@@ -168,6 +189,10 @@
+@@ -168,6 +189,11 @@
    #nextCollationId = 0;
    #currentMaxParallelDownloads: number | undefined;
    #currentMaxBandwidth: number | undefined;
@@ -3732,11 +3752,45 @@ index b74a8a5..58390f1 100644
 +  #lastCheckpointPersist = 0;
 +  #lastConcurrencyTune = 0;
 +  readonly #recentFailures: number[] = [];
++  #lastAppliedDownloadConfig = "";
  
    constructor(api: IExtensionApi) {
      this.#api = api;
-@@ -257,12 +282,119 @@
-     });
+@@ -251,18 +277,150 @@
+     log("debug", `registered protocol handler for scheme '${scheme}'`);
+   }
+ 
+-  #syncDownloadSettings(concurrency: number, bytesPerSecond: number): void {
+-    window.api.downloader.configure({ concurrency, bytesPerSecond }).catch((err) => {
+-      log("warn", "failed to configure download manager", { err });
+-    });
++  #syncDownloadSettings(concurrency: number): void {
++    const settings = this.#api.getState().settings.downloads;
++    const hour = new Date().getHours();
++    const start = settings.bandwidthScheduleStart ?? 0;
++    const end = settings.bandwidthScheduleEnd ?? 0;
++    const scheduleActive =
++      (settings.bandwidthScheduleLimit ?? 0) > 0 &&
++      (start === end || (start < end ? hour >= start && hour < end : hour >= start || hour < end));
++
++    let bytesPerSecond = settings.maxBandwidth ?? 0;
++    if (scheduleActive) {
++      const scheduled = settings.bandwidthScheduleLimit ?? 0;
++      bytesPerSecond = bytesPerSecond > 0 ? Math.min(bytesPerSecond, scheduled) : scheduled;
++    }
++    if (bytesPerSecond > 0 && (settings.bandwidthReserve ?? 0) > 0) {
++      bytesPerSecond = Math.max(1, bytesPerSecond - settings.bandwidthReserve);
++    }
++    const perDownloadBytesPerSecond = settings.perDownloadBandwidth ?? 0;
++    const fingerprint = `${concurrency}:${bytesPerSecond}:${perDownloadBytesPerSecond}`;
++    if (fingerprint === this.#lastAppliedDownloadConfig) return;
++    this.#lastAppliedDownloadConfig = fingerprint;
++
++    window.api.downloader
++      .configure({ concurrency, bytesPerSecond, perDownloadBytesPerSecond })
++      .catch((err) => {
++        log("warn", "failed to configure download manager", { err });
++      });
    }
  
 +  #loadMirrorHealth(): Record<string, MirrorHealth> {
@@ -3820,6 +3874,8 @@ index b74a8a5..58390f1 100644
 +  #tuneConcurrency(now: number, diskBacklog: number): void {
 +    if (now - this.#lastConcurrencyTune < TUNE_INTERVAL_MS) return;
 +    this.#lastConcurrencyTune = now;
++    // This also refreshes time-based bandwidth schedules even when concurrency is unchanged.
++    this.#syncDownloadSettings(this.#effectiveConcurrency);
 +    while (this.#recentFailures.length > 0 && now - this.#recentFailures[0] > 60_000) {
 +      this.#recentFailures.shift();
 +    }
@@ -3841,7 +3897,7 @@ index b74a8a5..58390f1 100644
 +        diskBacklog,
 +      });
 +      this.#effectiveConcurrency = next;
-+      this.#syncDownloadSettings(next, this.#currentMaxBandwidth ?? 0);
++      this.#syncDownloadSettings(next);
 +    }
 +  }
 +
@@ -3852,21 +3908,21 @@ index b74a8a5..58390f1 100644
      this.#currentMaxBandwidth = maxBandwidth;
 -    this.#syncDownloadSettings(maxParallelDownloads, maxBandwidth);
 +    this.#effectiveConcurrency = Math.max(1, maxParallelDownloads);
-+    this.#syncDownloadSettings(this.#effectiveConcurrency, maxBandwidth);
++    this.#syncDownloadSettings(this.#effectiveConcurrency);
  
      this.#api.store.subscribe(() => {
        const { maxParallelDownloads: concurrency, maxBandwidth: bandwidth } =
-@@ -273,7 +405,8 @@
+@@ -273,7 +431,8 @@
        ) {
          this.#currentMaxParallelDownloads = concurrency;
          this.#currentMaxBandwidth = bandwidth;
 -        this.#syncDownloadSettings(concurrency, bandwidth);
 +        this.#effectiveConcurrency = Math.min(Math.max(1, concurrency), this.#effectiveConcurrency);
-+        this.#syncDownloadSettings(this.#effectiveConcurrency, bandwidth);
++        this.#syncDownloadSettings(this.#effectiveConcurrency);
        }
      });
  
-@@ -290,6 +423,10 @@
+@@ -290,6 +449,10 @@
            lastBytesReceived: 0,
            lastProgressDispatch: 0,
            startedEventEmitted: false,
@@ -3877,7 +3933,7 @@ index b74a8a5..58390f1 100644
          });
          window.api.downloader.resume(checkpoint).catch((err) => {
            log("error", "failed to auto-resume download", { id, err });
-@@ -480,6 +617,7 @@
+@@ -480,6 +643,7 @@
          // Hash on a main-process worker_thread so a large file doesn't block the renderer.
          const { hash } = await window.api.hash.compute("md5", finalPath);
          this.#api.store.dispatch(setDownloadHash(downloadId, hash));
@@ -3885,7 +3941,7 @@ index b74a8a5..58390f1 100644
        } catch (err) {
          log("warn", "failed to compute MD5 for download", { downloadId, err });
        }
-@@ -509,6 +647,37 @@
+@@ -509,6 +673,37 @@
      }
    }
  
@@ -3923,7 +3979,7 @@ index b74a8a5..58390f1 100644
    async #handleStartDownload(
      rawUrls: string[],
      modInfo: ModInfo,
-@@ -534,6 +703,22 @@
+@@ -534,6 +729,22 @@
  
      const { state, dlPath, gameIds } = await this.#resolveDownloadTarget(modInfo);
  
@@ -3946,7 +4002,7 @@ index b74a8a5..58390f1 100644
      // Check for an existing file using the caller-supplied name before queuing.
      // We can only do this when a name is provided; temp-named downloads are always new.
      if (fileName !== undefined && redownload !== "always") {
-@@ -605,9 +790,12 @@
+@@ -605,9 +816,12 @@
          collationId,
        });
  
@@ -3960,7 +4016,7 @@ index b74a8a5..58390f1 100644
  
        this.#activeDownloads.set(downloadId, {
          callback,
-@@ -616,6 +804,11 @@
+@@ -616,6 +830,11 @@
          lastBytesReceived: 0,
          lastProgressDispatch: 0,
          startedEventEmitted: false,
@@ -3972,7 +4028,7 @@ index b74a8a5..58390f1 100644
        });
        log("debug", "download queued", { downloadId, collationId });
  
-@@ -650,6 +843,7 @@
+@@ -650,6 +869,7 @@
        }
      } catch (err) {
        this.#resolvedMeta.delete(collationId);
@@ -3980,7 +4036,7 @@ index b74a8a5..58390f1 100644
        callback?.(unknownToError(err));
      }
    }
-@@ -724,6 +918,10 @@
+@@ -724,6 +944,10 @@
          lastBytesReceived: size,
          lastProgressDispatch: 0,
          startedEventEmitted: true,
@@ -3991,7 +4047,7 @@ index b74a8a5..58390f1 100644
        });
      } catch (err) {
        callback?.(unknownToError(err));
-@@ -834,6 +1032,7 @@
+@@ -834,6 +1058,7 @@
      download: IDownload,
      callback?: (err: Error | null, id?: string) => void,
      allowInstall?: boolean,
@@ -3999,7 +4055,7 @@ index b74a8a5..58390f1 100644
    ): Promise<void> {
      // A concurrent resume-download for the same id would re-enter and issue a duplicate rm + start.
      if (this.#restoring.has(downloadId)) return;
-@@ -879,7 +1078,7 @@
+@@ -879,7 +1104,7 @@
        try {
          // Passing the existing downloadId makes main replace the previous attempt and start the
          // transfer from scratch under the same id.
@@ -4008,7 +4064,7 @@ index b74a8a5..58390f1 100644
        } catch (err) {
          // The partial and checkpoint are already gone, so mark the record failed rather than
          // leaving it stuck in an active state the poll loop never tracks.
-@@ -895,17 +1094,56 @@
+@@ -895,17 +1120,56 @@
        // resume caller: the collection installer and mod-update flow pass false because they own the
        // install, while a manual resume leaves it undefined and defers to the automation setting.
        this.#activeDownloads.set(downloadId, {
@@ -4067,7 +4123,7 @@ index b74a8a5..58390f1 100644
    async #pollLoop(interval: number): Promise<void> {
      for (;;) {
        try {
-@@ -925,6 +1163,7 @@
+@@ -925,6 +1189,7 @@
      const now = Date.now();
  
      let totalDeltaBytes = 0;
@@ -4075,7 +4131,7 @@ index b74a8a5..58390f1 100644
      // Non-terminal progress updates are collected and dispatched as ONE batched store update per
      // poll tick instead of one per download. Each separate dispatch replaces persistent.downloads
      // and forces every subscriber to recompute; with many concurrent downloads (large collections)
-@@ -937,6 +1176,7 @@
+@@ -937,6 +1202,7 @@
  
        const delta = Math.max(0, state.bytesReceived - activeDownload.lastBytesReceived);
        totalDeltaBytes += delta;
@@ -4083,7 +4139,7 @@ index b74a8a5..58390f1 100644
        activeDownload.lastBytesReceived = state.bytesReceived;
  
        const isTerminal =
-@@ -976,10 +1216,37 @@
+@@ -976,10 +1242,37 @@
  
        const err = rehydrateDownloadError(state);
        if (err !== null) log("warn", "download ended with error", { downloadId, err });
@@ -4121,7 +4177,7 @@ index b74a8a5..58390f1 100644
          this.#emitAnalytics(downloadId, "completed");
          this.#completeDownload(downloadId, state, activeDownload).catch((err) => {
            log("error", "failed to finalize download", { downloadId, err });
-@@ -990,6 +1257,8 @@
+@@ -990,6 +1283,8 @@
          this.#api.store.dispatch(removeDownload(downloadId));
          activeDownload.callback?.(new UserCanceled(), downloadId);
        } else {
@@ -4130,7 +4186,7 @@ index b74a8a5..58390f1 100644
          this.#emitAnalytics(downloadId, "failed", err ?? undefined);
          // Mark record as failed so the UI can show an error state.
          this.#api.store.dispatch(finishDownload(downloadId, "failed", err));
-@@ -1003,6 +1272,16 @@
+@@ -1003,6 +1298,16 @@
        batchDispatch(this.#api.store, progressActions);
      }
  
@@ -4147,7 +4203,7 @@ index b74a8a5..58390f1 100644
      this.#speedAccumBytes += totalDeltaBytes;
  
      if (totalDeltaBytes > 0 && this.#lastSpeedDispatch === null) {
-@@ -1053,8 +1332,16 @@
+@@ -1053,8 +1358,16 @@
          this.#resolvedMeta.set(collationId, resolved.meta);
        }
  
