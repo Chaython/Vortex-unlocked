@@ -122,11 +122,12 @@ jobs:
 
           cd vortex
 
-          # Cheap preflight first. This catches malformed hunk lengths/truncated
-          # patches immediately, before setup-node/dependency installation.
-          git apply --check ..\patches\vortex-unlocked.patch
+          # Cheap syntax preflight first. --numstat parses the whole patch and
+          # catches corrupt/truncated hunks without requiring every context line
+          # to match current upstream (the real apply intentionally uses --3way).
+          git apply --numstat ..\patches\vortex-unlocked.patch > $null
           if ($LASTEXITCODE -ne 0) {
-            Write-Output "::error::Patch syntax/context validation failed against current upstream."
+            Write-Output "::error::Patch syntax validation failed."
             exit 1
           }
 
