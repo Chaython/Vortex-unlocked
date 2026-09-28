@@ -1586,18 +1586,29 @@ index 53777be..a61c1cc 100644
  }
  
 diff --git a/src/renderer/src/extensions/collections/views/InstallDialog/InstallStartDialog.tsx b/src/renderer/src/extensions/collections/views/InstallDialog/InstallStartDialog.tsx
-index a6378b5..0334a4f 100644
+index a6378b5..05cec2a 100644
 --- a/src/renderer/src/extensions/collections/views/InstallDialog/InstallStartDialog.tsx
 +++ b/src/renderer/src/extensions/collections/views/InstallDialog/InstallStartDialog.tsx
-@@ -38,7 +38,6 @@
+@@ -14,7 +14,9 @@
+ import More from "../../../../controls/More";
+ import Toggle from "../../../../controls/Toggle";
+ import { getGame } from "../../../../extensions/gamemode_management/util/getGame";
++import type { IDownload } from "../../../../extensions/download_management/types/IDownload";
+ import type { IMod, IModRule } from "../../../../extensions/mod_management/types/IMod";
++import { findDownloadByRef } from "../../../../extensions/mod_management/util/dependencies";
+ import renderModName from "../../../../extensions/mod_management/util/modName";
+ import getTextProfileManagement from "../../../../extensions/profile_management/texts";
+ import type { IProfile } from "../../../../extensions/profile_management/types/IProfile";
+@@ -38,7 +40,7 @@
  interface IConnectedProps {
    allProfiles: { [profileId: string]: IProfile };
    mods: { [modId: string]: IMod };
 -  isPremium: boolean;
++  downloads: { [downloadId: string]: IDownload };
    userInfo: { userId: number };
    nextProfileId: string;
    collectionsInstallWhileDownloading: boolean;
-@@ -225,6 +224,11 @@
+@@ -225,6 +227,15 @@
      const ownCollection: boolean =
        userInfo?.userId !== undefined && driver.collectionInfo?.user?.memberId === userInfo?.userId;
      const collectionName = renderModName(driver.collection);
@@ -1606,10 +1617,14 @@ index a6378b5..0334a4f 100644
 +    );
 +    const requiredCount = dependencyRules.filter((rule) => rule.type === "requires").length;
 +    const optionalCount = dependencyRules.length - requiredCount;
++    const cachedCount = dependencyRules.filter(
++      (rule) => findDownloadByRef(rule.reference, this.props.downloads) !== undefined,
++    ).length;
++    const missingDownloadCount = dependencyRules.length - cachedCount;
      return (
        <Modal show={driver.collection !== undefined && driver.step === "query"} onHide={nop}>
          <Modal.Header>
-@@ -299,6 +303,20 @@
+@@ -299,6 +310,25 @@
              />
            )}
  
@@ -1618,6 +1633,11 @@ index a6378b5..0334a4f 100644
 +            <p>
 +              {t("{{required}} required mods, {{optional}} optional mods", {
 +                replace: { required: requiredCount, optional: optionalCount },
++              })}
++            </p>
++            <p>
++              {t("{{cached}} archives already available, {{missing}} still need downloading", {
++                replace: { cached: cachedCount, missing: missingDownloadCount },
 +              })}
 +            </p>
 +            <p>
@@ -1630,7 +1650,7 @@ index a6378b5..0334a4f 100644
            <Toggle
              checked={this.props.collectionsInstallWhileDownloading}
              onToggle={this.props.onSetCollectionConcurrency}
-@@ -416,7 +434,6 @@
+@@ -416,7 +446,6 @@
    const { editCollectionId } = (state.session as any).collections;
    const gameMode = ownProps.driver?.profile?.gameId;
  
@@ -1638,11 +1658,12 @@ index a6378b5..0334a4f 100644
    const collectionsInstallWhileDownloading = getSafe(
      state,
      ["settings", "downloads", "collectionsInstallWhileDownloading"],
-@@ -426,7 +443,6 @@
+@@ -426,7 +455,7 @@
    return {
      allProfiles: state.persistent.profiles,
      mods: editCollectionId !== undefined ? state.persistent.mods[gameMode] : emptyObject,
 -    isPremium,
++    downloads: state.persistent.downloads.files,
      userInfo,
      nextProfileId: state.settings.profiles.nextProfileId,
      collectionsInstallWhileDownloading,
@@ -3344,7 +3365,7 @@ index c4e7fd8..6e30b80 100644
        onInstalled?.();
      }
 diff --git a/src/renderer/src/IPCDownloadAdapter.ts b/src/renderer/src/IPCDownloadAdapter.ts
-index b74a8a5..3007742 100644
+index b74a8a5..ea4d385 100644
 --- a/src/renderer/src/IPCDownloadAdapter.ts
 +++ b/src/renderer/src/IPCDownloadAdapter.ts
 @@ -35,7 +35,6 @@
@@ -3396,7 +3417,7 @@ index b74a8a5..3007742 100644
  
    constructor(api: IExtensionApi) {
      this.#api = api;
-@@ -257,12 +271,113 @@
+@@ -257,12 +271,128 @@
      });
    }
  
@@ -3459,12 +3480,21 @@ index b74a8a5..3007742 100644
 +   */
 +  #adaptConcurrency(speed: number, now: number): void {
 +    const ceiling = Math.max(1, this.#currentMaxParallelDownloads ?? 1);
-+    if (ceiling <= 1 || now - this.#adaptiveLastAdjustment < 5_000) {
++    const activeSession = (this.#api.getState().session as any)?.collections?.activeSession;
++    const installingCount = Object.values(activeSession?.mods ?? {}).filter(
++      (mod: any) => mod?.status === "installing",
++    ).length;
++    // Extraction/installation competes heavily for disk bandwidth. Once several
++    // collection members are actively installing, keep the network pipeline
++    // filled but halve its ceiling until the disk-side backlog drains.
++    const workingCeiling =
++      installingCount >= 3 ? Math.max(1, Math.ceil(ceiling / 2)) : ceiling;
++    if (workingCeiling <= 1 || now - this.#adaptiveLastAdjustment < 5_000) {
 +      if (speed > 0) this.#adaptiveLastSpeed = speed;
 +      return;
 +    }
 +
-+    let next = Math.min(this.#effectiveConcurrency, ceiling);
++    let next = Math.min(this.#effectiveConcurrency, workingCeiling);
 +    if (this.#adaptiveFailurePressure > 0) {
 +      next = Math.max(1, next - 1);
 +      this.#adaptiveFailurePressure = 0;
@@ -3480,7 +3510,7 @@ index b74a8a5..3007742 100644
 +    } else if (
 +      speed > 0 &&
 +      this.#activeDownloads.size >= next &&
-+      next < ceiling
++      next < workingCeiling
 +    ) {
 +      const improving =
 +        this.#adaptiveLastSpeed === 0 || speed >= this.#adaptiveLastSpeed * 1.05;
@@ -3496,7 +3526,13 @@ index b74a8a5..3007742 100644
 +    if (next !== this.#effectiveConcurrency) {
 +      this.#effectiveConcurrency = next;
 +      this.#syncDownloadSettings(next, this.#currentMaxBandwidth ?? 0);
-+      log("debug", "adapted download concurrency", { effective: next, ceiling, speed });
++      log("debug", "adapted download concurrency", {
++        effective: next,
++        ceiling,
++        workingCeiling,
++        installingCount,
++        speed,
++      });
 +    }
 +  }
 +
@@ -3511,7 +3547,7 @@ index b74a8a5..3007742 100644
  
      this.#api.store.subscribe(() => {
        const { maxParallelDownloads: concurrency, maxBandwidth: bandwidth } =
-@@ -273,7 +388,8 @@
+@@ -273,7 +403,8 @@
        ) {
          this.#currentMaxParallelDownloads = concurrency;
          this.#currentMaxBandwidth = bandwidth;
@@ -3521,7 +3557,7 @@ index b74a8a5..3007742 100644
        }
      });
  
-@@ -297,33 +413,19 @@
+@@ -297,33 +428,19 @@
            this.#api.store.dispatch(setDownloadInterrupted(id, download.received));
          });
        } else {
@@ -3563,7 +3599,7 @@ index b74a8a5..3007742 100644
    #emitAnalytics(
      downloadId: string,
      eventType: "started" | "completed" | "failed" | "canceled",
-@@ -605,14 +707,23 @@
+@@ -605,14 +722,23 @@
          collationId,
        });
  
@@ -3588,7 +3624,7 @@ index b74a8a5..3007742 100644
          lastBytesReceived: 0,
          lastProgressDispatch: 0,
          startedEventEmitted: false,
-@@ -650,6 +761,7 @@
+@@ -650,6 +776,7 @@
        }
      } catch (err) {
        this.#resolvedMeta.delete(collationId);
@@ -3596,7 +3632,7 @@ index b74a8a5..3007742 100644
        callback?.(unknownToError(err));
      }
    }
-@@ -876,10 +988,14 @@
+@@ -876,10 +1003,14 @@
        await rm(dest, { force: true });
        this.#api.store.dispatch(clearDownloadCheckpoint(downloadId));
  
@@ -3612,7 +3648,7 @@ index b74a8a5..3007742 100644
        } catch (err) {
          // The partial and checkpoint are already gone, so mark the record failed rather than
          // leaving it stuck in an active state the poll loop never tracks.
-@@ -888,6 +1004,7 @@
+@@ -888,6 +1019,7 @@
        } finally {
          this.#pending.delete(collationId);
          this.#resolvedMeta.delete(collationId);
@@ -3620,7 +3656,7 @@ index b74a8a5..3007742 100644
        }
  
        // Register the poll entry after start resolves (as #handleStartDownload does) so the poll
-@@ -897,6 +1014,7 @@
+@@ -897,6 +1029,7 @@
        this.#activeDownloads.set(downloadId, {
          callback,
          allowInstall,
@@ -3628,7 +3664,7 @@ index b74a8a5..3007742 100644
          lastBytesReceived: 0,
          lastProgressDispatch: 0,
          startedEventEmitted: false,
-@@ -980,6 +1098,7 @@
+@@ -980,6 +1113,7 @@
        this.#api.store.dispatch(clearDownloadCheckpoint(downloadId));
  
        if (state.status === "completed") {
@@ -3636,7 +3672,7 @@ index b74a8a5..3007742 100644
          this.#emitAnalytics(downloadId, "completed");
          this.#completeDownload(downloadId, state, activeDownload).catch((err) => {
            log("error", "failed to finalize download", { downloadId, err });
-@@ -990,6 +1109,8 @@
+@@ -990,6 +1124,8 @@
          this.#api.store.dispatch(removeDownload(downloadId));
          activeDownload.callback?.(new UserCanceled(), downloadId);
        } else {
@@ -3645,7 +3681,7 @@ index b74a8a5..3007742 100644
          this.#emitAnalytics(downloadId, "failed", err ?? undefined);
          // Mark record as failed so the UI can show an error state.
          this.#api.store.dispatch(finishDownload(downloadId, "failed", err));
-@@ -1019,6 +1140,7 @@
+@@ -1019,6 +1155,7 @@
            // Update speed display and speedHistory for the download graph.
            // Aggregated over 1s to avoid thrashing Redux with every poll tick.
            this.#api.store.dispatch(setDownloadSpeed(Math.round(speed)));
@@ -3653,7 +3689,7 @@ index b74a8a5..3007742 100644
          }
        }
      }
-@@ -1053,12 +1175,19 @@
+@@ -1053,12 +1190,19 @@
          this.#resolvedMeta.set(collationId, resolved.meta);
        }
  
