@@ -223,6 +223,17 @@ jobs:
         env:
           NODE_ENV: production
 
+      - name: Test unlocked download and collection paths
+        if: steps.upstream-check.outputs.skip != 'true'
+        shell: pwsh
+        working-directory: vortex
+        run: |
+          pnpm -F @vortex/renderer exec vitest run `n            src/IPCDownloadAdapter.existingFile.test.ts `n            src/IPCDownloadAdapter.naming.test.ts `n            src/extensions/collections/util/InstallDriver.test.ts `n            src/extensions/mod_management/InstallManager.sharedDownloads.test.ts `n            src/util/collectionInstallSession.stateMachine.test.ts
+          if ($LASTEXITCODE -ne 0) {
+            Write-Output "::error::Focused unlocked regression tests failed."
+            exit 1
+          }
+
       - name: Publish dist package
         if: steps.upstream-check.outputs.skip != 'true'
         shell: pwsh
