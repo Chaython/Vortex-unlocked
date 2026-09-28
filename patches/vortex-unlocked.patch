@@ -3365,7 +3365,7 @@ index c4e7fd8..6e30b80 100644
        onInstalled?.();
      }
 diff --git a/src/renderer/src/IPCDownloadAdapter.ts b/src/renderer/src/IPCDownloadAdapter.ts
-index b74a8a5..ea4d385 100644
+index b74a8a5..fa4cd0b 100644
 --- a/src/renderer/src/IPCDownloadAdapter.ts
 +++ b/src/renderer/src/IPCDownloadAdapter.ts
 @@ -35,7 +35,6 @@
@@ -3689,18 +3689,28 @@ index b74a8a5..ea4d385 100644
          }
        }
      }
-@@ -1053,12 +1190,19 @@
+@@ -1053,12 +1190,29 @@
          this.#resolvedMeta.set(collationId, resolved.meta);
        }
  
 -      log("debug", "download resolved", { resolvedUrl: resolved.urls[0] });
 -      return { probeEndpoint: { url: resolved.urls[0] } };
 +      const selectedUrl = this.#pickResolvedUrl(collationId, resolved.urls);
++      const chunkUrls = [
++        selectedUrl,
++        ...resolved.urls.filter((candidate) => candidate !== selectedUrl),
++      ];
 +      log("debug", "download resolved", {
 +        resolvedUrl: selectedUrl,
 +        candidates: resolved.urls.length,
 +      });
-+      return { probeEndpoint: { url: selectedUrl } };
++      return {
++        probeEndpoint: { url: selectedUrl },
++        // These are all URLs Nexus authorised for this exact file. Main rotates
++        // chunk attempts across them; If-Match from the probe ETag prevents a
++        // mismatched mirror from contributing bytes.
++        chunkEndpoints: chunkUrls.map((url) => ({ url })),
++      };
      }
  
      if (scheme === "http" || scheme === "https") {
@@ -3744,10 +3754,35 @@ index 879f372..624a5cf 100644
      // Swallow all rejections on one fork so that pause()/cancel() flows
      // never surface as unhandled rejections.
 diff --git a/src/main/src/downloading/ipc.ts b/src/main/src/downloading/ipc.ts
-index 0520c23..cc0c252 100644
+index 0520c23..16d5bbf 100644
 --- a/src/main/src/downloading/ipc.ts
 +++ b/src/main/src/downloading/ipc.ts
-@@ -41,7 +41,9 @@
+@@ -20,12 +20,20 @@
+ function wireToResolvedResource(wire: WireResolvedResource): ResolvedResource {
+   const probe = wireToResolvedEndpoint(wire.probeEndpoint);
+   if (!wire.chunkEndpoints?.length) return probe;
++
++  // Each call for a chunk may be a retry. Rotate that chunk through the
++  // authorised endpoint set so a transiently bad mirror does not pin the retry
++  // strategy to the same host. The downloader sends the probe's strong ETag as
++  // If-Match on ranged requests, so an inconsistent mirror is rejected safely.
++  const attempts = new Map<number, number>();
+   return {
+     probeEndpoint: probe,
+-    chunkEndpoint: (chunk) =>
+-      Promise.resolve(
+-        wireToResolvedEndpoint(wire.chunkEndpoints?.[chunk.index] ?? wire.probeEndpoint),
+-      ),
++    chunkEndpoint: (chunk) => {
++      const attempt = attempts.get(chunk.index) ?? 0;
++      attempts.set(chunk.index, attempt + 1);
++      const idx = (chunk.index + attempt) % wire.chunkEndpoints!.length;
++      return Promise.resolve(wireToResolvedEndpoint(wire.chunkEndpoints![idx]));
++    },
+   };
+ }
+ 
+@@ -41,7 +49,9 @@
  
    const webContentsByDownloadId = new Map<string, WebContents>();
  
@@ -3758,7 +3793,7 @@ index 0520c23..cc0c252 100644
      const webContents = event.sender;
      // free users must click through the website serially at their own pace (~10-13s each),
      // so any wall-clock timer abandons every download past the first few in a batch.
-@@ -55,13 +57,22 @@
+@@ -55,13 +65,22 @@
      );
      const resource = wireToResolvedResource(wireResource);
      const resolver = () => Promise.resolve(resource);
