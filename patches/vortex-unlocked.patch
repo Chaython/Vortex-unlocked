@@ -1088,10 +1088,10 @@ index 0eafd55..d918f46 100644
  export const isTelemetryEnabled = (): boolean => {
 diff --git a/src/main/src/websiteSession.ts b/src/main/src/websiteSession.ts
 new file mode 100644
-index 0000000..7db3063
+index 0000000..8a8fb7c
 --- /dev/null
 +++ b/src/main/src/websiteSession.ts
-@@ -0,0 +1,372 @@
+@@ -0,0 +1,390 @@
 +import { BrowserWindow, session } from "electron";
 +
 +import { betterIpcMain } from "./ipc";
@@ -1117,10 +1117,9 @@ index 0000000..7db3063
 +
 +const PARTITION = "persist:nx-web";
 +const NEXUS_BASE = "https://www.nexusmods.com";
++const NEXUS_LOGIN_URL = "https://users.nexusmods.com/auth/sign_in";
++const SESSION_PROBE_URL = `${NEXUS_BASE}/users/myaccount`;
 +const GENERATE_ENDPOINT = `${NEXUS_BASE}/Core/Libs/Common/Managers/Downloads?GenerateDownloadUrl`;
-+
-+/** The login flow considers the session established when one of these exists. */
-+const LOGIN_COOKIE_NAMES = ["sid", "member_id", "nexusid"];
 +
 +// free accounts can only generate links at a limited pace; the userscript this
 +// mirrors paces its requests too, so stay deliberately slow
@@ -1170,10 +1169,21 @@ index 0000000..7db3063
 +
 +async function isLoggedIn(): Promise<boolean> {
 +  try {
-+    const cookies = await getSession().cookies.get({ domain: ".nexusmods.com" });
-+    return cookies.some((cookie) => LOGIN_COOKIE_NAMES.includes(cookie.name));
++    // Probe a page that requires a Nexus website account. Session.fetch uses
++    // the Chromium network stack for this exact persist:nx-web partition, so
++    // this verifies the session that the generator will actually use instead
++    // of guessing at private cookie names.
++    const response = await getSession().fetch(SESSION_PROBE_URL, {
++      method: "GET",
++      redirect: "manual",
++      headers: { Accept: "text/html" },
++    });
++
++    // Logged-out requests are redirected to the users.nexusmods.com sign-in
++    // flow. A successful account page is a 2xx response.
++    return response.status >= 200 && response.status < 300;
 +  } catch (err) {
-+    log("warn", "failed to read website session cookies", { error: String(err) });
++    log("warn", "failed to verify website login session", { error: String(err) });
 +    return false;
 +  }
 +}
@@ -1385,9 +1395,9 @@ index 0000000..7db3063
 +  });
 +
 +  try {
-+    await win.loadURL(`${NEXUS_BASE}/login`);
++    await win.loadURL(NEXUS_LOGIN_URL);
 +  } catch (err) {
-+    log("warn", "failed to load the login page", { error: String(err) });
++    log("warn", "failed to load the Nexus users login page", { error: String(err) });
 +  }
 +
 +  return new Promise((resolve) => {
@@ -1408,6 +1418,14 @@ index 0000000..7db3063
 +      }
 +      void isLoggedIn().then((loggedIn) => {
 +        if (loggedIn) {
++          // A generator page created before login may still contain a logged-out
++          // document even though the persistent partition now has valid cookies.
++          // Recreate it on the next request so page state and cookies agree.
++          if (generatorWindow !== null && !generatorWindow.isDestroyed()) {
++            generatorWindow.destroy();
++          }
++          generatorWindow = null;
++
 +          if (!win.isDestroyed()) {
 +            try {
 +              win.close();
