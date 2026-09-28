@@ -3048,16 +3048,19 @@ index 19b8c4d..debfe17 100644
 +
 +  const [connected, setConnected] = React.useState<boolean | null>(null);
 +  const [busy, setBusy] = React.useState(false);
++  const [lastChecked, setLastChecked] = React.useState<number | null>(null);
 +
 +  const refresh = React.useCallback(async () => {
 +    try {
 +      const res = await getPreloadApi().websiteSession.status();
 +      setConnected(res?.loggedIn === true);
++      setLastChecked(Date.now());
 +    } catch (err) {
 +      log("warn", "failed to query website session status", {
 +        error: getErrorMessageOrDefault(err),
 +      });
 +      setConnected(null);
++      setLastChecked(Date.now());
 +    }
 +  }, []);
 +
@@ -3077,7 +3080,7 @@ index 19b8c4d..debfe17 100644
 +    }
 +  }, [refresh]);
 +
-+  const disconnect = React.useCallback(async () => {
++  const clearSession = React.useCallback(async () => {
 +    setBusy(true);
 +    try {
 +      await getPreloadApi().websiteSession.logout();
@@ -3089,11 +3092,41 @@ index 19b8c4d..debfe17 100644
 +    }
 +  }, [refresh]);
 +
++  const reauthenticate = React.useCallback(async () => {
++    setBusy(true);
++    try {
++      await getPreloadApi().websiteSession.logout();
++      await getPreloadApi().websiteSession.login();
++      await refresh();
++    } catch (err) {
++      log("warn", "website session re-authentication failed", {
++        error: getErrorMessageOrDefault(err),
++      });
++    } finally {
++      setBusy(false);
++    }
++  }, [refresh]);
++
 +  return (
-+    <div className="flex items-center gap-x-4">
-+      <Button brand="neutral" disabled={busy} onClick={connected === true ? disconnect : connect}>
-+        {connected === true ? t("Disconnect website session") : t("Connect website session")}
-+      </Button>
++    <div>
++      <div className="flex items-center gap-x-4">
++        <Button brand="neutral" disabled={busy} onClick={connect}>
++          {connected === true ? t("Sign in again") : t("Sign in to Nexus website")}
++        </Button>
++        <Button brand="neutral" disabled={busy} onClick={() => void refresh()}>
++          {t("Refresh status")}
++        </Button>
++        {connected === true ? (
++          <>
++            <Button brand="neutral" disabled={busy} onClick={reauthenticate}>
++              {t("Re-authenticate")}
++            </Button>
++            <Button brand="neutral" disabled={busy} onClick={clearSession}>
++              {t("Clear website session")}
++            </Button>
++          </>
++        ) : null}
++      </div>
 +
 +      <Typography appearance="subdued" typographyType="body-sm">
 +        {connected === null
@@ -3101,9 +3134,12 @@ index 19b8c4d..debfe17 100644
 +          : connected === true
 +            ? t("Website session connected")
 +            : t(
-+                "Not connected - click connect and log in to nexusmods.com in the window " +
-+                  "that opens. Use the same account as in Vortex.",
++                "Not connected - sign in to nexusmods.com in the window that opens. " +
++                  "This website session is separate from Vortex's OAuth login.",
 +              )}
++        {lastChecked !== null
++          ? " " + t("Last verified: {{time}}", { time: new Date(lastChecked).toLocaleTimeString() })
++          : ""}
 +      </Typography>
 +    </div>
 +  );
