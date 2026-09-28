@@ -1,0 +1,78 @@
+name: Validate Vortex Unlocked staging
+
+on:
+  push:
+    branches:
+      - unlocked-improvements-20260928
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: windows-latest
+    env:
+      NO_PARALLEL: "true"
+
+    steps:
+      - name: Checkout patch repository
+        uses: actions/checkout@v5
+
+      - name: Clone latest upstream Vortex
+        shell: pwsh
+        run: git -c core.autocrlf=false clone https://github.com/Nexus-Mods/Vortex.git vortex
+
+      - name: Apply and validate patch
+        shell: pwsh
+        run: |
+          $patchPath = Join-Path $PWD "patches\vortex-unlocked.patch"
+          $content = [IO.File]::ReadAllText($patchPath).Replace("`r`n", "`n")
+          [IO.File]::WriteAllText($patchPath, $content, [System.Text.UTF8Encoding]::new($false))
+          cd vortex
+          git apply --check --3way ..\patches\vortex-unlocked.patch
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          git apply --3way ..\patches\vortex-unlocked.patch
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          git diff --check
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+
+      - name: Read Node.js version
+        id: node-version
+        shell: pwsh
+        run: |
+          $packageJson = Get-Content vortex\package.json | ConvertFrom-Json
+          echo "NODE_VERSION=$($packageJson.engines.node)" >> $env:GITHUB_OUTPUT
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v6
+
+      - name: Use Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: ${{ steps.node-version.outputs.NODE_VERSION }}
+          cache: "pnpm"
+          cache-dependency-path: vortex/pnpm-lock.yaml
+
+      - name: Setup .NET 9
+        uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: "9.0.x"
+
+      - name: Setup Python 3.11
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        shell: pwsh
+        working-directory: vortex
+        env:
+          VORTEX_ELECTRON_REBUILD: "defer"
+        run: pnpm install --frozen-lockfile
+
+      - name: Build, lint, and typecheck workspace
+        shell: pwsh
+        working-directory: vortex
+        env:
+          NODE_ENV: production
+        run: pnpm run build
