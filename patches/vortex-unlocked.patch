@@ -1655,10 +1655,26 @@ index 52e62b0..1ea0504 100644
  
    context.registerSettings("Interface", Settings, () => ({ dashlets }), undefined, 1000);
 diff --git a/src/renderer/src/extensions/download_management/reducers/settings.ts b/src/renderer/src/extensions/download_management/reducers/settings.ts
-index ce7faa5..b07bfa3 100644
+index ce7faa5..aa1dec0 100644
 --- a/src/renderer/src/extensions/download_management/reducers/settings.ts
 +++ b/src/renderer/src/extensions/download_management/reducers/settings.ts
-@@ -24,7 +24,10 @@ export const settingsReducer: IReducerSpec<ISettingsDownloads> = {
+@@ -18,14 +18,32 @@
+     [actions.setShowDLGraph as any]: (state, payload) => setSafe(state, ["showGraph"], payload),
+     [actions.setCopyOnIFF as any]: (state, payload) => setSafe(state, ["copyOnIFF"], payload),
+     [actions.setMaxBandwidth as any]: (state, payload) => setSafe(state, ["maxBandwidth"], payload),
++    [actions.setPerDownloadBandwidth as any]: (state, payload) =>
++      setSafe(state, ["perDownloadBandwidth"], payload),
++    [actions.setBandwidthReserve as any]: (state, payload) =>
++      setSafe(state, ["bandwidthReserve"], payload),
++    [actions.setBandwidthScheduleLimit as any]: (state, payload) =>
++      setSafe(state, ["bandwidthScheduleLimit"], payload),
++    [actions.setBandwidthScheduleStart as any]: (state, payload) =>
++      setSafe(state, ["bandwidthScheduleStart"], payload),
++    [actions.setBandwidthScheduleEnd as any]: (state, payload) =>
++      setSafe(state, ["bandwidthScheduleEnd"], payload),
+     [actions.setCollectionConcurrency as any]: (state, payload) =>
+       setSafe(state, ["collectionsInstallWhileDownloading"], payload),
+   },
    defaults: {
      minChunkSize: 1024 * 1024,
      maxChunks: 10,
@@ -1668,8 +1684,14 @@ index ce7faa5..b07bfa3 100644
 +    // downloads on by default; adjustable 1-10 in Settings -> Downloads.
 +    maxParallelDownloads: 5,
      maxBandwidth: 0,
++    perDownloadBandwidth: 0,
++    bandwidthReserve: 0,
++    bandwidthScheduleLimit: 0,
++    bandwidthScheduleStart: 0,
++    bandwidthScheduleEnd: 0,
      path: path.join("{USERDATA}", "downloads"),
      showDropzone: true,
+     showGraph: true,
 diff --git a/src/renderer/src/extensions/download_management/views/Settings.tsx b/src/renderer/src/extensions/download_management/views/Settings.tsx
 index 34e5763..5617e2e 100644
 --- a/src/renderer/src/extensions/download_management/views/Settings.tsx
@@ -4215,3 +4237,45 @@ index e6423d5..ecaad80 100644
      abortSignal: options.abortSignal,
    });
  }
+diff --git a/src/renderer/src/extensions/download_management/actions/settings.ts b/src/renderer/src/extensions/download_management/actions/settings.ts
+index 3c756bd..f8ea306 100644
+--- a/src/renderer/src/extensions/download_management/actions/settings.ts
++++ b/src/renderer/src/extensions/download_management/actions/settings.ts
+@@ -12,3 +12,21 @@
+   "SET_COLLECTION_INSTALL_DOWNLOAD_CONCURRENCY",
+   (enabled) => enabled,
+ );
++
++export const setPerDownloadBandwidth = safeCreateAction(
++  "SET_PER_DOWNLOAD_BANDWIDTH",
++  (bandwidth) => bandwidth,
++);
++export const setBandwidthReserve = safeCreateAction("SET_BANDWIDTH_RESERVE", (bandwidth) => bandwidth);
++export const setBandwidthScheduleLimit = safeCreateAction(
++  "SET_BANDWIDTH_SCHEDULE_LIMIT",
++  (bandwidth) => bandwidth,
++);
++export const setBandwidthScheduleStart = safeCreateAction(
++  "SET_BANDWIDTH_SCHEDULE_START",
++  (hour) => hour,
++);
++export const setBandwidthScheduleEnd = safeCreateAction(
++  "SET_BANDWIDTH_SCHEDULE_END",
++  (hour) => hour,
++);
+diff --git a/src/renderer/src/types/IState.ts b/src/renderer/src/types/IState.ts
+index e328a2c..1e1f63a 100644
+--- a/src/renderer/src/types/IState.ts
++++ b/src/renderer/src/types/IState.ts
+@@ -268,6 +268,11 @@
+   maxChunks: number;
+   maxParallelDownloads: number;
+   maxBandwidth: number;
++  perDownloadBandwidth: number;
++  bandwidthReserve: number;
++  bandwidthScheduleLimit: number;
++  bandwidthScheduleStart: number;
++  bandwidthScheduleEnd: number;
+   path: string;
+   showDropzone: boolean;
+   showGraph: boolean;
