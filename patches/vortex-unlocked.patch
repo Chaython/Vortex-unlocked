@@ -1812,22 +1812,22 @@ index aadc590..aafb593 100644
  }
  
 diff --git a/src/renderer/src/extensions/nexus_integration/eventHandlers.ts b/src/renderer/src/extensions/nexus_integration/eventHandlers.ts
-index 26bb74e..7e2a818 100644
+index a8e16fc..ad06d00 100644
 --- a/src/renderer/src/extensions/nexus_integration/eventHandlers.ts
 +++ b/src/renderer/src/extensions/nexus_integration/eventHandlers.ts
-@@ -55,9 +55,9 @@ import { setUpdatingMods } from "../mod_management/actions/session";
- import type { IModListItem } from "../news_dashlet/types";
+@@ -55,10 +55,10 @@ import type { IModListItem } from "../news_dashlet/types";
  import { setUserInfo } from "./actions/persistent";
  import { NEXUS_BASE_URL, NEXUS_GAMES_URL } from "./constants";
 -import { ensureFreshMembership, refreshMembership } from "./membership";
 +import { refreshMembership } from "./membership";
  import { nxmModUrl } from "./NXMUrl";
+ import { isRateLimited, notifyRateLimited } from "./rateLimit";
 -import { isLoggedIn, isPremium } from "./selectors";
 +import { isLoggedIn } from "./selectors";
  import type { IValidateKeyDataV2 } from "./types/IValidateKeyData";
  import {
    checkModVersionsImpl,
-@@ -366,18 +366,9 @@ function downloadFile(
+@@ -367,18 +367,9 @@ function downloadFile(
  ): Bluebird<string> {
    const state: IState = api.getState();
    const gameId = game?.id ?? SITE_ID;
