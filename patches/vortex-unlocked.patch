@@ -3264,3 +3264,112 @@ index 879f372..25d375c 100644
        cancel,
        pause,
      };
+diff --git a/src/main/src/downloading/ipc.ts b/src/main/src/downloading/ipc.ts
+index 0520c23..86486d9 100644
+--- a/src/main/src/downloading/ipc.ts
++++ b/src/main/src/downloading/ipc.ts
+@@ -34,6 +34,25 @@
+   return resource.probeEndpoint.url.toString();
+ }
+ 
++function resourceHost(resource: ResolvedResource): string | undefined {
++  try {
++    return new URL(resourceToUrl(resource)).host || undefined;
++  } catch {
++    return undefined;
++  }
++}
++
++function checkpointToWire(checkpoint: ReturnType<DownloadManager["getCheckpoint"]>) {
++  if (checkpoint === undefined) return undefined;
++  return {
++    downloadId: checkpoint.downloadId,
++    resource: resourceToUrl(checkpoint.resource as ResolvedResource),
++    dest: checkpoint.dest,
++    completedRanges: checkpoint.completedRanges,
++    etag: checkpoint.etag,
++  } satisfies WireDownloadCheckpoint;
++}
++
+ export function init(manager: DownloadManager): void {
+   // Our network timeouts are 30 seconds, which means that we will fail
+   // with the callback before the network could. Give it a bit of extra time to avoid spurious failures.
+@@ -41,7 +60,7 @@
+ 
+   const webContentsByDownloadId = new Map<string, WebContents>();
+ 
+-  betterIpcMain.handle("download:start", async (event, dest, collationId, downloadId) => {
++  betterIpcMain.handle("download:start", async (event, dest, collationId, downloadId, priority) => {
+     const webContents = event.sender;
+     // free users must click through the website serially at their own pace (~10-13s each),
+     // so any wall-clock timer abandons every download past the first few in a batch.
+@@ -55,7 +74,16 @@
+     );
+     const resource = wireToResolvedResource(wireResource);
+     const resolver = () => Promise.resolve(resource);
+-    const handle = manager.download(resource, dest, resolver, undefined, undefined, downloadId);
++    const handle = manager.download(
++      resource,
++      dest,
++      resolver,
++      undefined,
++      undefined,
++      downloadId,
++      Number(priority ?? 0),
++      resourceHost(resource),
++    );
+     webContentsByDownloadId.set(handle.downloadId, webContents);
+     handle.promise.catch((err) =>
+       log("error", "download failed", { downloadId: handle.downloadId, err }),
+@@ -72,15 +100,8 @@
+     if (result.status !== "paused") {
+       throw new Error(`Download ${downloadId} is not paused: status is ${result.status}`);
+     }
+-    const { checkpoint } = result;
+-    const resource = resourceToUrl(checkpoint.resource as ResolvedResource);
+-    const wire: WireDownloadCheckpoint = {
+-      downloadId: checkpoint.downloadId,
+-      resource,
+-      dest: checkpoint.dest,
+-      completedRanges: checkpoint.completedRanges,
+-      etag: checkpoint.etag,
+-    };
++    const wire = checkpointToWire(result.checkpoint);
++    if (wire === undefined) throw new Error(`No checkpoint available for ${downloadId}`);
+     return wire;
+   });
+ 
+@@ -94,7 +115,14 @@
+       resource,
+     };
+     const resolver = () => Promise.resolve(resource);
+-    const handle = manager.resume(checkpoint, resolver, staticChunker());
++    const handle = manager.resume(
++      checkpoint,
++      resolver,
++      staticChunker(),
++      undefined,
++      0,
++      resourceHost(resource),
++    );
+     webContentsByDownloadId.set(wireCheckpoint.downloadId, webContents);
+     handle.promise.catch((err) =>
+       log("error", "download failed", {
+@@ -120,6 +148,17 @@
+     return result;
+   });
+ 
++  betterIpcMain.handle("download:getCheckpoints", (_event, downloadIds) => {
++    const result: Record<string, WireDownloadCheckpoint> = {};
++    for (const downloadId of downloadIds) {
++      const checkpoint = checkpointToWire(manager.getCheckpoint(downloadId));
++      if (checkpoint !== undefined && checkpoint.completedRanges.length > 0) {
++        result[downloadId] = checkpoint;
++      }
++    }
++    return result;
++  });
++
+   betterIpcMain.handle("download:configure", (_event, options) => {
+     manager.configure({
+       concurrency: options.concurrency !== undefined ? Number(options.concurrency) : undefined,
