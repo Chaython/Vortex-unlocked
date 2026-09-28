@@ -1693,10 +1693,10 @@ index ce7faa5..aa1dec0 100644
      showDropzone: true,
      showGraph: true,
 diff --git a/src/renderer/src/extensions/download_management/views/Settings.tsx b/src/renderer/src/extensions/download_management/views/Settings.tsx
-index 34e5763..5617e2e 100644
+index 34e5763..3b3786f 100644
 --- a/src/renderer/src/extensions/download_management/views/Settings.tsx
 +++ b/src/renderer/src/extensions/download_management/views/Settings.tsx
-@@ -22,7 +22,6 @@ import { ComponentEx, connect, translate } from "../../../controls/ComponentEx";
+@@ -22,7 +22,6 @@
  import FlexLayout from "../../../controls/FlexLayout";
  import FormInput from "../../../controls/FormInput";
  import Icon from "../../../controls/Icon";
@@ -1704,7 +1704,7 @@ index 34e5763..5617e2e 100644
  import More from "../../../controls/More";
  import Spinner from "../../../controls/Spinner";
  import Toggle from "../../../controls/Toggle";
-@@ -53,18 +52,8 @@ import opn from "../../../util/opn";
+@@ -53,23 +52,18 @@
  import * as selectors from "../../../util/selectors";
  import { getSafe } from "../../../util/storeHelper";
  import { cleanFailedTransfer, testPathTransfer, transferPath } from "../../../util/transferPath";
@@ -1722,9 +1722,19 @@ index 34e5763..5617e2e 100644
  import getTextMod from "../../mod_management/texts";
 -import { PREMIUM_PATH } from "../../nexus_integration/constants";
  import {
++  setBandwidthReserve,
++  setBandwidthScheduleEnd,
++  setBandwidthScheduleLimit,
++  setBandwidthScheduleStart,
    setCopyOnIFF,
    setDownloadPath,
-@@ -81,7 +70,6 @@ const MB = 1024 * 1024;
+   setMaxBandwidth,
+   setMaxDownloads,
++  setPerDownloadBandwidth,
+   setCollectionConcurrency,
+ } from "../actions/settings";
+ import { setTransferDownloads } from "../actions/transactions";
+@@ -81,13 +75,17 @@
  
  interface IConnectedProps {
    parallelDownloads: number;
@@ -1732,16 +1742,50 @@ index 34e5763..5617e2e 100644
    downloadPath: string;
    modsInstallPath: string;
    downloads: { [downloadId: string]: IDownload };
-@@ -143,7 +131,7 @@ class Settings extends ComponentEx<IProps, IComponentState> {
+   instanceId: string;
+   copyOnIFF: boolean;
+   maxBandwidth: number;
++  perDownloadBandwidth: number;
++  bandwidthReserve: number;
++  bandwidthScheduleLimit: number;
++  bandwidthScheduleStart: number;
++  bandwidthScheduleEnd: number;
+   collectionsInstallWhileDownloading: boolean;
+ }
+ 
+@@ -109,6 +107,11 @@
+   ) => void;
+   onSetCopyOnIFF: (enabled: boolean) => void;
+   onSetMaxBandwidth: (bps: number) => void;
++  onSetPerDownloadBandwidth: (bps: number) => void;
++  onSetBandwidthReserve: (bps: number) => void;
++  onSetBandwidthScheduleLimit: (bps: number) => void;
++  onSetBandwidthScheduleStart: (hour: number) => void;
++  onSetBandwidthScheduleEnd: (hour: number) => void;
+   onSetCollectionConcurrency: (enabled: boolean) => void;
+ }
+ 
+@@ -143,7 +146,18 @@
    }
  
    public render(): JSX.Element {
 -    const { t, copyOnIFF, downloads, isPremium, maxBandwidth, parallelDownloads } = this.props;
-+    const { t, copyOnIFF, downloads, maxBandwidth, parallelDownloads } = this.props;
++    const {
++      t,
++      copyOnIFF,
++      downloads,
++      maxBandwidth,
++      parallelDownloads,
++      perDownloadBandwidth,
++      bandwidthReserve,
++      bandwidthScheduleLimit,
++      bandwidthScheduleStart,
++      bandwidthScheduleEnd,
++    } = this.props;
      const { downloadPath, progress, progressFile } = this.state;
  
      const pathPreview = getDownloadPath(downloadPath);
-@@ -151,7 +139,6 @@ class Settings extends ComponentEx<IProps, IComponentState> {
+@@ -151,7 +165,6 @@
      const validationState = this.validateDownloadPath(pathPreview);
  
      const pathValid = validationState.state !== "error";
@@ -1749,7 +1793,7 @@ index 34e5763..5617e2e 100644
  
      const hasActivity =
        Object.keys(downloads).find((dlId) => downloads[dlId].state === "started") !== undefined;
-@@ -230,24 +217,7 @@ class Settings extends ComponentEx<IProps, IComponentState> {
+@@ -230,25 +243,8 @@
                min={1}
                max={10}
                onChange={this.onChangeParallelDownloads}
@@ -1761,7 +1805,7 @@ index 34e5763..5617e2e 100644
 -                {t("Unlock max download speeds")}
 -              </BSButton>
 -            ) : null}
--          </div>
+           </div>
 -          <div>
 -            {!isPremium ? (
 -              <p>
@@ -1771,10 +1815,116 @@ index 34e5763..5617e2e 100644
 -                )}
 -              </p>
 -            ) : null}
-           </div>
+-          </div>
          </FormGroup>
          <FormGroup id="download-bandwidth-limit">
-@@ -399,15 +369,8 @@ class Settings extends ComponentEx<IProps, IComponentState> {
+           <ControlLabel>{t("Limit Bandwidth")}</ControlLabel>
+@@ -263,6 +259,65 @@
+             MB/s
+           </div>
+         </FormGroup>
++        <FormGroup id="download-bandwidth-advanced">
++          <ControlLabel>{t("Per-download bandwidth limit")}</ControlLabel>
++          <div style={{ display: "flex", alignItems: "center" }}>
++            <FormInput
++              value={perDownloadBandwidth > 0 ? (perDownloadBandwidth / MB).toString() : ""}
++              placeholder={t("Unlimited")}
++              onChange={this.changePerDownloadBandwidth}
++              type="number"
++              min={0}
++            />
++            MB/s
++          </div>
++          <HelpBlock>
++            {t("Limits each transfer independently while the global limit still caps all downloads.")}
++          </HelpBlock>
++
++          <ControlLabel>{t("Reserve bandwidth from global limit")}</ControlLabel>
++          <div style={{ display: "flex", alignItems: "center" }}>
++            <FormInput
++              value={bandwidthReserve > 0 ? (bandwidthReserve / MB).toString() : ""}
++              placeholder="0"
++              onChange={this.changeBandwidthReserve}
++              type="number"
++              min={0}
++            />
++            MB/s
++          </div>
++
++          <ControlLabel>{t("Scheduled bandwidth limit")}</ControlLabel>
++          <div style={{ display: "flex", alignItems: "center", gap: "0.5em" }}>
++            <FormInput
++              value={bandwidthScheduleLimit > 0 ? (bandwidthScheduleLimit / MB).toString() : ""}
++              placeholder={t("Disabled")}
++              onChange={this.changeBandwidthScheduleLimit}
++              type="number"
++              min={0}
++            />
++            MB/s
++            <span>{t("from")}</span>
++            <FormInput
++              value={bandwidthScheduleStart.toString()}
++              onChange={this.changeBandwidthScheduleStart}
++              type="number"
++              min={0}
++              max={23}
++            />
++            <span>{t("to")}</span>
++            <FormInput
++              value={bandwidthScheduleEnd.toString()}
++              onChange={this.changeBandwidthScheduleEnd}
++              type="number"
++              min={0}
++              max={23}
++            />
++          </div>
++          <HelpBlock>
++            {t("Hours use local time; overnight ranges such as 22 to 7 are supported.")}
++          </HelpBlock>
++        </FormGroup>
+         <FormGroup>
+           <Toggle
+             checked={this.props.collectionsInstallWhileDownloading}
+@@ -279,13 +334,33 @@
+   }
+ 
+   private changeMaxBandwidth = (input: string) => {
+-    if (input.length === 0) {
+-      this.props.onSetMaxBandwidth(0);
+-    } else {
+-      this.props.onSetMaxBandwidth(parseFloat(input) * MB);
+-    }
++    this.props.onSetMaxBandwidth(input.length === 0 ? 0 : Math.max(0, parseFloat(input) * MB));
+   };
+ 
++  private changePerDownloadBandwidth = (input: string) => {
++    this.props.onSetPerDownloadBandwidth(
++      input.length === 0 ? 0 : Math.max(0, parseFloat(input) * MB),
++    );
++  };
++
++  private changeBandwidthReserve = (input: string) => {
++    this.props.onSetBandwidthReserve(input.length === 0 ? 0 : Math.max(0, parseFloat(input) * MB));
++  };
++
++  private changeBandwidthScheduleLimit = (input: string) => {
++    this.props.onSetBandwidthScheduleLimit(
++      input.length === 0 ? 0 : Math.max(0, parseFloat(input) * MB),
++    );
++  };
++
++  private changeBandwidthScheduleStart = (input: string) => {
++    this.props.onSetBandwidthScheduleStart(Math.min(23, Math.max(0, parseInt(input, 10) || 0)));
++  };
++
++  private changeBandwidthScheduleEnd = (input: string) => {
++    this.props.onSetBandwidthScheduleEnd(Math.min(23, Math.max(0, parseInt(input, 10) || 0)));
++  };
++
+   private toggleCopyOnIFF = (newValue: boolean) => {
+     this.props.onSetCopyOnIFF(newValue);
+   };
+@@ -399,15 +474,8 @@
      opn(url).catch((err) => undefined);
    };
  
@@ -1792,7 +1942,7 @@ index 34e5763..5617e2e 100644
  
    private setDownloadPath = (newPath: string) => {
      this.nextState.downloadPath = newPath;
-@@ -836,11 +799,9 @@ class Settings extends ComponentEx<IProps, IComponentState> {
+@@ -836,17 +904,20 @@
  
  function mapStateToProps(state: IState): IConnectedProps {
    const modsInstallPath = selectors.installPath(state);
@@ -1806,6 +1956,29 @@ index 34e5763..5617e2e 100644
      downloadPath: state.settings.downloads.path,
      downloads: state.persistent.downloads.files,
      modsInstallPath,
+     instanceId: state.app.instanceId,
+     copyOnIFF: state.settings.downloads.copyOnIFF,
+     maxBandwidth: state.settings.downloads.maxBandwidth,
++    perDownloadBandwidth: state.settings.downloads.perDownloadBandwidth ?? 0,
++    bandwidthReserve: state.settings.downloads.bandwidthReserve ?? 0,
++    bandwidthScheduleLimit: state.settings.downloads.bandwidthScheduleLimit ?? 0,
++    bandwidthScheduleStart: state.settings.downloads.bandwidthScheduleStart ?? 0,
++    bandwidthScheduleEnd: state.settings.downloads.bandwidthScheduleEnd ?? 0,
+     collectionsInstallWhileDownloading: state.settings.downloads.collectionsInstallWhileDownloading,
+   };
+ }
+@@ -866,6 +937,11 @@
+     ): void => showError(dispatch, message, details, { allowReport, isBBCode }),
+     onSetCopyOnIFF: (enabled: boolean) => dispatch(setCopyOnIFF(enabled)),
+     onSetMaxBandwidth: (bps: number) => dispatch(setMaxBandwidth(bps)),
++    onSetPerDownloadBandwidth: (bps: number) => dispatch(setPerDownloadBandwidth(bps)),
++    onSetBandwidthReserve: (bps: number) => dispatch(setBandwidthReserve(bps)),
++    onSetBandwidthScheduleLimit: (bps: number) => dispatch(setBandwidthScheduleLimit(bps)),
++    onSetBandwidthScheduleStart: (hour: number) => dispatch(setBandwidthScheduleStart(hour)),
++    onSetBandwidthScheduleEnd: (hour: number) => dispatch(setBandwidthScheduleEnd(hour)),
+     onSetCollectionConcurrency: (enabled: boolean) => dispatch(setCollectionConcurrency(enabled)),
+   };
+ }
 diff --git a/src/renderer/src/extensions/mod_management/hooks/useModToolbarActions.hook.tsx b/src/renderer/src/extensions/mod_management/hooks/useModToolbarActions.hook.tsx
 index bd3f102..619fce8 100644
 --- a/src/renderer/src/extensions/mod_management/hooks/useModToolbarActions.hook.tsx
