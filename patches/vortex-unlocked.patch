@@ -2878,7 +2878,7 @@ index 0492857..98a8698 100644
                </FlexLayout>
              </FlexLayout.Flex>
 diff --git a/src/renderer/src/extensions/settings_interface/SettingsInterface.tsx b/src/renderer/src/extensions/settings_interface/SettingsInterface.tsx
-index 19b8c4d..debfe17 100644
+index 19b8c4d..0eb3f10 100644
 --- a/src/renderer/src/extensions/settings_interface/SettingsInterface.tsx
 +++ b/src/renderer/src/extensions/settings_interface/SettingsInterface.tsx
 @@ -1,7 +1,7 @@
@@ -2890,7 +2890,7 @@ index 19b8c4d..debfe17 100644
  import type { IParameters } from "@vortex/shared/cli";
  import PromiseBB from "bluebird";
  import * as React from "react";
-@@ -44,11 +44,14 @@ import {
+@@ -44,11 +44,14 @@
    setAlwaysCompactHeaders,
    setDesktopNotifications,
    setForegroundDL,
@@ -2905,7 +2905,7 @@ index 19b8c4d..debfe17 100644
  } from "./actions/interface";
  import { buildLanguageOptions, type ILanguage, type ILanguageOption } from "./languageOptions";
  import getText from "./texts";
-@@ -74,6 +77,9 @@ interface IConnectedProps {
+@@ -74,6 +77,9 @@
    relativeTimes: boolean;
    suppressedNotifications: { [id: string]: boolean };
    foregroundDL: boolean;
@@ -2915,7 +2915,7 @@ index 19b8c4d..debfe17 100644
  }
  
  interface IActionProps {
-@@ -99,6 +105,9 @@ interface IActionProps {
+@@ -99,6 +105,9 @@
    onSetRelativeTimes: (enabled: boolean) => void;
    onResetNotificationSuppression: () => void;
    onSetForegroundDL: (enabled: boolean) => void;
@@ -2925,7 +2925,7 @@ index 19b8c4d..debfe17 100644
  }
  
  type IProps = IBaseProps &
-@@ -143,10 +152,16 @@ class SettingsInterfaceImpl extends ComponentEx<IProps, {}> {
+@@ -143,10 +152,16 @@
        customTitlebar,
        desktopNotifications,
        foregroundDL,
@@ -2942,7 +2942,7 @@ index 19b8c4d..debfe17 100644
        onSetReduceMotion,
        reduceMotion,
        relativeTimes,
-@@ -268,6 +283,56 @@ class SettingsInterfaceImpl extends ComponentEx<IProps, {}> {
+@@ -268,8 +283,58 @@
                {t("Bring Vortex to foreground when starting downloads in browser")}
              </Toggle>
            </div>
@@ -2953,8 +2953,8 @@ index 19b8c4d..debfe17 100644
 +              {t("Hide Dashboard tab")}
 +            </Toggle>
 +          </div>
-+        </FormGroup>
-+
+         </FormGroup>
+ 
 +        {/* Vortex Unlocked: import data from an existing official Vortex install. */}
 +        <FormGroup controlId="unlockedImport">
 +          <ControlLabel>{t("Vortex Unlocked")}</ControlLabel>
@@ -2996,10 +2996,12 @@ index 19b8c4d..debfe17 100644
 +          </div>
 +
 +          <WebsiteSessionSection t={t} />
-         </FormGroup>
- 
++        </FormGroup>
++
          <FormGroup controlId="advanced">
-@@ -503,11 +568,112 @@ class SettingsInterfaceImpl extends ComponentEx<IProps, {}> {
+           <ControlLabel>{t("Advanced")}</ControlLabel>
+ 
+@@ -503,11 +568,148 @@
      onSetAdvancedMode(!advanced);
    };
  
@@ -3148,7 +3150,7 @@ index 19b8c4d..debfe17 100644
  function mapStateToProps(state: IState): IConnectedProps {
    return {
      profilesVisible: state.settings.interface.profilesVisible,
-@@ -525,6 +691,9 @@ function mapStateToProps(state: IState): IConnectedProps {
+@@ -525,6 +727,9 @@
      alwaysCompactHeaders: state.settings.interface.alwaysCompactHeaders === true,
      suppressedNotifications: state.settings.notifications.suppress,
      foregroundDL: state.settings.interface.foregroundDL,
@@ -3158,7 +3160,7 @@ index 19b8c4d..debfe17 100644
    };
  }
  
-@@ -576,6 +745,9 @@ function mapDispatchToProps(dispatch: ThunkDispatch<any, null, Redux.Action>): I
+@@ -576,6 +781,9 @@
        dispatch(resetSuppression(null));
      },
      onSetForegroundDL: (enabled: boolean) => dispatch(setForegroundDL(enabled)),
