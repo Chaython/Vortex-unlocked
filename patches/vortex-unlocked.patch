@@ -4618,3 +4618,72 @@ index b4e2e2a..3753dc9 100644
      this.completeInstallationTracking(outcome);
      this.mCollection = undefined;
      this.setDependentMods([]);
+diff --git a/src/renderer/src/extensions/mod_management/InstallManager.ts b/src/renderer/src/extensions/mod_management/InstallManager.ts
+index 90074e2..4dfd035 100644
+--- a/src/renderer/src/extensions/mod_management/InstallManager.ts
++++ b/src/renderer/src/extensions/mod_management/InstallManager.ts
+@@ -236,6 +236,8 @@
+ interface IParentCollection {
+   collectionId: string;
+   revisionId?: string;
++  /** Higher values are queued first by Vortex Unlocked's download scheduler. */
++  downloadPriority?: number;
+ }
+ 
+ class InstructionGroups {
+@@ -3538,7 +3540,9 @@
+             dep.lookupResults[0].value,
+             () => !this.mDependencyInstalls[sourceModId],
+             dep.extra?.fileName,
+-            parentCollection,
++            parentCollection === undefined
++              ? undefined
++              : { ...parentCollection, downloadPriority: 100 },
+           );
+         })
+         .then((downloadId: string | undefined) => {
+@@ -5460,6 +5464,7 @@
+               startDownloadModInfo.nexus = {
+                 parentCollectionId: parentCollection.collectionId,
+                 parentRevisionId: parentCollection.revisionId,
++                downloadPriority: parentCollection.downloadPriority,
+               };
+             }
+ 
+@@ -6215,6 +6220,19 @@
+           }
+         : undefined;
+ 
++    // Stable ordering makes collection restart/reconstruction deterministic:
++    // earlier phases and required members are always queued first.
++    dependencies.sort((a, b) => {
++      const phaseDelta = (a.phase ?? 0) - (b.phase ?? 0);
++      if (phaseDelta !== 0) return phaseDelta;
++      const aOptional = a.type === "recommends" ? 1 : 0;
++      const bOptional = b.type === "recommends" ? 1 : 0;
++      if (aOptional !== bOptional) return aOptional - bOptional;
++      return (a.sessionRuleId ?? a.reference.tag ?? "").localeCompare(
++        b.sessionRuleId ?? b.reference.tag ?? "",
++      );
++    });
++
+     let queuedDownloads: IModReference[] = [];
+ 
+     const clearQueued = () => {
+@@ -6263,7 +6281,15 @@
+                 dep.lookupResults[0].value,
+                 () => abort.signal.aborted,
+                 dep.extra?.fileName,
+-                parentCollection,
++                parentCollection === undefined
++                  ? undefined
++                  : {
++                      ...parentCollection,
++                      downloadPriority:
++                        1000 -
++                        Math.max(0, dep.phase ?? 0) * 10 -
++                        (dep.type === "recommends" ? 500 : 0),
++                    },
+               ),
+             )
+             .then((dlId) => {
