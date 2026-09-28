@@ -3754,10 +3754,10 @@ index 879f372..624a5cf 100644
      // Swallow all rejections on one fork so that pause()/cancel() flows
      // never surface as unhandled rejections.
 diff --git a/src/main/src/downloading/ipc.ts b/src/main/src/downloading/ipc.ts
-index 0520c23..16d5bbf 100644
+index 0520c23..051fcc3 100644
 --- a/src/main/src/downloading/ipc.ts
 +++ b/src/main/src/downloading/ipc.ts
-@@ -20,12 +20,20 @@
+@@ -20,12 +20,21 @@
  function wireToResolvedResource(wire: WireResolvedResource): ResolvedResource {
    const probe = wireToResolvedEndpoint(wire.probeEndpoint);
    if (!wire.chunkEndpoints?.length) return probe;
@@ -3777,12 +3777,13 @@ index 0520c23..16d5bbf 100644
 +      const attempt = attempts.get(chunk.index) ?? 0;
 +      attempts.set(chunk.index, attempt + 1);
 +      const idx = (chunk.index + attempt) % wire.chunkEndpoints!.length;
-+      return Promise.resolve(wireToResolvedEndpoint(wire.chunkEndpoints![idx]));
++      const endpoint = wire.chunkEndpoints?.[idx] ?? wire.probeEndpoint;
++      return Promise.resolve(wireToResolvedEndpoint(endpoint));
 +    },
    };
  }
  
-@@ -41,7 +49,9 @@
+@@ -41,7 +50,9 @@
  
    const webContentsByDownloadId = new Map<string, WebContents>();
  
@@ -3793,7 +3794,7 @@ index 0520c23..16d5bbf 100644
      const webContents = event.sender;
      // free users must click through the website serially at their own pace (~10-13s each),
      // so any wall-clock timer abandons every download past the first few in a batch.
-@@ -55,13 +65,22 @@
+@@ -55,13 +66,22 @@
      );
      const resource = wireToResolvedResource(wireResource);
      const resolver = () => Promise.resolve(resource);
