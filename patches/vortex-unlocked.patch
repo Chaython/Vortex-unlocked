@@ -3856,8 +3856,13 @@ index b74a8a5..7e0843a 100644
 +  #priorityFor(modInfo: ModInfo): number {
 +    const info = modInfo as ModInfo & {
 +      startedAsUpdate?: boolean;
-+      nexus?: { parentCollectionId?: unknown; ids?: { collectionId?: unknown } };
++      nexus?: {
++        parentCollectionId?: unknown;
++        downloadPriority?: number;
++        ids?: { collectionId?: unknown };
++      };
 +    };
++    if (typeof info.nexus?.downloadPriority === "number") return info.nexus.downloadPriority;
 +    if (info.nexus?.parentCollectionId !== undefined) return 30;
 +    if (info.nexus?.ids?.collectionId !== undefined) return 20;
 +    if (info.startedAsUpdate === true) return 10;
