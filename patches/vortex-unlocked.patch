@@ -4731,3 +4731,180 @@ index 90074e2..4dfd035 100644
                ),
              )
              .then((dlId) => {
+diff --git a/src/renderer/src/extensions/health_check/utils/fileRequirements/fileRequirementActions.ts b/src/renderer/src/extensions/health_check/utils/fileRequirements/fileRequirementActions.ts
+index 0d78613..9f6a743 100644
+--- a/src/renderer/src/extensions/health_check/utils/fileRequirements/fileRequirementActions.ts
++++ b/src/renderer/src/extensions/health_check/utils/fileRequirements/fileRequirementActions.ts
+@@ -1,6 +1,5 @@
+ import { knownGames } from "@/extensions/gamemode_management/selectors";
+ import renderModName from "@/extensions/mod_management/util/modName";
+-import { shouldShowPremiumAd } from "@/extensions/nexus_integration/selectors";
+ import { nexusGames } from "@/extensions/nexus_integration/util";
+ import { convertGameIdReverse } from "@/extensions/nexus_integration/util/convertGameId";
+ import { decodeUID } from "@/extensions/nexus_integration/util/UIDs";
+@@ -43,8 +42,8 @@
+ /**
+  * Download and install a missing / wrong-version file, then make it the active version,
+  * disabling `enabledFile` when the download replaces a wrong version of the same chain.
+- * Free users can't 1-click install, so open the file page instead (website download); the
+- * premium upsell is out of MVP scope.
++ * Vortex Unlocked always uses the normal in-app download/install path. Any server-side
++ * authorization requirement is handled by the existing NXM resolver and website fallback.
+  */
+ export async function downloadFileRequirement(
+   api: IExtensionApi,
+@@ -52,11 +51,6 @@
+   identity?: IssueAnalyticsIdentity,
+   enabledFile?: IInstalledFile,
+ ): Promise<boolean> {
+-  if (shouldShowPremiumAd(api.getState())) {
+-    openFilePage(api, candidate);
+-    return false;
+-  }
+-
+   const mod = decodeUID(candidate.modUID);
+   const file = decodeUID(candidate.fileUID);
+ 
+diff --git a/src/renderer/src/extensions/health_check/components/file_requirement/ListingRow.tsx b/src/renderer/src/extensions/health_check/components/file_requirement/ListingRow.tsx
+index 091267a..943dc47 100644
+--- a/src/renderer/src/extensions/health_check/components/file_requirement/ListingRow.tsx
++++ b/src/renderer/src/extensions/health_check/components/file_requirement/ListingRow.tsx
+@@ -1,12 +1,11 @@
+ import { mdiCallSplit, mdiCheck, mdiMonitorArrowDownVariant, mdiSwapHorizontal } from "@mdi/js";
+-import React, { useState } from "react";
++import React from "react";
+ import { useTranslation } from "react-i18next";
+ import { useSelector } from "react-redux";
+ 
+ import {
+   downloadFileRequirement,
+   installDownloadedFile,
+-  openFilePage,
+   switchActiveVersions,
+ } from "@/extensions/health_check/utils/fileRequirements/fileRequirementActions";
+ import {
+@@ -20,24 +19,19 @@
+ import { sharedRequirementState } from "@/extensions/health_check/utils/shared/tracking";
+ import { decodeUID } from "@/extensions/nexus_integration/util/UIDs";
+ import { Button } from "@/ui/components/button/Button";
+-import { PremiumBadge } from "@/ui/components/premium_badge/PremiumBadge";
+ 
+-import { shouldShowPremiumAd } from "../../../nexus_integration/selectors";
+ import { useIssue, useIssueTracking } from "../../hooks/HealthCheckTracking.context";
+ import { useFileRequirementFeedback } from "../../hooks/useFileRequirementFeedback";
+ import { useReportCopy } from "../../hooks/useReportCopy";
+ import type { IListingRowProps } from "../../views/content/types";
+ import { EntryActions } from "../entry_actions/EntryActions";
+ import { ListingRow as ListingRowShell } from "../listing_row/ListingRow";
+-import { PremiumModal } from "../premium_modal/PremiumModal";
+ 
+ export const ListingRow = ({ api, entry, isHidden, onOpen, onToggleHide }: IListingRowProps) => {
+   const { t } = useTranslation(["health_check", "common"]);
+   const report = entry.data as IFileRequirementReport;
+   const { title, summary } = useReportCopy(report);
+ 
+-  const showPremiumAd = useSelector(shouldShowPremiumAd);
+-  const [showPremium, setShowPremium] = useState(false);
+   const { givenFeedback, markFeedback } = useFileRequirementFeedback(api, report.sourceFileUID);
+ 
+   const {
+@@ -107,11 +101,6 @@
+       });
+     }
+ 
+-    if (showPremiumAd) {
+-      setShowPremium(true);
+-      return;
+-    }
+-
+     runQuickInstall();
+   };
+ 
+@@ -124,7 +113,6 @@
+               appearance="moderate"
+               brand="neutral"
+               leftIconPath={mdiMonitorArrowDownVariant}
+-              rightIcon={showPremiumAd ? <PremiumBadge /> : undefined}
+               size="sm"
+               onClick={doQuickInstall}
+             >
+@@ -207,28 +195,6 @@
+         title={title}
+         onOpen={onOpen}
+       />
+-
+-      <PremiumModal
+-        api={api}
+-        downloadScope={candidates.length === 1 ? "single" : "all"}
+-        isOpen={showPremium}
+-        modCount={candidates.length}
+-        modId={candidates.length === 1 ? (decodeUID(candidates[0].modUID)?.id ?? 0) : undefined}
+-        trigger={candidates.length === 1 ? "single_install" : "batch_install"}
+-        onClose={() => setShowPremium(false)}
+-        onDownload={() => {
+-          setShowPremium(false);
+-
+-          // Free-user fallback: a single candidate opens its file page directly;
+-          // otherwise open the detail so each requirement's mod page is reachable.
+-          if (candidates.length === 1) {
+-            openFilePage(api, candidates[0]);
+-          } else {
+-            onOpen();
+-          }
+-        }}
+-        onPremiumUnlocked={runQuickInstall}
+-      />
+     </>
+   );
+ };
+diff --git a/src/renderer/src/extensions/health_check/components/file_requirement/DetailView.tsx b/src/renderer/src/extensions/health_check/components/file_requirement/DetailView.tsx
+index d70e710..14e8b19 100644
+--- a/src/renderer/src/extensions/health_check/components/file_requirement/DetailView.tsx
++++ b/src/renderer/src/extensions/health_check/components/file_requirement/DetailView.tsx
+@@ -15,7 +15,6 @@
+ import { TypographyLink } from "@/ui/components/typography/TypographyLink";
+ import { joinClasses } from "@/ui/utils/joinClasses";
+ 
+-import { shouldShowPremiumAd } from "../../../nexus_integration/selectors";
+ import { setFileRequirementHidden } from "../../actions/persistent";
+ import { useIssue, useIssueTracking } from "../../hooks/HealthCheckTracking.context";
+ import { useFileRequirementFeedback } from "../../hooks/useFileRequirementFeedback";
+@@ -78,8 +77,6 @@
+     onBack();
+   };
+ 
+-  const showPremiumAd = useSelector(shouldShowPremiumAd);
+-
+   // Feedback is keyed per source file (see useFileRequirementFeedback); EntryActions
+   // emits the analytics, this only records that feedback was given.
+   const { givenFeedback, markFeedback } = useFileRequirementFeedback(api, report.sourceFileUID);
+@@ -138,7 +135,7 @@
+             api={api}
+             ctx={{
+               api,
+-              showPremiumAd,
++              showPremiumAd: false,
+               identity,
+               requestDownload: (candidate, enabledFile) =>
+                 downloadFileRequirement(api, candidate, identity, enabledFile),
+@@ -163,17 +160,9 @@
+                   mod_version: candidate.version,
+                 };
+ 
+-                // Free users install via the website (a resolution action); premium users
+-                // browsing to the mod page is informational, so it carries no resolution.
+-                if (showPremiumAd) {
+-                  trackInstallViaModPageClicked({
+-                    ...modPageProps,
+-                    requirement_state: resolution.requirementState,
+-                    option_count: resolution.optionCount,
+-                  });
+-                } else {
+-                  trackViewModPageClicked(modPageProps);
+-                }
++                // Vortex Unlocked never routes 1-click installs to the Premium fallback,
++                // so opening the mod page here is informational.
++                trackViewModPageClicked(modPageProps);
+               },
+               onEnable: (correctFile, enabledFile, resolution) => {
+                 const resolutionProps = {
