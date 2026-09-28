@@ -1586,10 +1586,10 @@ index 53777be..a61c1cc 100644
  }
  
 diff --git a/src/renderer/src/extensions/collections/views/InstallDialog/InstallStartDialog.tsx b/src/renderer/src/extensions/collections/views/InstallDialog/InstallStartDialog.tsx
-index a6378b5..603d4b5 100644
+index a6378b5..0334a4f 100644
 --- a/src/renderer/src/extensions/collections/views/InstallDialog/InstallStartDialog.tsx
 +++ b/src/renderer/src/extensions/collections/views/InstallDialog/InstallStartDialog.tsx
-@@ -38,7 +38,6 @@ interface IInstallDialogProps {
+@@ -38,7 +38,6 @@
  interface IConnectedProps {
    allProfiles: { [profileId: string]: IProfile };
    mods: { [modId: string]: IMod };
@@ -1597,7 +1597,40 @@ index a6378b5..603d4b5 100644
    userInfo: { userId: number };
    nextProfileId: string;
    collectionsInstallWhileDownloading: boolean;
-@@ -416,7 +415,6 @@ function mapStateToProps(state: IState, ownProps: IInstallDialogProps): IConnect
+@@ -225,6 +224,11 @@
+     const ownCollection: boolean =
+       userInfo?.userId !== undefined && driver.collectionInfo?.user?.memberId === userInfo?.userId;
+     const collectionName = renderModName(driver.collection);
++    const dependencyRules = (driver.collection?.rules ?? []).filter(
++      (rule) => rule.type === "requires" || rule.type === "recommends",
++    );
++    const requiredCount = dependencyRules.filter((rule) => rule.type === "requires").length;
++    const optionalCount = dependencyRules.length - requiredCount;
+     return (
+       <Modal show={driver.collection !== undefined && driver.step === "query"} onHide={nop}>
+         <Modal.Header>
+@@ -299,6 +303,20 @@
+             />
+           )}
+ 
++          <div className="collections-preflight-summary">
++            <strong>{t("Preflight")}</strong>
++            <p>
++              {t("{{required}} required mods, {{optional}} optional mods", {
++                replace: { required: requiredCount, optional: optionalCount },
++              })}
++            </p>
++            <p>
++              {this.props.collectionsInstallWhileDownloading
++                ? t("Downloads and installs will be pipelined to reduce total install time.")
++                : t("Mods will finish downloading before installation begins.")}
++            </p>
++          </div>
++
+           <Toggle
+             checked={this.props.collectionsInstallWhileDownloading}
+             onToggle={this.props.onSetCollectionConcurrency}
+@@ -416,7 +434,6 @@
    const { editCollectionId } = (state.session as any).collections;
    const gameMode = ownProps.driver?.profile?.gameId;
  
@@ -1605,7 +1638,7 @@ index a6378b5..603d4b5 100644
    const collectionsInstallWhileDownloading = getSafe(
      state,
      ["settings", "downloads", "collectionsInstallWhileDownloading"],
-@@ -426,7 +424,6 @@ function mapStateToProps(state: IState, ownProps: IInstallDialogProps): IConnect
+@@ -426,7 +443,6 @@
    return {
      allProfiles: state.persistent.profiles,
      mods: editCollectionId !== undefined ? state.persistent.mods[gameMode] : emptyObject,
@@ -2378,7 +2411,7 @@ index bf53184..63bdd1f 100644
      name: input.name,
      profileUrl: input.profile_url,
 diff --git a/src/renderer/src/extensions/nexus_integration/views/FreeUserDLDialog.tsx b/src/renderer/src/extensions/nexus_integration/views/FreeUserDLDialog.tsx
-index 53e9496..4251e09 100644
+index 53e9496..a10b624 100644
 --- a/src/renderer/src/extensions/nexus_integration/views/FreeUserDLDialog.tsx
 +++ b/src/renderer/src/extensions/nexus_integration/views/FreeUserDLDialog.tsx
 @@ -13,12 +13,10 @@
@@ -2395,7 +2428,7 @@ index 53e9496..4251e09 100644
  import { nexusGamesProm } from "../util";
  import { makeFileUID } from "../util/UIDs";
  import NewFreeDownloadModal from "./NewFreeDownloadModal";
-@@ -92,27 +90,27 @@
+@@ -92,27 +90,29 @@
  }
  
  function FreeUserDLDialog(props: IFreeUserDLDialogProps) {
@@ -2416,7 +2449,9 @@ index 53e9496..4251e09 100644
    const [fileInfo, setFileInfo] = React.useState<any>(null);
 -  const [campaign, setCampaign] = React.useState<string>(undefined);
    const [positionText, setPositionText] = React.useState<string>("1/1");
-+  const [autoOpenNext, setAutoOpenNext] = React.useState(false);
++  const [autoOpenNext, setAutoOpenNext] = React.useState(
++    () => window.localStorage.getItem("vortex-unlocked:auto-open-next") === "true",
++  );
    const lastFetchUrl = React.useRef<string>();
 +  const lastAutoOpenedUrl = React.useRef<string>();
  
@@ -2429,7 +2464,7 @@ index 53e9496..4251e09 100644
    useRefreshUserInfoOnFocus(context.api, show);
  
    React.useEffect(() => {
-@@ -124,19 +122,11 @@
+@@ -124,19 +124,11 @@
    }, [collectionInstallSession]);
  
    React.useEffect(() => {
@@ -2449,7 +2484,7 @@ index 53e9496..4251e09 100644
  
        try {
          // makeFileUID needs the nexus games list to map domain -> numeric game id.
-@@ -166,10 +156,21 @@
+@@ -166,10 +158,21 @@
      }
    }, [urls]);
  
@@ -2474,7 +2509,7 @@ index 53e9496..4251e09 100644
    const cancel = React.useCallback(() => {
      onCancel(urls[0]);
    }, [onCancel, urls]);
-@@ -190,28 +191,15 @@
+@@ -190,28 +193,15 @@
      opn(`${NEXUS_BASE_URL}/${fileInfo.game.domainName}/users/${fileInfo.owner.memberId}`);
    }, [fileInfo]);
  
@@ -2504,7 +2539,7 @@ index 53e9496..4251e09 100644
            openModPage={openModPage}
            positionText={positionText}
            t={t}
-@@ -220,6 +208,17 @@
+@@ -220,6 +210,23 @@
        </Modal.Body>
  
        <Modal.Footer>
@@ -2514,7 +2549,13 @@ index 53e9496..4251e09 100644
 +          title={t(
 +            "Automatically open the next Nexus file page after each authorised download returns",
 +          )}
-+          onClick={() => setAutoOpenNext((enabled) => !enabled)}
++          onClick={() =>
++            setAutoOpenNext((enabled) => {
++              const next = !enabled;
++              window.localStorage.setItem("vortex-unlocked:auto-open-next", String(next));
++              return next;
++            })
++          }
 +        >
 +          {autoOpenNext ? t("Auto-open next: On") : t("Auto-open next: Off")}
 +        </Button>
