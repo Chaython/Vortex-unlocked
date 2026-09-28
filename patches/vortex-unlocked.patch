@@ -3908,3 +3908,168 @@ index b74a8a5..58390f1 100644
      }
  
      if (scheme === "http" || scheme === "https") {
+diff --git a/src/renderer/src/extensions/health_check/views/HealthCheckPage.tsx b/src/renderer/src/extensions/health_check/views/HealthCheckPage.tsx
+index c063397..25ab23d 100644
+--- a/src/renderer/src/extensions/health_check/views/HealthCheckPage.tsx
++++ b/src/renderer/src/extensions/health_check/views/HealthCheckPage.tsx
+@@ -16,7 +16,6 @@
+ import type { IState } from "@/types/IState";
+ import { Button } from "@/ui/components/button/Button";
+ import { NoResults } from "@/ui/components/no_results/NoResults";
+-import { PremiumBadge } from "@/ui/components/premium_badge/PremiumBadge";
+ import { TabBar } from "@/ui/components/tabs/TabBar";
+ import { TabButton } from "@/ui/components/tabs/TabButton";
+ import { TabPanel } from "@/ui/components/tabs/TabPanel";
+@@ -31,10 +30,8 @@
+ import { PageHeader } from "@/views/components/Page/PageHeader";
+ import { PageScroll } from "@/views/components/Page/PageScroll";
+ 
+-import { isLoggedIn, shouldShowPremiumAd } from "../../nexus_integration/selectors";
++import { isLoggedIn } from "../../nexus_integration/selectors";
+ import { BetaBadge } from "../components/beta_badge/BetaBadge";
+-import { PremiumBanner } from "../components/premium_banner/PremiumBanner";
+-import { PremiumModal } from "../components/premium_modal/PremiumModal";
+ import { createHealthCheckTracker } from "../hooks/healthCheckTracker";
+ import { HealthCheckTrackingProvider, IssueProvider } from "../hooks/HealthCheckTracking.context";
+ import {
+@@ -131,8 +128,6 @@
+   const modResult = useSelector(modRequirementsCheckResult);
+   const hiddenFile = useSelector(hiddenFileRequirements);
+   const hiddenMod = useSelector(hiddenModRequirements);
+-  const showPremiumAd = useSelector(shouldShowPremiumAd);
+-  const [showInstallAllPremium, setShowInstallAllPremium] = useState(false);
+   const isRefreshing = useSelector(isAnyHealthCheckRunning);
+   // Every check that talks to Nexus Mods skips itself while logged out, so an empty
+   // list then means "we couldn't run the checks", not "your loadout is healthy".
+@@ -268,8 +263,9 @@
+     hiddenItems.forEach((item) => item.content.toggleHide?.(api, item.entry));
+   };
+ 
+-  // 1-click install all: premium-gated for free users. Items are de-duplicated first by
+-  // collectInstallAllItems (by key) and again here at execution time via the seen set,
++  // Vortex Unlocked: 1-click install all uses the normal download/install pipeline for
++  // every logged-in account. Items are de-duplicated first by collectInstallAllItems (by key)
++  // and again here at execution time via the seen set,
+   // so a file shared across multiple source reports is only queued once.
+   const runInstallAll = () => {
+     const seen = new Set<string>();
+@@ -288,11 +284,6 @@
+       mod_count: installAllItems.length,
+     });
+ 
+-    if (showPremiumAd) {
+-      setShowInstallAllPremium(true);
+-      return;
+-    }
+-
+     runInstallAll();
+   };
+ 
+@@ -415,7 +406,6 @@
+                       <Button
+                         brand="neutral"
+                         leftIconPath={mdiMonitorArrowDownVariant}
+-                        rightIcon={showPremiumAd ? <PremiumBadge /> : undefined}
+                         size="sm"
+                         onClick={installAll}
+                       >
+@@ -443,21 +433,6 @@
+           ) : (
+             activeList
+           )}
+-
+-          {!listIsEmpty && (
+-            <PremiumBanner api={api} placement="list" totalIssues={activeCount + hiddenCount} />
+-          )}
+-
+-          <PremiumModal
+-            api={api}
+-            downloadScope="all"
+-            isOpen={showInstallAllPremium}
+-            modCount={installAllItems.length}
+-            trigger="install_all"
+-            onClose={() => setShowInstallAllPremium(false)}
+-            onDownload={() => setShowInstallAllPremium(false)}
+-            onPremiumUnlocked={runInstallAll}
+-          />
+         </PageScroll>
+       </Page>
+     </HealthCheckTrackingProvider>
+diff --git a/src/renderer/src/extensions/health_check/hooks/useModRequirementActions.ts b/src/renderer/src/extensions/health_check/hooks/useModRequirementActions.ts
+index c4e7fd8..d54220d 100644
+--- a/src/renderer/src/extensions/health_check/hooks/useModRequirementActions.ts
++++ b/src/renderer/src/extensions/health_check/hooks/useModRequirementActions.ts
+@@ -1,8 +1,7 @@
+-import { useCallback, useMemo, useState } from "react";
++import { useCallback, useMemo } from "react";
+ import { useSelector } from "react-redux";
+ 
+ import { onDownloadRequirement } from "@/extensions/health_check/utils/modRequirements/onDownloadRequirement";
+-import { shouldShowPremiumAd } from "@/extensions/nexus_integration/selectors";
+ import type { IExtensionApi } from "@/types/IExtensionContext";
+ import opn from "@/util/opn";
+ 
+@@ -13,7 +12,7 @@
+ 
+ /**
+  * Shared action logic for a single mod requirement, used by both the listing row
+- * and the detail view: premium-gated 1-click install, thumbs feedback (with
++ * and the detail view: 1-click install, thumbs feedback (with
+  * analytics + the negative-reason modal), and opening the mod page. Keeps the two
+  * call sites behaviourally identical.
+  *
+@@ -26,36 +25,27 @@
+   identity: IssueAnalyticsIdentity,
+   onInstalled?: () => void,
+ ) {
+-  const [showPremiumModal, setShowPremiumModal] = useState(false);
+-
+   const feedbackMap = useSelector(feedbackGivenMap);
+   const givenFeedback = useMemo(
+     () => (feedbackMap[mod.requiredBy.modId] ?? []).includes(mod.id),
+     [feedbackMap, mod.requiredBy.modId, mod.id],
+   );
+ 
+-  const showPremiumAd = useSelector(shouldShowPremiumAd);
+-
+   const openModPage = useCallback(() => {
+     if (mod.modUrl) {
+       opn(mod.modUrl).catch(() => undefined);
+     }
+   }, [mod.modUrl]);
+ 
+-  // 1-click install is a Premium feature; free users get the upgrade prompt
+-  // (which routes them to the mod page) instead of an in-app download.
+-  // onDownloadRequirement reports its own failures and never rejects, so the
++  // Vortex Unlocked: use the normal in-app requirement download path for every
++  // account. onDownloadRequirement reports its own failures and never rejects, so the
+   // fire-and-forget call sites have nothing to catch; a failed install leaves the
+   // detail page open rather than navigating away from the issue.
+   const installInApp = useCallback(async () => {
+-    if (showPremiumAd) {
+-      setShowPremiumModal(true);
+-      return;
+-    }
+     if (await onDownloadRequirement(api, mod, undefined, identity)) {
+       onInstalled?.();
+     }
+-  }, [api, mod, identity, showPremiumAd, onInstalled]);
++  }, [api, mod, identity, onInstalled]);
+ 
+   // Persistence only — EntryActions owns the feedback analytics, so both thumbs record
+   // the same thing here.
+@@ -65,9 +55,11 @@
+ 
+   return {
+     givenFeedback,
+-    showPremiumAd,
+-    showPremiumModal,
+-    setShowPremiumModal,
++    // Keep the compatibility surface used by listing/detail views; the premium
++    // modal can never open in Vortex Unlocked.
++    showPremiumAd: false,
++    showPremiumModal: false,
++    setShowPremiumModal: (_show: boolean) => undefined,
+     openModPage,
+     installInApp,
+     markFeedback,
