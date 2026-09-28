@@ -121,12 +121,29 @@ jobs:
           [IO.File]::WriteAllText($patchPath, $content, [System.Text.UTF8Encoding]::new($false))
 
           cd vortex
+
+          # Cheap preflight first. This catches malformed hunk lengths/truncated
+          # patches immediately, before setup-node/dependency installation.
+          git apply --check ..\patches\vortex-unlocked.patch
+          if ($LASTEXITCODE -ne 0) {
+            Write-Output "::error::Patch syntax/context validation failed against current upstream."
+            exit 1
+          }
+
           git apply --3way ..\patches\vortex-unlocked.patch
           if ($LASTEXITCODE -ne 0) {
             Write-Output "::error::The patch no longer applies cleanly to upstream master. Re-generate it from a fresh upstream clone (see README.md) and push the update."
             exit 1
           }
-          Write-Output "Patch applied. Changed files:"
+
+          # Catch whitespace/conflict-marker mistakes before compiling.
+          git diff --check
+          if ($LASTEXITCODE -ne 0) {
+            Write-Output "::error::Patched tree failed git diff --check."
+            exit 1
+          }
+
+          Write-Output "Patch applied and validated. Changed files:"
           git status --short
 
       - name: Read Node.js version from package.json
@@ -296,8 +313,10 @@ jobs:
 
             **What this build changes**
             - No premium upsell UI (banners, dashlets, dialogs, badges, membership status)
-            - No client-side premium gates (parallel download threads, Update All, collection bulk-install)
-            - Parallel downloads on by default: 5 download threads out of the box (Settings -> Downloads -> "Download Threads", adjustable 1-10; installs carried over from older builds may still have it set to 1 - move the slider once)
+            - No client-side premium gates (parallel download threads, Update All, collection bulk-install, Health Check 1-click/Install All)
+            - Parallel downloads on by default: 5 download threads out of the box (Settings -> Downloads -> "Download Threads", adjustable 1-10; the setting is now an upper bound and the downloader adapts effective concurrency to throughput/failures)
+            - When Nexus returns multiple authorised download URLs, Vortex learns host reliability and spreads new transfers across healthier returned hosts
+            - Interrupted downloads without a usable checkpoint are re-resolved and restarted under the same download ID instead of being discarded
             - Optional: fully hide the Dashboard tab via Settings -> Interface -> Customisation -> "Hide Dashboard tab"
             - Optional: auto-authorise refused download links through an embedded nexusmods.com website session (Settings -> Interface -> "Auto-authorise downloads via website session"); requests are serialized and paced, any failure falls back to the manual download dialog - downloads remain speed-limited by the account tier
             - On first start: option to import data (profiles, mods, settings, downloads) from an existing official Vortex install; also available later via Settings -> Interface -> "Import data from Vortex" (staging paths inside the data directory are rewritten to the new location; only Vortex' own data is copied - caches/logs are skipped; the import refuses to run while the official client is open; locked files outside the state database are skipped and reported instead of failing the import; existing data is backed up and restored on failure)
