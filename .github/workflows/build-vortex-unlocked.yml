@@ -121,13 +121,62 @@ jobs:
           [IO.File]::WriteAllText($patchPath, $content, [System.Text.UTF8Encoding]::new($false))
 
           cd vortex
+
+          # Fail fast on malformed hunks or upstream drift before mutating the clone.
+          git apply --check --3way ..\patches\vortex-unlocked.patch
+          if ($LASTEXITCODE -ne 0) {
+            Write-Output "::error::The patch is malformed or no longer applies cleanly to upstream master."
+            exit 1
+          }
+
           git apply --3way ..\patches\vortex-unlocked.patch
           if ($LASTEXITCODE -ne 0) {
             Write-Output "::error::The patch no longer applies cleanly to upstream master. Re-generate it from a fresh upstream clone (see README.md) and push the update."
             exit 1
           }
+
+          # Catch whitespace errors/conflict markers in the generated tree immediately.
+          git diff --check
+          if ($LASTEXITCODE -ne 0) {
+            Write-Output "::error::Patched source failed git diff --check."
+            exit 1
+          }
+
           Write-Output "Patch applied. Changed files:"
           git status --short
+
+      - name: Validate Vortex Unlocked patch invariants
+        if: steps.upstream-check.outputs.skip != 'true'
+        shell: pwsh
+        working-directory: vortex
+        run: |
+          $checks = @(
+            @{ Path = "src/main/src/websiteSession.ts"; Pattern = "https://users.nexusmods.com/auth/sign_in"; Label = "real Nexus website login" },
+            @{ Path = "src/renderer/src/extensions/nexus_integration/selectors.ts"; Pattern = "Vortex Unlocked: every premium gate"; Label = "client gate override" },
+            @{ Path = "src/main/src/downloading/manager.ts"; Pattern = "getCheckpoint"; Label = "live download checkpoints" },
+            @{ Path = "src/renderer/src/IPCDownloadAdapter.ts"; Pattern = "adaptive download concurrency changed"; Label = "adaptive scheduler" },
+            @{ Path = "src/renderer/src/extensions/health_check/hooks/useModRequirementActions.ts"; Pattern = "Vortex Unlocked: use the normal in-app requirement download path"; Label = "Health Check one-click unlock" }
+          )
+
+          foreach ($check in $checks) {
+            if (-not (Test-Path $check.Path)) {
+              Write-Output "::error::$($check.Label): missing $($check.Path)"
+              exit 1
+            }
+            if (-not (Select-String -LiteralPath $check.Path -SimpleMatch $check.Pattern -Quiet)) {
+              Write-Output "::error::$($check.Label): expected marker missing from $($check.Path)"
+              exit 1
+            }
+          }
+
+          $conflicts = git grep -n -E '^(<<<<<<<|=======|>>>>>>>)' -- . ':!pnpm-lock.yaml'
+          if ($LASTEXITCODE -eq 0 -and $conflicts) {
+            Write-Output "::error::Conflict markers remain in patched source:"
+            Write-Output $conflicts
+            exit 1
+          }
+
+          Write-Output "Unlocked patch invariants verified."
 
       - name: Read Node.js version from package.json
         id: node-version
