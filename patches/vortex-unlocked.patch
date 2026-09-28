@@ -1483,14 +1483,14 @@ index 0000000..8a8fb7c
 +  log("debug", "website session service initialised");
 +}
 diff --git a/src/preload/src/index.ts b/src/preload/src/index.ts
-index 1d99195..0a6e13c 100644
+index c723886..adc0052 100644
 --- a/src/preload/src/index.ts
 +++ b/src/preload/src/index.ts
-@@ -39,6 +39,14 @@ try {
+@@ -39,6 +39,14 @@
        showItemInFolder: (filePath) => betterIpcRenderer.send("shell:showItemInFolder", filePath),
      },
  
-+    // Vortex Unlocked: the embedded nexusmods.com website session
++    // Vortex Unlocked: persistent Nexus website session.
 +    websiteSession: {
 +      status: () => betterIpcRenderer.invoke("website-session:status"),
 +      login: () => betterIpcRenderer.invoke("website-session:login"),
@@ -1501,6 +1501,24 @@ index 1d99195..0a6e13c 100644
      persist: {
        sendDiff: (hive, operations) => betterIpcRenderer.send("persist:diff", hive, operations),
  
+@@ -227,13 +235,15 @@
+     },
+ 
+     downloader: {
+-      start: (dest, collationId, downloadId) =>
+-        betterIpcRenderer.invoke("download:start", dest, collationId, downloadId),
++      start: (dest, collationId, downloadId, priority) =>
++        betterIpcRenderer.invoke("download:start", dest, collationId, downloadId, priority),
+       pause: (downloadId) => betterIpcRenderer.invoke("download:pause", downloadId),
+       resume: (checkpoint) => betterIpcRenderer.invoke("download:resume", checkpoint),
+       cancel: (downloadId) => betterIpcRenderer.invoke("download:cancel", downloadId),
+       getState: (downloadId) => betterIpcRenderer.invoke("download:getState", downloadId),
+       getStates: (downloadIds) => betterIpcRenderer.invoke("download:getStates", downloadIds),
++      getCheckpoints: (downloadIds) =>
++        betterIpcRenderer.invoke("download:getCheckpoints", downloadIds),
+       configure: (options) => betterIpcRenderer.invoke("download:configure", options),
+       // A rejection here propagates back to main so download:start rejects
+       // immediately with the real reason instead of waiting out the callback
 diff --git a/src/renderer/src/extensions/about_dialog/views/AboutPage.tsx b/src/renderer/src/extensions/about_dialog/views/AboutPage.tsx
 index 7645efc..96bd53d 100644
 --- a/src/renderer/src/extensions/about_dialog/views/AboutPage.tsx
@@ -3123,35 +3141,27 @@ index 2fad8d6..436db3d 100644
  
  /** Represents all IPC-safe typed arrays */
 diff --git a/src/shared/src/types/preload.ts b/src/shared/src/types/preload.ts
-index 4299c4a..d3b998e 100644
+index a263a5e..2d39953 100644
 --- a/src/shared/src/types/preload.ts
 +++ b/src/shared/src/types/preload.ts
-@@ -82,6 +82,9 @@ export interface Api {
+@@ -81,6 +81,9 @@
    /** Session APIs */
    session: Session;
  
-+  /** Vortex Unlocked: embedded nexusmods.com website session APIs */
++  /** Vortex Unlocked: persistent embedded nexusmods.com website session. */
 +  websiteSession: WebsiteSessionApi;
 +
    /** Window APIs */
    window: WindowAPI;
  
-@@ -240,6 +243,26 @@ export interface Session {
+@@ -239,6 +242,18 @@
    getCookies(filter: CookiesGetFilter): Promise<Cookie[]>;
  }
  
-+/**
-+ * Vortex Unlocked: the embedded nexusmods.com website session, used to
-+ * auto-authorise download links the api refuses for the account tier.
-+ */
 +export interface WebsiteSessionApi {
-+  /** Whether the website session is logged in (login cookies present). */
 +  status(): Promise<{ loggedIn: boolean }>;
-+  /** Open the login window; resolves once logged in or the window is closed. */
 +  login(): Promise<{ ok: boolean; reason?: string }>;
-+  /** Wipe the website session. */
 +  logout(): Promise<void>;
-+  /** Generate an authorised (keyed) nxm link for one file. */
 +  generateLink(request: {
 +    domain: string;
 +    gameId: string;
@@ -3163,6 +3173,30 @@ index 4299c4a..d3b998e 100644
  export interface WindowAPI {
    /** Get the current window ID */
    getId(): Promise<number>;
+@@ -523,7 +538,12 @@
+    * Passing `downloadId` restores an existing download: the transfer starts from
+    * scratch under that id, replacing any previous attempt tracked for it.
+    */
+-  start(dest: string, collationId: number, downloadId?: string): Promise<{ downloadId: string }>;
++  start(
++    dest: string,
++    collationId: number,
++    downloadId?: string,
++    priority?: number,
++  ): Promise<{ downloadId: string }>;
+ 
+   /** Pauses an active download and returns a checkpoint for later resumption. */
+   pause(downloadId: string): Promise<WireDownloadCheckpoint>;
+@@ -540,6 +560,9 @@
+   /** Returns the current state for multiple downloads in one call. Unknown IDs are omitted. */
+   getStates(downloadIds: string[]): Promise<Record<string, WireDownloadState>>;
+ 
++  /** Snapshot resumable checkpoints without pausing active downloads. */
++  getCheckpoints(downloadIds: string[]): Promise<Record<string, WireDownloadCheckpoint>>;
++
+   /** Updates concurrency and/or bandwidth limit on the main-process DownloadManager. */
+   configure(options: { concurrency?: number; bytesPerSecond?: number }): Promise<void>;
+ 
 diff --git a/src/main/src/downloading/manager.ts b/src/main/src/downloading/manager.ts
 index 879f372..25d375c 100644
 --- a/src/main/src/downloading/manager.ts
