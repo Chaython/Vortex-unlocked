@@ -3157,3 +3157,110 @@ index 4299c4a..d3b998e 100644
  export interface WindowAPI {
    /** Get the current window ID */
    getId(): Promise<number>;
+diff --git a/src/main/src/downloading/manager.ts b/src/main/src/downloading/manager.ts
+index 879f372..25d375c 100644
+--- a/src/main/src/downloading/manager.ts
++++ b/src/main/src/downloading/manager.ts
+@@ -31,6 +31,9 @@
+   /** Returns a snapshot of the current download state. */
+   getState: () => DownloadState;
+ 
++  /** Snapshot a resumable checkpoint without pausing the transfer. */
++  getCheckpoint: () => DownloadCheckpoint<T>;
++
+   /**
+    * Cancels the download if it is running. Returns the resulting state.
+    * If the download is not running, returns the current state unchanged.
+@@ -74,6 +77,7 @@
+   readonly #userAgent: string | undefined;
+   readonly #cookieJar: CookieJar | undefined;
+   readonly #downloads: Map<string, DownloadHandle> = new Map();
++  readonly #queuedByHost = new Map<string, number>();
+ 
+   #rateLimiter: RateLimiter | undefined;
+ 
+@@ -124,6 +128,10 @@
+     return this.#downloads.get(downloadId)?.getState();
+   }
+ 
++  getCheckpoint(downloadId: string): DownloadCheckpoint | undefined {
++    return this.#downloads.get(downloadId)?.getCheckpoint();
++  }
++
+   /**
+    * Updates concurrency and/or bandwidth limit at runtime.
+    * In-flight downloads are unaffected; new downloads use the updated settings.
+@@ -176,6 +184,8 @@
+     resolver: Resolver<T>,
+     chunker: Chunker<T>,
+     retry: RetryStrategy = defaultRetryStrategy(),
++    priority: number = 0,
++    queueKey?: string,
+   ): DownloadHandle<T> {
+     return this.#download(
+       checkpoint.resource,
+@@ -185,6 +195,8 @@
+       retry,
+       checkpoint,
+       checkpoint.downloadId,
++      priority,
++      queueKey,
+     );
+   }
+ 
+@@ -202,8 +214,10 @@
+     chunker: Chunker<T> = staticChunker(),
+     retry: RetryStrategy = defaultRetryStrategy(),
+     downloadId?: string,
++    priority: number = 0,
++    queueKey?: string,
+   ): DownloadHandle<T> {
+-    return this.#download(resource, dest, resolver, chunker, retry, undefined, downloadId);
++    return this.#download(resource, dest, resolver, chunker, retry, undefined, downloadId, priority, queueKey);
+   }
+ 
+   #download<T>(
+@@ -214,14 +228,24 @@
+     retry: RetryStrategy,
+     checkpoint?: DownloadCheckpoint<T>,
+     downloadId: string = randomUUID(),
++    priority: number = 0,
++    queueKey?: string,
+   ): DownloadHandle<T> {
+     const progressReporter = new ProgressReporter();
+     const abortController = new AbortController();
+ 
+-    log("debug", "queuing download", { downloadId, dest });
++    const hostDepth = queueKey === undefined ? 0 : (this.#queuedByHost.get(queueKey) ?? 0);
++    if (queueKey !== undefined) this.#queuedByHost.set(queueKey, hostDepth + 1);
++    const effectivePriority = priority - hostDepth;
++    log("debug", "queuing download", { downloadId, dest, priority, effectivePriority, queueKey });
+ 
+     const rawPromise = this.#downloadQueue.add(() => {
+-      log("debug", "download starting", { downloadId });
++      if (queueKey !== undefined) {
++        const remaining = Math.max(0, (this.#queuedByHost.get(queueKey) ?? 1) - 1);
++        if (remaining === 0) this.#queuedByHost.delete(queueKey);
++        else this.#queuedByHost.set(queueKey, remaining);
++      }
++      log("debug", "download starting", { downloadId, queueKey });
+       progressReporter.status = "running";
+       return download(
+         resource,
+@@ -241,7 +265,7 @@
+           userAgent: this.#userAgent,
+         },
+       );
+-    });
++    }, { priority: effectivePriority });
+ 
+     // Swallow all rejections on one fork so that pause()/cancel() flows
+     // never surface as unhandled rejections.
+@@ -334,6 +358,7 @@
+       downloadId,
+       promise,
+       getState,
++      getCheckpoint: buildCheckpoint,
+       cancel,
+       pause,
+     };
