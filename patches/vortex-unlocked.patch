@@ -3084,31 +3084,37 @@ index 6535760..14a55e4 100644
    if (visiblePages.length === 0) {
      return null;
 diff --git a/src/shared/src/types/ipc.ts b/src/shared/src/types/ipc.ts
-index 5ddd14b..8c4e796 100644
+index 2fad8d6..436db3d 100644
 --- a/src/shared/src/types/ipc.ts
 +++ b/src/shared/src/types/ipc.ts
-@@ -597,6 +597,28 @@ export interface InvokeChannels {
-     path: string,
+@@ -521,12 +521,16 @@
+     dest: string,
+     collationId: number,
+     downloadId?: string,
++    priority?: number,
+   ) => Promise<{ downloadId: string }>;
+   "download:pause": (downloadId: string) => Promise<WireDownloadCheckpoint>;
+   "download:resume": (checkpoint: WireDownloadCheckpoint) => Promise<void>;
+   "download:cancel": (downloadId: string) => Promise<void>;
+   "download:getState": (downloadId: string) => Promise<WireDownloadState>;
+   "download:getStates": (downloadIds: string[]) => Promise<Record<string, WireDownloadState>>;
++  "download:getCheckpoints": (
++    downloadIds: string[],
++  ) => Promise<Record<string, WireDownloadCheckpoint>>;
+   "download:configure": (options: {
+     concurrency?: number | string;
+     bytesPerSecond?: number | string;
+@@ -597,6 +601,17 @@
+     path: QualifiedPathWire,
      options: Parameters<FileSystem["stat"]>[1],
    ) => Promise<Awaited<ReturnType<FileSystem["stat"]>>>;
 +
-+  // Vortex Unlocked: the embedded nexusmods.com website session, used to
-+  // auto-authorise download links the api would refuse for the account tier.
-+  /** Whether the website session is logged in (login cookies present). */
++  // Vortex Unlocked: persistent embedded Nexus website session.
 +  "website-session:status": () => Promise<{ loggedIn: boolean }>;
-+  /** Open the login window; resolves once the session cookie appears or the window is closed. */
 +  "website-session:login": () => Promise<{ ok: boolean; reason?: string }>;
-+  /** Wipe the website session (cookies and storage of its partition). */
 +  "website-session:logout": () => Promise<void>;
-+  /**
-+   * Generate an authorised download link for one file through the website
-+   * session, returning it as a keyed nxm:// url the download pipeline can
-+   * resolve directly. Serialized and paced server-side courtesy.
-+   */
 +  "website-session:generate": (request: {
-+    /** game domain, e.g. "fallout4" - used to build the nxm url */
 +    domain: string;
-+    /** numeric game id, as expected by the website endpoint's game_id param */
 +    gameId: string;
 +    modId: number;
 +    fileId: number;
