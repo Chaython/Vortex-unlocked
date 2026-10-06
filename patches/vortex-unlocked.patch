@@ -2727,7 +2727,7 @@ index 0492857..98a8698 100644
                </FlexLayout>
              </FlexLayout.Flex>
 diff --git a/src/renderer/src/extensions/settings_interface/SettingsInterface.tsx b/src/renderer/src/extensions/settings_interface/SettingsInterface.tsx
-index 19b8c4d..debfe17 100644
+index a72650a..f34b545 100644
 --- a/src/renderer/src/extensions/settings_interface/SettingsInterface.tsx
 +++ b/src/renderer/src/extensions/settings_interface/SettingsInterface.tsx
 @@ -1,7 +1,7 @@
@@ -2737,9 +2737,9 @@ index 19b8c4d..debfe17 100644
 -import { getErrorCode } from "@vortex/shared";
 +import { getErrorCode, getErrorMessageOrDefault } from "@vortex/shared";
  import type { IParameters } from "@vortex/shared/cli";
- import PromiseBB from "bluebird";
- import * as React from "react";
-@@ -44,11 +44,14 @@ import {
+ import React, { useCallback, useEffect, useReducer, useRef, useState } from "react";
+ import { ControlLabel, FormGroup } from "react-bootstrap";
+@@ -37,11 +37,14 @@
    setAlwaysCompactHeaders,
    setDesktopNotifications,
    setForegroundDL,
@@ -2754,147 +2754,134 @@ index 19b8c4d..debfe17 100644
  } from "./actions/interface";
  import { buildLanguageOptions, type ILanguage, type ILanguageOption } from "./languageOptions";
  import getText from "./texts";
-@@ -74,6 +77,9 @@ interface IConnectedProps {
-   relativeTimes: boolean;
-   suppressedNotifications: { [id: string]: boolean };
-   foregroundDL: boolean;
-+  hideDashboard: boolean;
-+  websiteLinkGen: boolean;
-+  websiteLinkGenAlways: boolean;
- }
- 
- interface IActionProps {
-@@ -99,6 +105,9 @@ interface IActionProps {
-   onSetRelativeTimes: (enabled: boolean) => void;
-   onResetNotificationSuppression: () => void;
-   onSetForegroundDL: (enabled: boolean) => void;
-+  onSetHideDashboard: (enabled: boolean) => void;
-+  onSetWebsiteLinkGen: (enabled: boolean) => void;
-+  onSetWebsiteLinkGenAlways: (enabled: boolean) => void;
- }
- 
- type IProps = IBaseProps &
-@@ -143,10 +152,16 @@ class SettingsInterfaceImpl extends ComponentEx<IProps, {}> {
-       customTitlebar,
-       desktopNotifications,
-       foregroundDL,
-+      hideDashboard,
-+      websiteLinkGen,
-+      websiteLinkGenAlways,
-       languages,
-       profilesVisible,
-       hideTopLevelCategory,
-       onSetForegroundDL,
-+      onSetHideDashboard,
-+      onSetWebsiteLinkGen,
-+      onSetWebsiteLinkGenAlways,
-       onSetReduceMotion,
-       reduceMotion,
-       relativeTimes,
-@@ -268,6 +283,56 @@ class SettingsInterfaceImpl extends ComponentEx<IProps, {}> {
-               {t("Bring Vortex to foreground when starting downloads in browser")}
-             </Toggle>
-           </div>
-+
-+          {/* Vortex Unlocked: fully hides the Dashboard tab from the main navigation. */}
-+          <div>
-+            <Toggle checked={hideDashboard} onToggle={onSetHideDashboard}>
-+              {t("Hide Dashboard tab")}
-+            </Toggle>
-+          </div>
-+        </FormGroup>
-+
-+        {/* Vortex Unlocked: import data from an existing official Vortex install. */}
-+        <FormGroup controlId="unlockedImport">
-+          <ControlLabel>{t("Vortex Unlocked")}</ControlLabel>
-+
-+          <div>
-+            <Typography>
-+              {t(
-+                "Vortex Unlocked keeps its data separate from the official Vortex client, " +
-+                  "so both can be used side by side. Import the data of an existing " +
-+                  "Vortex installation to carry over profiles, mods, settings and " +
-+                  "downloads.",
-+              )}
-+            </Typography>
-+          </div>
-+
-+          <Button brand="neutral" onClick={this.importVortexData}>
-+            {t("Import data from Vortex")}
-+          </Button>
-+
-+          <div>
-+            <Toggle checked={websiteLinkGen} onToggle={onSetWebsiteLinkGen}>
-+              {t("Auto-authorise downloads via website session")}
-+
-+              <Typography appearance="subdued" typographyType="body-sm">
-+                {t(
-+                  "When the api refuses a download link, generate an authorised link " +
-+                    "automatically through the website session connected below. Applies to " +
-+                    "collection installs unless extended below. Downloads stay speed-limited " +
-+                    "by the account tier.",
-+                )}
-+              </Typography>
-+            </Toggle>
-+          </div>
-+
-+          <div>
-+            <Toggle checked={websiteLinkGenAlways} onToggle={onSetWebsiteLinkGenAlways}>
-+              {t("Also auto-authorise downloads outside collections")}
-+            </Toggle>
-+          </div>
-+
-+          <WebsiteSessionSection t={t} />
-         </FormGroup>
- 
-         <FormGroup controlId="advanced">
-@@ -503,11 +568,112 @@ class SettingsInterfaceImpl extends ComponentEx<IProps, {}> {
-     onSetAdvancedMode(!advanced);
+@@ -85,6 +88,17 @@
+     (state: IState) => state.settings.interface.alwaysCompactHeaders === true,
+   );
+   const foregroundDL = useSelector((state: IState) => state.settings.interface.foregroundDL);
++  // Vortex Unlocked settings are intentionally kept in the existing interface
++  // settings reducer so they persist with the rest of the UI preferences.
++  const hideDashboard = useSelector(
++    (state: IState) => (state.settings.interface as any)?.hideDashboard === true,
++  );
++  const websiteLinkGen = useSelector(
++    (state: IState) => (state.settings.interface as any)?.websiteLinkGen === true,
++  );
++  const websiteLinkGenAlways = useSelector(
++    (state: IState) => (state.settings.interface as any)?.websiteLinkGenAlways === true,
++  );
+   const autoDeployment = useSelector((state: IState) => state.settings.automation.deploy);
+   const autoInstall = useSelector((state: IState) => state.settings.automation.install);
+   const autoEnable = useSelector((state: IState) => state.settings.automation.enable);
+@@ -202,6 +216,32 @@
+     });
    };
  
-+  private importVortexData = () => {
-+    const { t, onShowDialog } = this.props;
-+    onShowDialog(
-+      "question",
-+      t("Import data from Vortex"),
-+      {
-+        text: t(
-+          "This restarts Vortex Unlocked and imports the data of your official Vortex " +
-+            "installation - profiles, mods, settings and downloads. The Vortex " +
-+            "installation is not modified and a backup of the current Vortex Unlocked " +
-+            "data is kept. Please close the official Vortex client before continuing. " +
-+            "This may take a while for large mod libraries.",
-+        ),
-+        options: { translated: true, wrap: true },
-+      },
-+      [
-+        { label: "Cancel" },
++  const importVortexData = () => {
++    dispatch(
++      showDialog(
++        "question",
++        t("Import data from Vortex"),
 +        {
-+          label: t("Import and restart"),
-+          action: () => relaunch(["--import-vortex-data"]),
++          text: t(
++            "This restarts Vortex Unlocked and imports the data of your official Vortex " +
++              "installation - profiles, mods, settings and downloads. The Vortex " +
++              "installation is not modified and a backup of the current Vortex Unlocked " +
++              "data is kept. Please close the official Vortex client before continuing. " +
++              "This may take a while for large mod libraries.",
++          ),
++          options: { translated: true, wrap: true },
 +        },
-+      ],
++        [
++          { label: "Cancel" },
++          {
++            label: t("Import and restart"),
++            action: () => relaunch(["--import-vortex-data"]),
++          },
++        ],
++      ),
 +    );
 +  };
 +
-   private restart = () => {
-     relaunch();
-   };
+   const needRestartNotification = needRestart ? (
+     <div className="flex items-center gap-x-4 rounded-lg border border-info-weak bg-info-950 p-3">
+       <Typography brand="neutral-translucent" className="grow">
+@@ -307,8 +347,66 @@
+             {t("Bring Vortex to foreground when starting downloads in browser")}
+           </Toggle>
+         </div>
++
++        {/* Vortex Unlocked: fully hides the Dashboard tab from the main navigation. */}
++        <div>
++          <Toggle
++            checked={hideDashboard}
++            onToggle={(enabled) => dispatch(setHideDashboard(enabled))}
++          >
++            {t("Hide Dashboard tab")}
++          </Toggle>
++        </div>
+       </FormGroup>
+ 
++      {/* Vortex Unlocked: import data and website-session download authorisation. */}
++      <FormGroup controlId="unlockedImport">
++        <ControlLabel>{t("Vortex Unlocked")}</ControlLabel>
++
++        <div>
++          <Typography>
++            {t(
++              "Vortex Unlocked keeps its data separate from the official Vortex client, " +
++                "so both can be used side by side. Import the data of an existing " +
++                "Vortex installation to carry over profiles, mods, settings and downloads.",
++            )}
++          </Typography>
++        </div>
++
++        <Button brand="neutral" onClick={importVortexData}>
++          {t("Import data from Vortex")}
++        </Button>
++
++        <div>
++          <Toggle
++            checked={websiteLinkGen}
++            onToggle={(enabled) => dispatch(setWebsiteLinkGen(enabled))}
++          >
++            {t("Auto-authorise downloads via website session")}
++
++            <Typography appearance="subdued" typographyType="body-sm">
++              {t(
++                "When the api refuses a download link, generate an authorised link " +
++                  "automatically through the website session connected below. Applies to " +
++                  "collection installs unless extended below. Downloads stay speed-limited " +
++                  "by the account tier.",
++              )}
++            </Typography>
++          </Toggle>
++        </div>
++
++        <div>
++          <Toggle
++            checked={websiteLinkGenAlways}
++            onToggle={(enabled) => dispatch(setWebsiteLinkGenAlways(enabled))}
++          >
++            {t("Also auto-authorise downloads outside collections")}
++          </Toggle>
++        </div>
++
++        <WebsiteSessionSection />
++      </FormGroup>
++
+       <FormGroup className="mt-4" controlId="accessibility">
+         <ControlLabel>{t("Accessibility")}</ControlLabel>
+ 
+@@ -439,6 +537,75 @@
+   );
  }
  
-+interface IWebsiteSessionSectionProps {
-+  t: (key: string) => string;
-+}
-+
 +/**
 + * Vortex Unlocked: connection status and login button for the embedded
-+ * nexusmods.com website session the auto-authorisation feature uses. The login
-+ * flow opens a window to nexusmods.com; this app only reads the cookies that
-+ * the site itself sets - no credentials are handled here.
++ * nexusmods.com website session the auto-authorisation feature uses.
 + */
-+function WebsiteSessionSection(props: IWebsiteSessionSectionProps) {
-+  const { t } = props;
-+
++function WebsiteSessionSection() {
++  const { t } = useTranslation(["common"]);
 +  const [connected, setConnected] = React.useState<boolean | null>(null);
 +  const [busy, setBusy] = React.useState(false);
 +
@@ -2958,29 +2945,9 @@ index 19b8c4d..debfe17 100644
 +  );
 +}
 +
- function mapStateToProps(state: IState): IConnectedProps {
-   return {
-     profilesVisible: state.settings.interface.profilesVisible,
-@@ -525,6 +691,9 @@ function mapStateToProps(state: IState): IConnectedProps {
-     alwaysCompactHeaders: state.settings.interface.alwaysCompactHeaders === true,
-     suppressedNotifications: state.settings.notifications.suppress,
-     foregroundDL: state.settings.interface.foregroundDL,
-+    hideDashboard: (state.settings.interface as any)?.hideDashboard === true,
-+    websiteLinkGen: (state.settings.interface as any)?.websiteLinkGen === true,
-+    websiteLinkGenAlways: (state.settings.interface as any)?.websiteLinkGenAlways === true,
-   };
- }
- 
-@@ -576,6 +745,9 @@ function mapDispatchToProps(dispatch: ThunkDispatch<any, null, Redux.Action>): I
-       dispatch(resetSuppression(null));
-     },
-     onSetForegroundDL: (enabled: boolean) => dispatch(setForegroundDL(enabled)),
-+    onSetHideDashboard: (enabled: boolean) => dispatch(setHideDashboard(enabled)),
-+    onSetWebsiteLinkGen: (enabled: boolean) => dispatch(setWebsiteLinkGen(enabled)),
-+    onSetWebsiteLinkGenAlways: (enabled: boolean) => dispatch(setWebsiteLinkGenAlways(enabled)),
-   };
- }
- 
+ /** List the subdirectories of a base directory; a missing base yields none. */
+ async function listSubdirectories(basePath: string): Promise<string[]> {
+   try {
 diff --git a/src/renderer/src/extensions/settings_interface/actions/interface.ts b/src/renderer/src/extensions/settings_interface/actions/interface.ts
 index cace1c1..487ded8 100644
 --- a/src/renderer/src/extensions/settings_interface/actions/interface.ts
@@ -3146,13 +3113,13 @@ index 6535760..14a55e4 100644
    if (visiblePages.length === 0) {
      return null;
 diff --git a/src/shared/src/types/ipc.ts b/src/shared/src/types/ipc.ts
-index 5ddd14b..8c4e796 100644
+index b5b9ac5..6b7f9f6 100644
 --- a/src/shared/src/types/ipc.ts
 +++ b/src/shared/src/types/ipc.ts
-@@ -597,6 +597,28 @@ export interface InvokeChannels {
-     path: string,
-     options: Parameters<FileSystem["stat"]>[1],
-   ) => Promise<Awaited<ReturnType<FileSystem["stat"]>>>;
+@@ -629,6 +629,28 @@
+   "fs:stream-read": (handle: number, max: number) => Promise<StreamReadReply>;
+   "fs:stream-write": (handle: number, bytes: Uint8Array) => Promise<void>;
+   "fs:stream-close": (handle: number) => Promise<void>;
 +
 +  // Vortex Unlocked: the embedded nexusmods.com website session, used to
 +  // auto-authorise download links the api would refuse for the account tier.
@@ -3177,7 +3144,7 @@ index 5ddd14b..8c4e796 100644
 +  }) => Promise<{ ok: boolean; nxmUrl?: string; reason?: string }>;
  }
  
- /** Represents all IPC-safe typed arrays */
+ /** Wire reply of {@link InvokeChannels["fs:stream-read"]}. `bytes` holds the
 diff --git a/src/shared/src/types/preload.ts b/src/shared/src/types/preload.ts
 index 4299c4a..d3b998e 100644
 --- a/src/shared/src/types/preload.ts
@@ -3220,7 +3187,7 @@ index 4299c4a..d3b998e 100644
    /** Get the current window ID */
    getId(): Promise<number>;
 diff --git a/src/renderer/src/extensions/health_check/views/HealthCheckPage.tsx b/src/renderer/src/extensions/health_check/views/HealthCheckPage.tsx
-index c063397..a7f3a33 100644
+index cc6d979..2e4571c 100644
 --- a/src/renderer/src/extensions/health_check/views/HealthCheckPage.tsx
 +++ b/src/renderer/src/extensions/health_check/views/HealthCheckPage.tsx
 @@ -16,7 +16,6 @@
@@ -3231,28 +3198,31 @@ index c063397..a7f3a33 100644
  import { TabBar } from "@/ui/components/tabs/TabBar";
  import { TabButton } from "@/ui/components/tabs/TabButton";
  import { TabPanel } from "@/ui/components/tabs/TabPanel";
-@@ -31,10 +30,8 @@
+@@ -31,12 +30,10 @@
  import { PageHeader } from "@/views/components/Page/PageHeader";
  import { PageScroll } from "@/views/components/Page/PageScroll";
  
 -import { isLoggedIn, shouldShowPremiumAd } from "../../nexus_integration/selectors";
 +import { isLoggedIn } from "../../nexus_integration/selectors";
+ import { AuthorNotesModal } from "../components/author_notes_modal/AuthorNotesModal";
  import { BetaBadge } from "../components/beta_badge/BetaBadge";
+ import { IssueSection } from "../components/issue_section/IssueSection";
 -import { PremiumBanner } from "../components/premium_banner/PremiumBanner";
 -import { PremiumModal } from "../components/premium_modal/PremiumModal";
  import { createHealthCheckTracker } from "../hooks/healthCheckTracker";
  import { HealthCheckTrackingProvider, IssueProvider } from "../hooks/HealthCheckTracking.context";
  import {
-@@ -131,8 +128,6 @@
+@@ -152,9 +149,6 @@
    const modResult = useSelector(modRequirementsCheckResult);
    const hiddenFile = useSelector(hiddenFileRequirements);
    const hiddenMod = useSelector(hiddenModRequirements);
 -  const showPremiumAd = useSelector(shouldShowPremiumAd);
--  const [showInstallAllPremium, setShowInstallAllPremium] = useState(false);
+-  // The section whose install all is waiting on the premium modal.
+-  const [premiumInstallType, setPremiumInstallType] = useState<IssueType | undefined>();
+   // The section whose install all is waiting on the author notes review.
+   const [notesInstallType, setNotesInstallType] = useState<IssueType | undefined>();
    const isRefreshing = useSelector(isAnyHealthCheckRunning);
-   // Every check that talks to Nexus Mods skips itself while logged out, so an empty
-   // list then means "we couldn't run the checks", not "your loadout is healthy".
-@@ -229,7 +224,6 @@
+@@ -254,7 +248,6 @@
    const activeCount = activeItems.length;
    const hiddenCount = hiddenItems.length;
    // Without tabs the active list is all there is, and selectedTab stays on it.
@@ -3260,40 +3230,40 @@ index c063397..a7f3a33 100644
  
    const renderRow = (item: IListedEntry) => {
      const { content, entry } = item;
-@@ -268,9 +262,9 @@
-     hiddenItems.forEach((item) => item.content.toggleHide?.(api, item.entry));
+@@ -293,9 +286,9 @@
+     sectionItems.forEach((item) => item.content.toggleHide?.(api, item.entry));
    };
  
 -  // 1-click install all: premium-gated for free users. Items are de-duplicated first by
 -  // collectInstallAllItems (by key) and again here at execution time via the seen set,
 -  // so a file shared across multiple source reports is only queued once.
-+  // Vortex Unlocked: bulk remediation uses the same normal download/install path
-+  // for every account. Items are de-duplicated first by collectInstallAllItems
-+  // and again here at execution time so shared requirements are queued once.
-   const runInstallAll = () => {
++  // Vortex Unlocked: bulk remediation uses the normal download/install path for every
++  // account. Keep upstream's de-duplication and author-note review, but remove the
++  // subscription gate.
+   const runInstallAll = (items: IBulkInstallItem[]) => {
      const seen = new Set<string>();
  
-@@ -288,11 +282,6 @@
-       mod_count: installAllItems.length,
+@@ -314,11 +307,6 @@
+       mod_count: installAllItems[issueType].length,
      });
  
 -    if (showPremiumAd) {
--      setShowInstallAllPremium(true);
+-      setPremiumInstallType(issueType);
 -      return;
 -    }
 -
-     runInstallAll();
+     reviewThenInstall(issueType);
    };
  
-@@ -415,7 +404,6 @@
-                       <Button
-                         brand="neutral"
-                         leftIconPath={mdiMonitorArrowDownVariant}
--                        rightIcon={showPremiumAd ? <PremiumBadge /> : undefined}
-                         size="sm"
-                         onClick={installAll}
-                       >
-@@ -444,20 +432,6 @@
+@@ -363,7 +351,6 @@
+                   <Button
+                     brand="neutral"
+                     leftIconPath={mdiMonitorArrowDownVariant}
+-                    rightIcon={showPremiumAd ? <PremiumBadge /> : undefined}
+                     size="sm"
+                     onClick={() => installAll(issueType, sectionItems.length)}
+                   >
+@@ -495,21 +482,6 @@
              activeList
            )}
  
@@ -3304,16 +3274,17 @@ index c063397..a7f3a33 100644
 -          <PremiumModal
 -            api={api}
 -            downloadScope="all"
--            isOpen={showInstallAllPremium}
--            modCount={installAllItems.length}
+-            isOpen={premiumInstallType !== undefined}
+-            modCount={premiumInstallType ? installAllItems[premiumInstallType].length : 0}
 -            trigger="install_all"
--            onClose={() => setShowInstallAllPremium(false)}
--            onDownload={() => setShowInstallAllPremium(false)}
--            onPremiumUnlocked={runInstallAll}
+-            onClose={() => setPremiumInstallType(undefined)}
+-            onDownload={() => setPremiumInstallType(undefined)}
+-            onPremiumUnlocked={() => premiumInstallType && reviewThenInstall(premiumInstallType)}
 -          />
-         </PageScroll>
-       </Page>
-     </HealthCheckTrackingProvider>
+-
+           <AuthorNotesModal
+             isOpen={notesInstallType !== undefined}
+             // Falls back while closing, so the list doesn't empty mid-transition.
 diff --git a/src/renderer/src/extensions/health_check/hooks/useModRequirementActions.ts b/src/renderer/src/extensions/health_check/hooks/useModRequirementActions.ts
 index c4e7fd8..6e30b80 100644
 --- a/src/renderer/src/extensions/health_check/hooks/useModRequirementActions.ts
