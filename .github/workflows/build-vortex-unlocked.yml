@@ -138,11 +138,72 @@ jobs:
             exit 1
           }
 
-          git apply --3way ..\patches\vortex-unlocked.patch
+          # These two files have had upstream API/UI refactors. Apply all other
+          # patch sections normally, then rebase our small customizations onto the
+          # current upstream versions below instead of relying on stale hunk context.
+          $filteredPatch = Join-Path $env:RUNNER_TEMP "vortex-unlocked-applicable.patch"
+          $patchLines = [System.IO.File]::ReadAllLines($patchPath)
+          $filteredLines = [System.Collections.Generic.List[string]]::new()
+          $skipSection = $false
+          foreach ($line in $patchLines) {
+            if ($line.StartsWith("diff --git ")) {
+              $skipSection = $line -match '^diff --git a/src/renderer/src/extensions/(dashboard/index\.ts|health_check/views/HealthCheckPage\.tsx) '
+            }
+            if (-not $skipSection) { $filteredLines.Add($line) }
+          }
+          [System.IO.File]::WriteAllLines($filteredPatch, $filteredLines, [System.Text.UTF8Encoding]::new($false))
+
+          git apply --3way $filteredPatch
           if ($LASTEXITCODE -ne 0) {
-            Write-Output "::error::The patch no longer applies cleanly to upstream master. Re-generate it from a fresh upstream clone (see README.md) and push the update."
+            Write-Output "::error::The remaining patch no longer applies cleanly to upstream master."
             exit 1
           }
+
+          # Reapply the Dashboard visibility option against upstream's current
+          # registerMainPage API (which uses menuIcon rather than the old mdi prop).
+          $dashboardPath = "src\renderer\src\extensions\dashboard\index.ts"
+          $dashboard = [System.IO.File]::ReadAllText($dashboardPath)
+          $dashboardNeedle = '    menuIcon: "dashboard",' + "`n" + '  });'
+          if (-not $dashboard.Contains($dashboardNeedle)) {
+            Write-Output "::error::Dashboard registration changed again; refusing to silently drop the Hide Dashboard feature."
+            exit 1
+          }
+          $dashboardReplacement = '    menuIcon: "dashboard",' + "`n" +
+            '    // Vortex Unlocked: allow the Dashboard tab to be hidden in Interface settings.' + "`n" +
+            '    visible: () => {' + "`n" +
+            '      const state = context.api.store.getState();' + "`n" +
+            '      return !(state as any)?.settings?.interface?.hideDashboard;' + "`n" +
+            '    },' + "`n" + '  });'
+          $dashboard = $dashboard.Replace($dashboardNeedle, $dashboardReplacement)
+          [System.IO.File]::WriteAllText($dashboardPath, $dashboard, [System.Text.UTF8Encoding]::new($false))
+
+          # Remove only premium promotion/gating from Health Check. Keep upstream's
+          # current component structure, author-note review and install de-duplication.
+          $healthPath = "src\renderer\src\extensions\health_check\views\HealthCheckPage.tsx"
+          $health = [System.IO.File]::ReadAllText($healthPath)
+          $replacements = @(
+            @('import { PremiumBadge } from "@/ui/components/badges/premium_badge/PremiumBadge";' + "`n", ''),
+            @('import { isLoggedIn, shouldShowPremiumAd } from "../../nexus_integration/selectors";', 'import { isLoggedIn } from "../../nexus_integration/selectors";'),
+            @('import { PremiumBanner } from "../components/premium_banner/PremiumBanner";' + "`n", ''),
+            @('import { PremiumModal } from "../components/premium_modal/PremiumModal";' + "`n", ''),
+            @('  const showPremiumAd = useSelector(shouldShowPremiumAd);' + "`n", ''),
+            @('  // The section whose install all is waiting on the premium modal.' + "`n" + '  const [premiumInstallType, setPremiumInstallType] = useState<IssueType | undefined>();' + "`n", ''),
+            @('  // Without tabs the active list is all there is, and selectedTab stays on it.' + "`n" + '  const listIsEmpty = selectedTab === "hidden" ? hiddenCount === 0 : activeCount === 0;' + "`n", ''),
+            @('  // 1-click install all: premium-gated for free users. Items are de-duplicated first by' + "`n" + '  // collectInstallAllItems (by key) and again here at execution time via the seen set,' + "`n" + '  // so a file shared across multiple source reports is only queued once.', '  // Vortex Unlocked: bulk remediation is available to every account. Preserve' + "`n" + '  // upstream de-duplication and author-note review.'),
+            @('    if (showPremiumAd) {' + "`n" + '      setPremiumInstallType(issueType);' + "`n" + '      return;' + "`n" + '    }' + "`n" + "`n", ''),
+            @('                    rightIcon={showPremiumAd ? <PremiumBadge /> : undefined}' + "`n", ''),
+            @('          {!listIsEmpty && (' + "`n" + '            <PremiumBanner api={api} placement="list" totalIssues={activeCount + hiddenCount} />' + "`n" + '          )}' + "`n" + "`n" + '          <PremiumModal' + "`n" + '            api={api}' + "`n" + '            downloadScope="all"' + "`n" + '            isOpen={premiumInstallType !== undefined}' + "`n" + '            modCount={premiumInstallType ? installAllItems[premiumInstallType].length : 0}' + "`n" + '            trigger="install_all"' + "`n" + '            onClose={() => setPremiumInstallType(undefined)}' + "`n" + '            onDownload={() => setPremiumInstallType(undefined)}' + "`n" + '            onPremiumUnlocked={() => premiumInstallType && reviewThenInstall(premiumInstallType)}' + "`n" + '          />' + "`n" + "`n", '')
+          )
+          foreach ($pair in $replacements) {
+            if ($health.Contains($pair[0])) {
+              $health = $health.Replace($pair[0], $pair[1])
+            }
+          }
+          if ($health.Contains("showPremiumAd") -or $health.Contains("premiumInstallType") -or $health.Contains("PremiumBanner") -or $health.Contains("PremiumModal")) {
+            Write-Output "::error::Health Check premium gate removal was incomplete; refusing to build a partially patched file."
+            exit 1
+          }
+          [System.IO.File]::WriteAllText($healthPath, $health, [System.Text.UTF8Encoding]::new($false))
 
           # Catch whitespace/conflict-marker mistakes before compiling.
           git diff --check
