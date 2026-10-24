@@ -169,6 +169,14 @@ jobs:
             }
           }
 
+          foreach ($path in $allowedConflicts) {
+            git checkout HEAD -- $path
+            if ($LASTEXITCODE -ne 0) {
+              Write-Output "::error::Could not reset $path to the cloned upstream version."
+              exit 1
+            }
+          }
+
           # Reapply the Dashboard visibility option against upstream's current
           # registerMainPage API (which uses menuIcon rather than the old mdi prop).
           $dashboardPath = "src\renderer\src\extensions\dashboard\index.ts"
