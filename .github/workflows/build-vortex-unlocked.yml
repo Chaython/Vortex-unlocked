@@ -180,7 +180,7 @@ jobs:
           # Reapply the Dashboard visibility option against upstream's current
           # registerMainPage API (which uses menuIcon rather than the old mdi prop).
           $dashboardPath = "src\renderer\src\extensions\dashboard\index.ts"
-          $dashboard = [System.IO.File]::ReadAllText($dashboardPath)
+          $dashboard = [System.IO.File]::ReadAllText($dashboardPath).Replace("`r`n", "`n")
           $dashboardNeedle = '    menuIcon: "dashboard",' + "`n" + '  });'
           if (-not $dashboard.Contains($dashboardNeedle)) {
             Write-Output "::error::Dashboard registration changed again; refusing to silently drop the Hide Dashboard feature."
@@ -198,7 +198,7 @@ jobs:
           # Remove only premium promotion/gating from Health Check. Keep upstream's
           # current component structure, author-note review and install de-duplication.
           $healthPath = "src\renderer\src\extensions\health_check\views\HealthCheckPage.tsx"
-          $health = [System.IO.File]::ReadAllText($healthPath)
+          $health = [System.IO.File]::ReadAllText($healthPath).Replace("`r`n", "`n")
           $replacements = @(
             @('import { PremiumBadge } from "@/ui/components/badges/premium_badge/PremiumBadge";' + "`n", ''),
             @('import { isLoggedIn, shouldShowPremiumAd } from "../../nexus_integration/selectors";', 'import { isLoggedIn } from "../../nexus_integration/selectors";'),
