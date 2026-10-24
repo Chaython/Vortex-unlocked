@@ -138,25 +138,35 @@ jobs:
             exit 1
           }
 
-          # These two files have had upstream API/UI refactors. Apply all other
-          # patch sections normally, then rebase our small customizations onto the
-          # current upstream versions below instead of relying on stale hunk context.
-          $filteredPatch = Join-Path $env:RUNNER_TEMP "vortex-unlocked-applicable.patch"
-          $patchLines = [System.IO.File]::ReadAllLines($patchPath)
-          $filteredLines = [System.Collections.Generic.List[string]]::new()
-          $skipSection = $false
-          foreach ($line in $patchLines) {
-            if ($line.StartsWith("diff --git ")) {
-              $skipSection = $line -match '^diff --git a/src/renderer/src/extensions/(dashboard/index\.ts|health_check/views/HealthCheckPage\.tsx) '
-            }
-            if (-not $skipSection) { $filteredLines.Add($line) }
-          }
-          [System.IO.File]::WriteAllLines($filteredPatch, $filteredLines, [System.Text.UTF8Encoding]::new($false))
-
-          git apply --3way $filteredPatch
-          if ($LASTEXITCODE -ne 0) {
-            Write-Output "::error::The remaining patch no longer applies cleanly to upstream master."
+          # Apply the full patch first. Upstream's shallow clone has no historical
+          # blobs for three-way merges, so git may leave conflicts where context
+          # changed. The two known UI files are rebased below; every other file
+          # must apply, otherwise fail rather than silently dropping features.
+          git apply --3way ..\patches\vortex-unlocked.patch
+          $applyExit = $LASTEXITCODE
+          $unmerged = @(git diff --name-only --diff-filter=U)
+          $allowedConflicts = @(
+            "src/renderer/src/extensions/dashboard/index.ts",
+            "src/renderer/src/extensions/health_check/views/HealthCheckPage.tsx"
+          )
+          $unexpected = @($unmerged | Where-Object { $_ -notin $allowedConflicts })
+          if ($unexpected.Count -gt 0) {
+            Write-Output "::error::Patch conflicts outside the two rebased UI files: $($unexpected -join ', ')"
             exit 1
+          }
+          if ($applyExit -ne 0 -and $unmerged.Count -eq 0) {
+            Write-Output "::error::Patch application failed without resolvable UI conflicts."
+            exit 1
+          }
+
+          # Restore the current upstream versions of the known conflict files,
+          # then reapply Vortex Unlocked changes with explicit semantic checks.
+          foreach ($path in $unmerged) {
+            git checkout --ours -- $path
+            if ($LASTEXITCODE -ne 0) {
+              Write-Output "::error::Could not restore upstream file $path for rebasing."
+              exit 1
+            }
           }
 
           # Reapply the Dashboard visibility option against upstream's current
