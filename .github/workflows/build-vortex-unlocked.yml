@@ -201,34 +201,26 @@ jobs:
           }
           [System.IO.File]::WriteAllText($dashboardPath, $dashboard, [System.Text.UTF8Encoding]::new($false))
 
-          # Remove only premium promotion/gating from Health Check. Keep upstream's
-          # current component structure, author-note review and install de-duplication.
+          # Remove premium surfaces using explicit regexes. Avoid nested PowerShell
+          # arrays here: PowerShell enumerates them and can silently shift replacement pairs.
           $healthPath = "src\renderer\src\extensions\health_check\views\HealthCheckPage.tsx"
           $health = [System.IO.File]::ReadAllText($healthPath).Replace("`r`n", "`n")
-          $replacements = @(
-            @('import { PremiumBadge } from "@/ui/components/badges/premium_badge/PremiumBadge";' + "`n", ''),
-            @('import { isLoggedIn, shouldShowPremiumAd } from "../../nexus_integration/selectors";', 'import { isLoggedIn } from "../../nexus_integration/selectors";'),
-            @('import { PremiumBanner } from "../components/premium_banner/PremiumBanner";' + "`n", ''),
-            @('import { PremiumModal } from "../components/premium_modal/PremiumModal";' + "`n", ''),
-            @('  const showPremiumAd = useSelector(shouldShowPremiumAd);' + "`n", ''),
-            @('  // The section whose install all is waiting on the premium modal.' + "`n" + '  const [premiumInstallType, setPremiumInstallType] = useState<IssueType | undefined>();' + "`n", ''),
-            @('  // Without tabs the active list is all there is, and selectedTab stays on it.' + "`n" + '  const listIsEmpty = selectedTab === "hidden" ? hiddenCount === 0 : activeCount === 0;' + "`n", ''),
-            @('  // 1-click install all: premium-gated for free users. Items are de-duplicated first by' + "`n" + '  // collectInstallAllItems (by key) and again here at execution time via the seen set,' + "`n" + '  // so a file shared across multiple source reports is only queued once.', '  // Vortex Unlocked: bulk remediation is available to every account. Preserve' + "`n" + '  // upstream de-duplication and author-note review.'),
-            @('    if (showPremiumAd) {' + "`n" + '      setPremiumInstallType(issueType);' + "`n" + '      return;' + "`n" + '    }' + "`n" + "`n", ''),
-            @('                    rightIcon={showPremiumAd ? <PremiumBadge /> : undefined}' + "`n", ''),
-            @('          {!listIsEmpty && (' + "`n" + '            <PremiumBanner api={api} placement="list" totalIssues={activeCount + hiddenCount} />' + "`n" + '          )}' + "`n" + "`n" + '          <PremiumModal' + "`n" + '            api={api}' + "`n" + '            downloadScope="all"' + "`n" + '            isOpen={premiumInstallType !== undefined}' + "`n" + '            modCount={premiumInstallType ? installAllItems[premiumInstallType].length : 0}' + "`n" + '            trigger="install_all"' + "`n" + '            onClose={() => setPremiumInstallType(undefined)}' + "`n" + '            onDownload={() => setPremiumInstallType(undefined)}' + "`n" + '            onPremiumUnlocked={() => premiumInstallType && reviewThenInstall(premiumInstallType)}' + "`n" + '          />' + "`n" + "`n", '')
-          )
-          foreach ($pair in $replacements) {
-            if ($health.Contains($pair[0])) {
-              $health = $health.Replace($pair[0], $pair[1])
-            }
-          }
-          if ($health.Contains("showPremiumAd") -or $health.Contains("premiumInstallType") -or $health.Contains("PremiumBanner") -or $health.Contains("PremiumModal")) {
-            Write-Output "::error::Health Check premium gate removal was incomplete; refusing to build a partially patched file."
+          $health = [regex]::Replace($health, '(?m)^import \{ PremiumBadge \} from "@\/ui\/components\/badges\/premium_badge\/PremiumBadge";\n', '')
+          $health = $health.Replace('import { isLoggedIn, shouldShowPremiumAd } from "../../nexus_integration/selectors";', 'import { isLoggedIn } from "../../nexus_integration/selectors";')
+          $health = [regex]::Replace($health, '(?m)^import \{ PremiumBanner \} from "\.\.\/components\/premium_banner\/PremiumBanner";\n', '')
+          $health = [regex]::Replace($health, '(?m)^import \{ PremiumModal \} from "\.\.\/components\/premium_modal\/PremiumModal";\n', '')
+          $health = [regex]::Replace($health, '(?m)^  const showPremiumAd = useSelector\(shouldShowPremiumAd\);\n', '')
+          $health = [regex]::Replace($health, '(?m)^  // The section whose install all is waiting on the premium modal\.\n  const \[premiumInstallType, setPremiumInstallType\] = useState<IssueType \| undefined>\(\);\n', '')
+          $health = [regex]::Replace($health, '(?m)^  // Without tabs the active list is all there is, and selectedTab stays on it\.\n  const listIsEmpty = selectedTab === "hidden" \? hiddenCount === 0 : activeCount === 0;\n', '')
+          $health = [regex]::Replace($health, '(?m)^  // 1-click install all: premium-gated for free users\. Items are de-duplicated first by\n  // collectInstallAllItems \(by key\) and again here at execution time via the seen set,\n  // so a file shared across multiple source reports is only queued once\.\n', '  // Vortex Unlocked: bulk remediation is available to every account. Preserve`n  // upstream de-duplication and author-note review.`n')
+          $health = [regex]::Replace($health, '(?m)^    if \(showPremiumAd\) \{\n      setPremiumInstallType\(issueType\);\n      return;\n    \}\n\n', '')
+          $health = [regex]::Replace($health, '(?m)^                    rightIcon=\{showPremiumAd \? <PremiumBadge \/> : undefined\}\n', '')
+          $health = [regex]::Replace($health, '(?s)\n          \{!listIsEmpty && \(\n            <PremiumBanner api=\{api\} placement="list" totalIssues=\{activeCount \+ hiddenCount\} \/>\n          \)\}\n\n          <PremiumModal\n.*?          \/>\n\n', "`n")
+          if ($health -match 'showPremiumAd|premiumInstallType|PremiumBanner|PremiumModal|PremiumBadge|shouldShowPremiumAd|listIsEmpty') {
+            Write-Output "::error::Health Check premium removal incomplete; refusing to build a partially patched file."
             exit 1
           }
           [System.IO.File]::WriteAllText($healthPath, $health, [System.Text.UTF8Encoding]::new($false))
-
           # Catch whitespace/conflict-marker mistakes before compiling.
           git diff --check
           if ($LASTEXITCODE -ne 0) {
