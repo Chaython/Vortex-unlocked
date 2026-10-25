@@ -181,18 +181,21 @@ jobs:
           # registerMainPage API (which uses menuIcon rather than the old mdi prop).
           $dashboardPath = "src\renderer\src\extensions\dashboard\index.ts"
           $dashboard = [System.IO.File]::ReadAllText($dashboardPath).Replace("`r`n", "`n")
-          $dashboardNeedle = '    menuIcon: "dashboard",' + "`n" + '  });'
-          if (-not $dashboard.Contains($dashboardNeedle)) {
+          $dashboardMarker = 'menuIcon: "dashboard",'
+          $dashboardIndex = $dashboard.IndexOf($dashboardMarker, [System.StringComparison]::Ordinal)
+          if ($dashboardIndex -lt 0) {
             Write-Output "::error::Dashboard registration changed again; refusing to silently drop the Hide Dashboard feature."
             exit 1
           }
-          $dashboardReplacement = '    menuIcon: "dashboard",' + "`n" +
-            '    // Vortex Unlocked: allow the Dashboard tab to be hidden in Interface settings.' + "`n" +
-            '    visible: () => {' + "`n" +
-            '      const state = context.api.store.getState();' + "`n" +
-            '      return !(state as any)?.settings?.interface?.hideDashboard;' + "`n" +
-            '    },' + "`n" + '  });'
-          $dashboard = $dashboard.Replace($dashboardNeedle, $dashboardReplacement)
+          if (-not $dashboard.Contains("Vortex Unlocked: allow the Dashboard tab to be hidden")) {
+            $lineEnd = $dashboard.IndexOf("`n", $dashboardIndex)
+            if ($lineEnd -lt 0) {
+              Write-Output "::error::Dashboard menuIcon line has no terminating newline."
+              exit 1
+            }
+            $visibility = "`n    // Vortex Unlocked: allow the Dashboard tab to be hidden in Interface settings.`n    visible: () => {`n      const state = context.api.store.getState();`n      return !(state as any)?.settings?.interface?.hideDashboard;`n    },"
+            $dashboard = $dashboard.Insert($lineEnd, $visibility)
+          }
           [System.IO.File]::WriteAllText($dashboardPath, $dashboard, [System.Text.UTF8Encoding]::new($false))
 
           # Remove only premium promotion/gating from Health Check. Keep upstream's
