@@ -220,8 +220,21 @@ jobs:
           # multiline JSX structurally instead of depending on one exact whitespace layout.
           $health = [regex]::Replace($health, '(?ms)^[ \t]*\{!listIsEmpty && \(\s*<PremiumBanner\b.*?^[ \t]*\)\}\s*', "`n")
           $health = [regex]::Replace($health, '(?ms)^[ \t]*<PremiumModal\b.*?^[ \t]*/>\s*', '')
-          if ($health -notmatch 'reviewThenInstall\(issueType\);' -or $health -notmatch '<AuthorNotesModal\b' -or $health -notmatch 'splitByAuthorNote') {
-            Write-Output "::error::Health Check rebase removed required bulk-install or author-note review behavior."
+          # Use explicit .NET regex checks and name each missing invariant in the error.
+          # This makes failures diagnosable instead of grouping unrelated markers together.
+          $missingHealthBehaviors = @()
+          if (-not [regex]::IsMatch($health, 'reviewThenInstall\(issueType\);')) {
+            $missingHealthBehaviors += "reviewThenInstall(issueType)"
+          }
+          if (-not [regex]::IsMatch($health, '<AuthorNotesModal\b')) {
+            $missingHealthBehaviors += "AuthorNotesModal"
+          }
+          if (-not [regex]::IsMatch($health, 'splitByAuthorNote')) {
+            $missingHealthBehaviors += "splitByAuthorNote"
+          }
+          if ($missingHealthBehaviors.Count -gt 0) {
+            Write-Output "::error::Health Check rebase is missing required behavior markers: $($missingHealthBehaviors -join ', ')"
+            Write-Output "Diagnostic: reviewThenInstall=$([regex]::IsMatch($health, 'reviewThenInstall\(issueType\);')); AuthorNotesModal=$([regex]::IsMatch($health, '<AuthorNotesModal\b')); splitByAuthorNote=$([regex]::IsMatch($health, 'splitByAuthorNote'))"
             exit 1
           }
           if ($health -match 'showPremiumAd|premiumInstallType|PremiumBanner|PremiumModal|PremiumBadge|shouldShowPremiumAd|listIsEmpty') {
