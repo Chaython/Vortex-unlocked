@@ -213,12 +213,17 @@ jobs:
           $health = [regex]::Replace($health, '(?m)^  // The section whose install all is waiting on the premium modal\.\n  const \[premiumInstallType, setPremiumInstallType\] = useState<IssueType \| undefined>\(\);\n', '')
           $health = [regex]::Replace($health, '(?m)^  // Without tabs the active list is all there is, and selectedTab stays on it\.\n  const listIsEmpty = selectedTab === "hidden" \? hiddenCount === 0 : activeCount === 0;\n', '')
           $health = [regex]::Replace($health, '(?m)^  // 1-click install all: premium-gated for free users\. Items are de-duplicated first by\n  // collectInstallAllItems \(by key\) and again here at execution time via the seen set,\n  // so a file shared across multiple source reports is only queued once\.\n', "  // Vortex Unlocked: bulk remediation is available to every account.`n  // Preserve upstream de-duplication and author-note review.`n")
-          $health = [regex]::Replace($health, '(?ms)^[ \t]*if\s*\(\s*showPremiumAd\s*\)\s*\{.*?^[ \t]*\}\r?\n(?=[ \t]*reviewThenInstall\(issueType\);)', '')
+          # Match the complete known gate body, but do not require the next statement to be adjacent: upstream has a blank line before reviewThenInstall.
+          $health = [regex]::Replace($health, '(?m)^[ \t]*if \(showPremiumAd\) \{\n[ \t]*setPremiumInstallType\(issueType\);\n[ \t]*return;\n[ \t]*\}\n?', '')
           $health = [regex]::Replace($health, '(?m)^[ \t]*rightIcon=\{showPremiumAd \? <PremiumBadge \/> : undefined\}\r?\n', '')
           # Remove the two premium UI blocks independently. Match indentation and
           # multiline JSX structurally instead of depending on one exact whitespace layout.
           $health = [regex]::Replace($health, '(?ms)^[ \t]*\{!listIsEmpty && \(\s*<PremiumBanner\b.*?^[ \t]*\)\}\s*', "`n")
           $health = [regex]::Replace($health, '(?ms)^[ \t]*<PremiumModal\b.*?^[ \t]*/>\s*', '')
+          if ($health -notmatch 'reviewThenInstall\(issueType\);' -or $health -notmatch '<AuthorNotesModal\b' -or $health -notmatch 'splitByAuthorNote') {
+            Write-Output "::error::Health Check rebase removed required bulk-install or author-note review behavior."
+            exit 1
+          }
           if ($health -match 'showPremiumAd|premiumInstallType|PremiumBanner|PremiumModal|PremiumBadge|shouldShowPremiumAd|listIsEmpty') {
             $remaining = @($health -split "`n" | Where-Object { $_ -match 'showPremiumAd|premiumInstallType|PremiumBanner|PremiumModal|PremiumBadge|shouldShowPremiumAd|listIsEmpty' })
             Write-Output "::error::Health Check premium removal incomplete; remaining markers: $($remaining -join ' | ')"
