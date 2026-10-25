@@ -215,9 +215,13 @@ jobs:
           $health = [regex]::Replace($health, '(?m)^  // 1-click install all: premium-gated for free users\. Items are de-duplicated first by\n  // collectInstallAllItems \(by key\) and again here at execution time via the seen set,\n  // so a file shared across multiple source reports is only queued once\.\n', '  // Vortex Unlocked: bulk remediation is available to every account. Preserve`n  // upstream de-duplication and author-note review.`n')
           $health = [regex]::Replace($health, '(?m)^    if \(showPremiumAd\) \{\n      setPremiumInstallType\(issueType\);\n      return;\n    \}\n\n', '')
           $health = [regex]::Replace($health, '(?m)^                    rightIcon=\{showPremiumAd \? <PremiumBadge \/> : undefined\}\n', '')
-          $health = [regex]::Replace($health, '(?s)\n          \{!listIsEmpty && \(\n            <PremiumBanner api=\{api\} placement="list" totalIssues=\{activeCount \+ hiddenCount\} \/>\n          \)\}\n\n          <PremiumModal\n.*?          \/>\n\n', "`n")
+          # Remove the two premium UI blocks independently. Match indentation and
+          # multiline JSX structurally instead of depending on one exact whitespace layout.
+          $health = [regex]::Replace($health, '(?ms)^[ \t]*\{!listIsEmpty && \(\s*<PremiumBanner\b.*?^[ \t]*\)\}\s*', "`n")
+          $health = [regex]::Replace($health, '(?ms)^[ \t]*<PremiumModal\b.*?^[ \t]*/>\s*', '')
           if ($health -match 'showPremiumAd|premiumInstallType|PremiumBanner|PremiumModal|PremiumBadge|shouldShowPremiumAd|listIsEmpty') {
-            Write-Output "::error::Health Check premium removal incomplete; refusing to build a partially patched file."
+            $remaining = @($health -split "`n" | Where-Object { $_ -match 'showPremiumAd|premiumInstallType|PremiumBanner|PremiumModal|PremiumBadge|shouldShowPremiumAd|listIsEmpty' })
+            Write-Output "::error::Health Check premium removal incomplete; remaining markers: $($remaining -join ' | ')"
             exit 1
           }
           [System.IO.File]::WriteAllText($healthPath, $health, [System.Text.UTF8Encoding]::new($false))
