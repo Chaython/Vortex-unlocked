@@ -145,7 +145,7 @@ jobs:
           # Fetch the patch's original commit explicitly. The patch records
           # preimage blob IDs; the upstream clone may not retain those
           # historical objects even when it contains the current branch.
-          $patchBase = (Get-Content (Join-Path (Split-Path $PWD -Parent) ".upstream-base" -Raw).Trim()
+          $patchBase = (Get-Content -Raw (Join-Path (Split-Path $PWD -Parent) ".upstream-base")).Trim()
           if ($patchBase.Length -ne 40 -or $patchBase -notmatch '^[0-9a-fA-F]+
           $applyExit = $LASTEXITCODE
           $unmerged = @(git diff --name-only --diff-filter=U)
