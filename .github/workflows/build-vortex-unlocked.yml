@@ -161,6 +161,7 @@ jobs:
             exit 1
           }
           git apply --3way ..\patches\vortex-unlocked.patch
+          $applyExit = $LASTEXITCODE
           $unmerged = @(git diff --name-only --diff-filter=U)
           $allowedConflicts = @(
             "src/renderer/src/extensions/dashboard/index.ts",
