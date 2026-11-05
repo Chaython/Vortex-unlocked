@@ -144,7 +144,7 @@ jobs:
           # conflicts in files whose changes are otherwise mergeable.
           $baseFile = Join-Path (Split-Path $PWD -Parent) ".upstream-base"
           $patchBase = (Get-Content $baseFile -Raw).Trim()
-          if ($patchBase.Length -ne 40 -or $patchBase -notmatch '^[0-9a-fA-F]+
+          if ($patchBase.Length -ne 40 -or $patchBase -notmatch '^[0-9a-fA-F]+$') {
             Write-Output "::error::.upstream-base must contain the full 40-character upstream commit used by the patch."
             exit 1
           }
