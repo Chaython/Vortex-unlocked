@@ -144,7 +144,25 @@ jobs:
           # conflicts in files whose changes are otherwise mergeable.
           $baseFile = Join-Path (Split-Path $PWD -Parent) ".upstream-base"
           $patchBase = (Get-Content $baseFile -Raw).Trim()
-          if ($patchBase -notmatch '^[0-9a-fA-F]{40}
+          if ($patchBase -notmatch '^[0-9a-fA-F]{40}`$') {
+            Write-Output "::error::.upstream-base must contain the full 40-character upstream commit used by the patch."
+            exit 1
+          }
+          git fetch --no-tags origin $patchBase
+          if ($LASTEXITCODE -ne 0) {
+            Write-Output "::error::Could not fetch patch base commit $patchBase from upstream."
+            exit 1
+          }
+          git cat-file -e "$($patchBase)^{commit}"
+          if ($LASTEXITCODE -ne 0) {
+            Write-Output "::error::Patch base commit $patchBase is unavailable in the upstream object database."
+            exit 1
+          }
+          Write-Output "Three-way patch base available: $patchBase"
+
+          # Apply the full patch. Any remaining conflicts are genuine source
+          # conflicts and are handled only by the explicit rebase allowlist.
+          git apply --3way ..\patches\vortex-unlocked.patch
           $applyExit = $LASTEXITCODE
           $unmerged = @(git diff --name-only --diff-filter=U)
           $allowedConflicts = @(
