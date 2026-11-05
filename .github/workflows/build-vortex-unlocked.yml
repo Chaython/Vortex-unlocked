@@ -2,334 +2,308 @@ name: Build Vortex Unlocked
 
 # Vortex Unlocked CI
 # ------------------
-# This workflow always builds the LATEST upstream Vortex master with the
-# Vortex Unlocked patch (patches/vortex-unlocked.patch) applied on top, then
+# Builds upstream Vortex with patches/vortex-unlocked.patch applied on top, then
 # packages an unsigned Windows installer and publishes it as a release.
 #
+# Two jobs:
+#   plan  (ubuntu, ~1 min)  clones upstream, decides WHAT to build and whether
+#                           to build at all, and produces one "resolved" patch
+#                           that applies EXACTLY to the chosen upstream commit.
+#   build (windows)         only runs when plan says so; applies the resolved
+#                           patch with a plain `git apply` and builds.
+#
+# What plan builds:
+#   1. Latest upstream HEAD, if the patch applies to it (git apply --3way with
+#      no leftover conflicts).
+#   2. Otherwise the commit pinned in .upstream-base - the upstream commit the
+#      patch is known to apply to - so a release still ships. An issue titled
+#      "Patch needs rebase onto upstream Vortex" is opened/updated with the
+#      conflicting files, and closed again automatically once HEAD applies.
+#
+# There is no hand-written conflict "rebasing" in this file any more. When
+# upstream drifts, rebase the patch with scripts/rebase-patch.sh, which
+# rewrites patches/vortex-unlocked.patch and .upstream-base together.
+#
 # Triggers:
-#   - push to master/main (patch updates - always builds)
-#   - daily schedule (picks up new upstream commits automatically; skipped
-#     when upstream has not moved since the last release)
+#   - push that changes the patch, .upstream-base or this workflow (always builds)
+#   - daily schedule (skipped when the commit it would build was already released)
 #   - manual dispatch (always builds)
 #
-# The daily run first checks whether upstream has moved since the last
-# release; if it has not, the job ends successfully without building - this
-# keeps the releases page (and the in-client auto-updater) quiet on days
-# without upstream changes.
-#
-# The source snapshot in this repository is never built directly - the patch
-# is applied to a fresh upstream clone every time, so upstream commits are
-# picked up without discarding the unlocked modifications.
-#
-# NOTE: every `uses:` reference below must be a version that actually exists.
-# ncipollo/release-action only publishes v1 tags (v2 does NOT exist) - using
-# @v2 makes the job fail instantly at "Set up job" with
-# "Unable to resolve action ... unable to find version v2".
+# NOTE: every `uses:` reference must be a version that actually exists.
+# ncipollo/release-action only publishes v1 tags (v2 does NOT exist).
 
 on:
   push:
     branches: [master, main]
+    paths:
+      - "patches/**"
+      - ".upstream-base"
+      - ".github/workflows/build-vortex-unlocked.yml"
   schedule:
     - cron: "0 6 * * *"
   workflow_dispatch:
 
 permissions:
   contents: write
+  issues: write
 
-# Only the newest branch build matters. A patch change supersedes any older
-# in-flight build of the same branch, avoiding several expensive Windows
-# packaging jobs racing to publish obsolete releases.
+# A newer push supersedes an older in-flight push build. A scheduled run never
+# cancels a build that is already running (it just waits its turn).
 concurrency:
   group: vortex-unlocked-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'push' }}
+
+env:
+  UPSTREAM_URL: https://github.com/Nexus-Mods/Vortex.git
 
 jobs:
-  build:
-    runs-on: windows-latest
-    env:
-      NO_PARALLEL: "true"
-      DEBUG: electron-builder
-
+  plan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    outputs:
+      skip: ${{ steps.prepare.outputs.skip }}
+      mode: ${{ steps.prepare.outputs.mode }}
+      target: ${{ steps.prepare.outputs.target }}
+      short: ${{ steps.prepare.outputs.short }}
+      date: ${{ steps.prepare.outputs.date }}
     steps:
-      - name: Check for upstream changes
-        id: upstream-check
-        shell: pwsh
+      - name: Checkout patch repository (patch + pinned base only)
+        uses: actions/checkout@v5
+        with:
+          sparse-checkout: |
+            /.upstream-base
+            /patches/
+          sparse-checkout-cone-mode: false
+
+      - name: Resolve upstream commit and apply patch
+        id: prepare
+        shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          # Only the daily schedule skips when nothing changed: a push means
-          # the patch/repository itself changed and must be rebuilt, and a
-          # manual dispatch is an explicit build request.
-          if ($env:GITHUB_EVENT_NAME -ne 'schedule') {
-            echo "skip=false" >> $env:GITHUB_OUTPUT
-            Write-Output "Push or manual run - building."
-            exit 0
-          }
-          $head = git ls-remote https://github.com/Nexus-Mods/Vortex.git HEAD
-          if ($LASTEXITCODE -ne 0) {
-            Write-Output "::error::git ls-remote failed"
-            exit 1
-          }
-          $short = ($head -split "`t")[0].Substring(0, 7)
-          $latest = gh api repos/Chaython/Vortex-unlocked/releases/latest --jq ".tag_name" 2>$null
-          if ($LASTEXITCODE -ne 0) { $latest = "" }
-          Write-Output "Upstream HEAD: $short; latest release tag: $latest"
-          if ("$latest" -like "*.$short") {
-            echo "skip=true" >> $env:GITHUB_OUTPUT
-            Write-Output "Latest release $latest was already built from upstream $short - nothing to do."
-          } else {
-            echo "skip=false" >> $env:GITHUB_OUTPUT
-            Write-Output "Upstream changed since the last release - building."
-          }
+          set -euo pipefail
+          git config --global core.autocrlf false
+          git config --global advice.detachedHead false
 
-      - name: Checkout Vortex Unlocked (patch repository)
-        if: steps.upstream-check.outputs.skip != 'true'
+          fail() { echo "::error::$1"; exit 1; }
+
+          [ -f patches/vortex-unlocked.patch ] || fail "patches/vortex-unlocked.patch is missing from the repository."
+          [ -f .upstream-base ] || fail ".upstream-base is missing from the repository."
+
+          PINNED="$(tr -d '[:space:]' < .upstream-base)"
+          [[ "$PINNED" =~ ^[0-9a-f]{40}$ ]] || fail ".upstream-base must contain one full 40-character upstream commit SHA (got: '$PINNED')."
+
+          mkdir -p plan
+          cp patches/vortex-unlocked.patch plan/in.patch
+          # Safety net: some upload paths mangle the patch with CRLF or a BOM,
+          # both of which make `git apply` fail.
+          if [[ "$(head -n1 plan/in.patch)" == *$'\r' ]]; then
+            echo "::warning::Patch file had CRLF line endings - normalizing to LF."
+            sed -i 's/\r$//' plan/in.patch
+          fi
+          sed -i '1s/^\xEF\xBB\xBF//' plan/in.patch
+
+          # Cheap syntax preflight: catches corrupt/truncated hunks.
+          git apply --numstat plan/in.patch > /dev/null || fail "Patch syntax validation failed."
+
+          # Full clone on purpose: --3way needs the historical blobs the patch
+          # was written against.
+          git clone --no-tags -q "$UPSTREAM_URL" vortex
+          cd vortex
+          HEAD_SHA="$(git rev-parse HEAD)"
+          echo "Upstream HEAD: $HEAD_SHA"
+          echo "Pinned base:   $PINNED"
+
+          MODE=latest
+          TARGET="$HEAD_SHA"
+          FAILED=""
+
+          git checkout -q --detach "$HEAD_SHA"
+          set +e
+          git apply --3way --whitespace=nowarn ../plan/in.patch > ../plan/apply-head.log 2>&1
+          RC=$?
+          set -e
+          UNMERGED="$(git ls-files -u | cut -f2 | sort -u || true)"
+
+          if [ "$RC" -ne 0 ] || [ -n "$UNMERGED" ]; then
+            FAILED="$( { printf '%s\n' "$UNMERGED"; sed -n 's/^error: patch failed: \([^:]*\):.*/\1/p' ../plan/apply-head.log; } | sed '/^$/d' | sort -u )"
+            echo "::warning::Patch does not apply to upstream HEAD ${HEAD_SHA:0:9}; falling back to pinned base ${PINNED:0:9}."
+            echo "Files that need a rebase:"
+            printf '%s\n' "$FAILED" | while IFS= read -r f; do echo "  $f"; done
+            git reset -q --hard
+            git clean -fdxq
+            git cat-file -e "$PINNED^{commit}" 2>/dev/null || fail "Pinned base $PINNED is not in the upstream history, and the patch does not apply to HEAD. Rebase the patch (scripts/rebase-patch.sh)."
+            MODE=pinned
+            TARGET="$PINNED"
+            git checkout -q --detach "$PINNED"
+            git apply --index --whitespace=nowarn ../plan/in.patch || fail "Patch does not apply to its own pinned base ${PINNED:0:9}. Regenerate it with scripts/rebase-patch.sh."
+          fi
+          echo "Mode: $MODE, building ${TARGET:0:9}"
+
+          # One resolved patch that applies EXACTLY to $TARGET: the build job
+          # needs no merge logic, and what gets built is what was tested here.
+          git add -A
+          git diff --cached --binary --full-index "$TARGET" > ../plan/resolved.patch
+          [ -s ../plan/resolved.patch ] || fail "Resolved patch is empty."
+          git reset -q --hard "$TARGET"
+          git clean -fdxq
+          git apply --check ../plan/resolved.patch || fail "Resolved patch failed its round-trip check."
+          cd ..
+
+          SHORT="${TARGET:0:7}"
+          DATE="$(date -u +%Y%m%d)"
+
+          # Only the daily schedule skips; a push or manual run always builds.
+          SKIP=false
+          if [ "${GITHUB_EVENT_NAME}" = "schedule" ]; then
+            LATEST="$(gh api "repos/${GITHUB_REPOSITORY}/releases/latest" --jq .tag_name 2>/dev/null || true)"
+            echo "Latest release tag: '${LATEST}'"
+            if [[ -n "$LATEST" && "$LATEST" == *".$SHORT" ]]; then
+              SKIP=true
+              echo "Release $LATEST was already built from upstream $SHORT - nothing to do."
+            fi
+          fi
+
+          {
+            echo "skip=$SKIP"
+            echo "mode=$MODE"
+            echo "target=$TARGET"
+            echo "short=$SHORT"
+            echo "date=$DATE"
+          } >> "$GITHUB_OUTPUT"
+
+          # Body for the "needs rebase" issue (used by the next step). The
+          # backticks below are literal Markdown, not command substitution.
+          # shellcheck disable=SC2016
+          {
+            printf '%s\n\n' 'The latest upstream Vortex no longer accepts patches/vortex-unlocked.patch, so the build fell back to the pinned base commit. Releases keep shipping, but they are stuck on the old upstream commit until the patch is rebased.'
+            printf -- '- Upstream HEAD: `%s`\n' "${HEAD_SHA:0:9}"
+            printf -- '- Built instead (pinned in `.upstream-base`): `%s`\n' "${PINNED:0:9}"
+            printf -- '- Run: %s/%s/actions/runs/%s\n\n' "${GITHUB_SERVER_URL:-https://github.com}" "${GITHUB_REPOSITORY:-}" "${GITHUB_RUN_ID:-}"
+            printf '%s\n\n' '**Files that need attention**'
+            printf '%s\n' "$FAILED" | while IFS= read -r f; do printf -- '- `%s`\n' "$f"; done
+            printf '\n%s\n\n' '**How to rebase**'
+            printf '%s\n' '```sh'
+            printf '%s\n' 'bash scripts/rebase-patch.sh       # clones upstream, applies the patch with --3way'
+            printf '%s\n' '# resolve any conflict markers inside ./vortex-rebase, then:'
+            printf '%s\n' 'bash scripts/rebase-patch.sh --finish # rewrites patches/vortex-unlocked.patch and .upstream-base'
+            printf '%s\n' '```'
+            printf '\n%s\n\n' 'Commit both files. This issue closes itself once the patch applies to upstream HEAD again.'
+            printf '%s\n\n' '<details><summary>git apply --3way output</summary>'
+            printf '%s\n' '```'
+            { grep -vE '^Applied patch .* cleanly\.$|^Falling back to direct application|^Checking patch |^Performing three-way merge' plan/apply-head.log || true; } | tail -n 40
+            printf '%s\n' '```'
+            printf '%s\n' '</details>'
+          } > plan/issue-body.md
+
+      - name: Track patch rebase status in an issue
+        if: steps.prepare.outputs.mode != ''
+        continue-on-error: true
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          MODE: ${{ steps.prepare.outputs.mode }}
+        run: |
+          set -euo pipefail
+          TITLE="Patch needs rebase onto upstream Vortex"
+          NUM="$(gh issue list --state open --search "\"$TITLE\" in:title" --json number,title --jq "[.[] | select(.title == \"$TITLE\")][0].number // empty")"
+          if [ "$MODE" = "pinned" ]; then
+            if [ -n "$NUM" ]; then
+              gh issue edit "$NUM" --body-file plan/issue-body.md
+              echo "Updated issue #$NUM"
+            else
+              gh issue create --title "$TITLE" --body-file plan/issue-body.md
+            fi
+          elif [ -n "$NUM" ]; then
+            gh issue close "$NUM" --comment "The patch applies to upstream HEAD again - closing."
+          fi
+
+      - name: Upload resolved patch
+        if: steps.prepare.outputs.skip != 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: resolved-patch
+          path: plan/resolved.patch
+          retention-days: 3
+          if-no-files-found: error
+
+  build:
+    needs: plan
+    if: needs.plan.outputs.skip != 'true'
+    runs-on: windows-latest
+    timeout-minutes: 120
+    env:
+      NO_PARALLEL: "true"
+      DEBUG: electron-builder
+      UPSTREAM_SHA: ${{ needs.plan.outputs.short }}
+      BUILD_DATE: ${{ needs.plan.outputs.date }}
+
+    steps:
+      - name: Checkout repository context (.upstream-base only)
         uses: actions/checkout@v5
+        with:
+          sparse-checkout: |
+            /.upstream-base
+          sparse-checkout-cone-mode: false
 
-      - name: Record upstream base of the snapshot
-        if: steps.upstream-check.outputs.skip != 'true'
-        shell: pwsh
-        run: |
-          $base = Get-Content .upstream-base -ErrorAction SilentlyContinue
-          if ($base) { Write-Output "Snapshot built from upstream commit: $base" }
+      - name: Download resolved patch
+        uses: actions/download-artifact@v4
+        with:
+          name: resolved-patch
+          path: resolved-patch
 
-      - name: Clone latest upstream Vortex
-        if: steps.upstream-check.outputs.skip != 'true'
-        shell: pwsh
+      - name: Clone upstream Vortex at the planned commit and apply patch
+        shell: bash
+        env:
+          TARGET: ${{ needs.plan.outputs.target }}
+          MODE: ${{ needs.plan.outputs.mode }}
         run: |
-          git -c core.autocrlf=false clone https://github.com/Nexus-Mods/Vortex.git vortex
-          if ($LASTEXITCODE -ne 0) {
-            Write-Output "::error::Failed to clone upstream Vortex"
-            exit 1
-          }
+          set -euo pipefail
+          git config --global core.autocrlf false
+          git config --global advice.detachedHead false
+          git clone --no-tags -q "$UPSTREAM_URL" vortex
           cd vortex
-          $sha = git rev-parse --short HEAD
-          $date = Get-Date -Format "yyyyMMdd"
-          "UPSTREAM_SHA=$sha" >> $env:GITHUB_ENV
-          "BUILD_DATE=$date" >> $env:GITHUB_ENV
-          Write-Output "Building upstream commit $sha ($date)"
+          git checkout -q --detach "$TARGET"
+          git apply --index --whitespace=nowarn ../resolved-patch/resolved.patch
+          echo "Building upstream commit ${TARGET:0:9} ($MODE) on $BUILD_DATE"
 
-      - name: Apply Vortex Unlocked patch
-        if: steps.upstream-check.outputs.skip != 'true'
+      - name: Read toolchain versions from upstream package.json
+        id: toolchain
         shell: pwsh
         run: |
-          # Safety net: some upload paths mangle the patch into CRLF or add a
-          # BOM, both of which make `git apply` fail. Normalize back to LF.
-          $patchPath = Join-Path $PWD "patches\vortex-unlocked.patch"
-          if (-not (Test-Path $patchPath)) {
-            Write-Output "::error::patches/vortex-unlocked.patch is missing from the repository."
-            exit 1
-          }
-          $content = [IO.File]::ReadAllText($patchPath)
-          if ($content.Contains("`r`n")) {
-            Write-Output "::warning::Patch file had CRLF line endings - normalizing to LF."
-          }
-          $content = $content.Replace("`r`n", "`n")
-          [IO.File]::WriteAllText($patchPath, $content, [System.Text.UTF8Encoding]::new($false))
-
-          cd vortex
-
-          # Cheap syntax preflight first. --numstat parses the whole patch and
-          # catches corrupt/truncated hunks without requiring every context line
-          # to match current upstream (the real apply intentionally uses --3way).
-          git apply --numstat ..\patches\vortex-unlocked.patch > $null
-          if ($LASTEXITCODE -ne 0) {
-            Write-Output "::error::Patch syntax validation failed."
-            exit 1
-          }
-
-          # Apply the full patch first. Upstream's shallow clone has no historical
-          # blobs for three-way merges, so git may leave conflicts where context
-          # changed. The known UI files are rebased below; every other file
-          # must apply, otherwise fail rather than silently dropping features.
-          # Fetch the patch's original commit explicitly. The patch records
-          # preimage blob IDs; the upstream clone may not retain those
-          # historical objects even when it contains the current branch.
-          $patchBase = (Get-Content -Raw (Join-Path (Split-Path $PWD -Parent) ".upstream-base")).Trim()
-          if ($patchBase.Length -ne 40 -or $patchBase -notmatch '^[0-9a-fA-F]{40}$') {
-            Write-Output "::error::Invalid .upstream-base commit SHA."
-            exit 1
-          }
-          git fetch --no-tags origin $patchBase
-          if ($LASTEXITCODE -ne 0) {
-            Write-Output "::error::Could not fetch the original patch base."
-            exit 1
-          }
-          git cat-file -e "$($patchBase)^{commit}"
-          if ($LASTEXITCODE -ne 0) {
-            Write-Output "::error::Original patch base commit is unavailable."
-            exit 1
-          }
-          git apply --3way ..\patches\vortex-unlocked.patch
-          $applyExit = $LASTEXITCODE
-          $unmerged = @(git diff --name-only --diff-filter=U)
-          $allowedConflicts = @(
-            "src/renderer/src/extensions/dashboard/index.ts",
-            "src/renderer/src/extensions/health_check/views/HealthCheckPage.tsx",
-            "src/renderer/src/extensions/health_check/hooks/useModRequirementActions.ts"
-          )
-          $unexpected = @($unmerged | Where-Object { $_ -notin $allowedConflicts })
-          if ($unexpected.Count -gt 0) {
-            Write-Output "::error::Patch conflicts outside the explicitly rebased UI files: $($unexpected -join ', ')"
-            exit 1
-          }
-          if ($applyExit -ne 0 -and $unmerged.Count -eq 0) {
-            Write-Output "::error::Patch application failed without resolvable UI conflicts."
-            exit 1
-          }
-
-          # Restore the current upstream versions of the known conflict files,
-          # then reapply Vortex Unlocked changes with explicit semantic checks.
-          foreach ($path in $unmerged) {
-            git checkout --ours -- $path
-            if ($LASTEXITCODE -ne 0) {
-              Write-Output "::error::Could not restore upstream file $path for rebasing."
-              exit 1
-            }
-          }
-
-          foreach ($path in $allowedConflicts) {
-            git checkout HEAD -- $path
-            if ($LASTEXITCODE -ne 0) {
-              Write-Output "::error::Could not reset $path to the cloned upstream version."
-              exit 1
-            }
-          }
-
-          # Reapply the Dashboard visibility option against upstream's current
-          # registerMainPage API (which uses menuIcon rather than the old mdi prop).
-          $dashboardPath = "src\renderer\src\extensions\dashboard\index.ts"
-          # Read the upstream blob directly so an earlier failed three-way apply
-          # cannot leave a conflicted/partially restored working-tree version.
-          $dashboard = (git show "HEAD:src/renderer/src/extensions/dashboard/index.ts" | Out-String).Replace("`r`n", "`n")
-          $dashboard = $dashboard.TrimEnd("`r", "`n") + "`n"
-          $registrationStart = $dashboard.IndexOf('context.registerMainPage("dashboard"', [System.StringComparison]::Ordinal)
-          if ($registrationStart -lt 0) {
-            Write-Output "::error::Could not find the Dashboard page registration in upstream source."
-            exit 1
-          }
-          $registrationEnd = $dashboard.IndexOf("`n  });", $registrationStart, [System.StringComparison]::Ordinal)
-          if ($registrationEnd -lt 0) {
-            Write-Output "::error::Could not find the end of the Dashboard page registration."
-            exit 1
-          }
-          $registration = $dashboard.Substring($registrationStart, $registrationEnd - $registrationStart)
-          if (-not $registration.Contains("Vortex Unlocked: allow the Dashboard tab to be hidden")) {
-            $visibility = "`n    // Vortex Unlocked: allow the Dashboard tab to be hidden in Interface settings.`n    visible: () => {`n      const state = context.api.store.getState();`n      return !(state as any)?.settings?.interface?.hideDashboard;`n    },"
-            $dashboard = $dashboard.Insert($registrationEnd, $visibility)
-          }
-          [System.IO.File]::WriteAllText($dashboardPath, $dashboard, [System.Text.UTF8Encoding]::new($false))
-
-          # Remove premium surfaces using explicit regexes. Avoid nested PowerShell
-          # arrays here: PowerShell enumerates them and can silently shift replacement pairs.
-          $healthPath = "src\renderer\src\extensions\health_check\views\HealthCheckPage.tsx"
-          $health = [System.IO.File]::ReadAllText($healthPath).Replace("`r`n", "`n")
-          $health = [regex]::Replace($health, '(?m)^import \{ PremiumBadge \} from "@\/ui\/components\/(?:badges\/)?premium_badge\/PremiumBadge";\r?\n', '')
-          $health = $health.Replace('import { isLoggedIn, shouldShowPremiumAd } from "../../nexus_integration/selectors";', 'import { isLoggedIn } from "../../nexus_integration/selectors";')
-          $health = [regex]::Replace($health, '(?m)^import \{ PremiumBanner \} from "\.\.\/components\/premium_banner\/PremiumBanner";\n', '')
-          $health = [regex]::Replace($health, '(?m)^import \{ PremiumModal \} from "\.\.\/components\/premium_modal\/PremiumModal";\n', '')
-          $health = [regex]::Replace($health, '(?m)^  const showPremiumAd = useSelector\(shouldShowPremiumAd\);\n', '')
-          $health = [regex]::Replace($health, '(?m)^  // The section whose install all is waiting on the premium modal\.\n  const \[premiumInstallType, setPremiumInstallType\] = useState<IssueType \| undefined>\(\);\n', '')
-          $health = [regex]::Replace($health, '(?m)^  // Without tabs the active list is all there is, and selectedTab stays on it\.\n  const listIsEmpty = selectedTab === "hidden" \? hiddenCount === 0 : activeCount === 0;\n', '')
-          $health = [regex]::Replace($health, '(?m)^  // 1-click install all: premium-gated for free users\. Items are de-duplicated first by\n  // collectInstallAllItems \(by key\) and again here at execution time via the seen set,\n  // so a file shared across multiple source reports is only queued once\.\n', "  // Vortex Unlocked: bulk remediation is available to every account.`n  // Preserve upstream de-duplication and author-note review.`n")
-          # Match the complete known gate body, but do not require the next statement to be adjacent: upstream has a blank line before reviewThenInstall.
-          $health = [regex]::Replace($health, '(?m)^[ \t]*if \(showPremiumAd\) \{\n[ \t]*setPremiumInstallType\(issueType\);\n[ \t]*return;\n[ \t]*\}\n?', '')
-          $health = [regex]::Replace($health, '(?m)^[ \t]*rightIcon=\{showPremiumAd \? <PremiumBadge \/> : undefined\}\r?\n', '')
-          # Remove the two premium UI blocks independently. Match indentation and
-          # multiline JSX structurally instead of depending on one exact whitespace layout.
-          $health = [regex]::Replace($health, '(?ms)^[ \t]*\{!listIsEmpty && \(\s*<PremiumBanner\b.*?^[ \t]*\)\}\s*', "`n")
-          $health = [regex]::Replace($health, '(?ms)^[ \t]*<PremiumModal\b.*?^[ \t]*/>\s*', '')
-          # Use explicit .NET regex checks and name each missing invariant in the error.
-          # This makes failures diagnosable instead of grouping unrelated markers together.
-          $missingHealthBehaviors = @()
-          if (-not [regex]::IsMatch($health, 'reviewThenInstall\(issueType\);')) {
-            $missingHealthBehaviors += "reviewThenInstall(issueType)"
-          }
-          if (-not [regex]::IsMatch($health, '<AuthorNotesModal\b')) {
-            $missingHealthBehaviors += "AuthorNotesModal"
-          }
-          if (-not [regex]::IsMatch($health, 'splitByAuthorNote')) {
-            $missingHealthBehaviors += "splitByAuthorNote"
-          }
-          if ($missingHealthBehaviors.Count -gt 0) {
-            Write-Output "::error::Health Check rebase is missing required behavior markers: $($missingHealthBehaviors -join ', ')"
-            Write-Output "Diagnostic: reviewThenInstall=$([regex]::IsMatch($health, 'reviewThenInstall\(issueType\);')); AuthorNotesModal=$([regex]::IsMatch($health, '<AuthorNotesModal\b')); splitByAuthorNote=$([regex]::IsMatch($health, 'splitByAuthorNote'))"
-            exit 1
-          }
-          if ($health -match 'showPremiumAd|premiumInstallType|PremiumBanner|PremiumModal|PremiumBadge|shouldShowPremiumAd|listIsEmpty') {
-            $remaining = @($health -split "`n" | Where-Object { $_ -match 'showPremiumAd|premiumInstallType|PremiumBanner|PremiumModal|PremiumBadge|shouldShowPremiumAd|listIsEmpty' })
-            Write-Output "::error::Health Check premium removal incomplete; remaining markers: $($remaining -join ' | ')"
-            exit 1
-          }
-          [System.IO.File]::WriteAllText($healthPath, $health, [System.Text.UTF8Encoding]::new($false))
-
-          # Reapply the single-mod Health Check install change against the latest
-          # upstream hook. Keep its modal state/API for existing callers, but
-          # remove only the client-side Premium gate; the normal Nexus resolver
-          # and server-side download policy remain responsible for the request.
-          $requirementActionsPath = "src\renderer\src\extensions\health_check\hooks\useModRequirementActions.ts"
-          $requirementActions = (git show "HEAD:src/renderer/src/extensions/health_check/hooks/useModRequirementActions.ts" | Out-String).Replace(([string][char]13 + [string][char]10), [string][char]10)
-          $requirementActions = $requirementActions.TrimEnd([char]13, [char]10) + [string][char]10
-          $requirementActions = $requirementActions.Replace('import { shouldShowPremiumAd } from "@/extensions/nexus_integration/selectors";' + [string][char]10, '')
-          $requirementActions = $requirementActions.Replace('premium-gated 1-click install', '1-click install')
-          $requirementActions = [regex]::Replace($requirementActions, '(?m)^  const showPremiumAd = useSelector\(shouldShowPremiumAd\);$', '  const showPremiumAd = false;')
-          $requirementActions = [regex]::Replace($requirementActions, '(?ms)^    if \(showPremiumAd\) \{\r?\n      setShowPremiumModal\(true\);\r?\n      return;\r?\n    \}\r?\n', '')
-          $missingRequirementActions = @()
-          if ($requirementActions -match 'shouldShowPremiumAd') { $missingRequirementActions += "premium selector import/reference" }
-          if ($requirementActions -match 'if \(showPremiumAd\)') { $missingRequirementActions += "client-side install gate" }
-          if ($missingRequirementActions.Count -gt 0 -or $requirementActions -notmatch 'const showPremiumAd = false;' -or $requirementActions -notmatch 'setShowPremiumModal,') {
-            Write-Output "::error::Health Check requirement-action rebase failed validation: $($missingRequirementActions -join ', ')"
-            exit 1
-          }
-          [System.IO.File]::WriteAllText($requirementActionsPath, $requirementActions, [System.Text.UTF8Encoding]::new($false))
-
-          # Catch whitespace/conflict-marker mistakes before compiling.
-          git diff --check
-          if ($LASTEXITCODE -ne 0) {
-            Write-Output "::error::Patched tree failed git diff --check."
-            exit 1
-          }
-
-          Write-Output "Patch applied and validated. Changed files:"
-          git status --short
-
-      - name: Read Node.js version from package.json
-        id: node-version
-        if: steps.upstream-check.outputs.skip != 'true'
-        shell: pwsh
-        run: |
-          $packageJson = Get-Content vortex\package.json | ConvertFrom-Json
+          $packageJson = Get-Content vortex/package.json | ConvertFrom-Json
           $nodeVersion = $packageJson.engines.node
+          $pnpmVersion = ""
+          if ("$($packageJson.packageManager)" -match '^pnpm@([0-9]+\.[0-9]+\.[0-9]+)') { $pnpmVersion = $Matches[1] }
           echo "NODE_VERSION=$nodeVersion" >> $env:GITHUB_OUTPUT
-          echo "Using Node.js version: $nodeVersion"
+          echo "PNPM_VERSION=$pnpmVersion" >> $env:GITHUB_OUTPUT
+          echo "Using Node.js $nodeVersion, pnpm $pnpmVersion"
 
       - name: Install pnpm
-        if: steps.upstream-check.outputs.skip != 'true'
         uses: pnpm/action-setup@v6
+        with:
+          version: ${{ steps.toolchain.outputs.PNPM_VERSION || '11' }}
 
       - name: Use Node.js
-        if: steps.upstream-check.outputs.skip != 'true'
         uses: actions/setup-node@v6
         with:
-          node-version: ${{ steps.node-version.outputs.NODE_VERSION }}
+          node-version: ${{ steps.toolchain.outputs.NODE_VERSION }}
           cache: "pnpm"
           cache-dependency-path: vortex/pnpm-lock.yaml
 
       - name: Setup .NET 9
-        if: steps.upstream-check.outputs.skip != 'true'
         uses: actions/setup-dotnet@v5
         with:
           dotnet-version: "9.0.x"
 
       - name: Setup Python 3.11
-        if: steps.upstream-check.outputs.skip != 'true'
         uses: actions/setup-python@v6
         with:
           python-version: "3.11"
 
       - name: Derive build version
         id: version
-        if: steps.upstream-check.outputs.skip != 'true'
         shell: pwsh
         run: |
           $pkg = Get-Content vortex\package.json | ConvertFrom-Json
@@ -339,13 +313,11 @@ jobs:
           echo "Version: $rawVersion"
 
       - name: Bump versions
-        if: steps.upstream-check.outputs.skip != 'true'
         shell: pwsh
         run: pnpm -F "@vortex/main" -F "@nexusmods/vortex-api" version ${{ steps.version.outputs.RAW_VERSION }} --no-git-tag-version --no-git-checks --allow-same-version
         working-directory: vortex
 
       - name: Install dependencies
-        if: steps.upstream-check.outputs.skip != 'true'
         shell: pwsh
         run: pnpm install --frozen-lockfile
         working-directory: vortex
@@ -353,7 +325,6 @@ jobs:
           VORTEX_ELECTRON_REBUILD: "defer"
 
       - name: Cache Electron native build headers
-        if: steps.upstream-check.outputs.skip != 'true'
         uses: actions/cache@v5
         with:
           path: |
@@ -362,7 +333,6 @@ jobs:
           key: unlocked-native-headers-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('vortex/package.json', 'vortex/pnpm-lock.yaml', 'vortex/src/main/package.json') }}
 
       - name: Build workspace
-        if: steps.upstream-check.outputs.skip != 'true'
         shell: pwsh
         run: pnpm run build
         working-directory: vortex
@@ -370,7 +340,6 @@ jobs:
           NODE_ENV: production
 
       - name: Test unlocked download and collection paths
-        if: steps.upstream-check.outputs.skip != 'true'
         shell: pwsh
         working-directory: vortex
         run: |
@@ -381,7 +350,6 @@ jobs:
           }
 
       - name: Publish dist package
-        if: steps.upstream-check.outputs.skip != 'true'
         shell: pwsh
         run: pnpm nx run @vortex/main:publish
         working-directory: vortex
@@ -391,7 +359,6 @@ jobs:
 
       - name: Cache packaged Electron native rebuild outputs
         id: packaged-native-cache
-        if: steps.upstream-check.outputs.skip != 'true'
         uses: actions/cache@v5
         with:
           path: |
@@ -410,19 +377,17 @@ jobs:
           key: unlocked-dist-electron-native-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('vortex/pnpm-lock.yaml', 'vortex/pnpm-workspace.yaml', 'vortex/src/main/package.json', 'vortex/src/main/postinstall.mjs') }}
 
       - name: Rebuild packaged Electron native modules
-        if: steps.upstream-check.outputs.skip != 'true' && steps.packaged-native-cache.outputs.cache-hit != 'true'
+        if: steps.packaged-native-cache.outputs.cache-hit != 'true'
         shell: pwsh
         working-directory: vortex/src/main/dist
         run: npx electron-rebuild
 
       - name: Build installer (unsigned)
-        if: steps.upstream-check.outputs.skip != 'true'
         shell: pwsh
         run: pnpm -F @vortex/main run package:nosign
         working-directory: vortex
 
       - name: Validate package creation
-        if: steps.upstream-check.outputs.skip != 'true'
         shell: pwsh
         working-directory: vortex
         run: |
@@ -446,7 +411,6 @@ jobs:
           Write-Output "Package validation successful - installer, latest.yml and asar verified"
 
       - name: Upload installer artifact
-        if: steps.upstream-check.outputs.skip != 'true'
         uses: actions/upload-artifact@v4
         with:
           name: vortex-unlocked-${{ steps.version.outputs.RAW_VERSION }}
@@ -457,7 +421,6 @@ jobs:
           if-no-files-found: error
 
       - name: Create release
-        if: steps.upstream-check.outputs.skip != 'true'
         uses: ncipollo/release-action@v1
         with:
           tag: ${{ steps.version.outputs.TAG_VERSION }}
@@ -465,1041 +428,7 @@ jobs:
           body: |
             Vortex Unlocked build
 
-            - Upstream commit: ${{ env.UPSTREAM_SHA }} (Nexus-Mods/Vortex master)
-            - Patch: `patches/vortex-unlocked.patch`
-            - Unlocked by [Chaython](https://github.com/Chaython)
-
-            **What this build changes**
-            - No premium upsell UI (banners, dashlets, dialogs, badges, membership status)
-            - No client-side premium gates (parallel download threads, Update All, collection bulk-install, Health Check 1-click/Install All)
-            - Parallel downloads on by default: 5 download threads out of the box (Settings -> Downloads -> "Download Threads", adjustable 1-10; the setting is now an upper bound and the downloader adapts effective concurrency to throughput/failures)
-            - When Nexus returns multiple authorised download URLs, Vortex learns host reliability and spreads new transfers across healthier returned hosts
-            - Interrupted downloads without a usable checkpoint are re-resolved and restarted under the same download ID instead of being discarded
-            - Optional: fully hide the Dashboard tab via Settings -> Interface -> Customisation -> "Hide Dashboard tab"
-            - Optional: auto-authorise refused download links through an embedded nexusmods.com website session (Settings -> Interface -> "Auto-authorise downloads via website session"); requests are serialized and paced, any failure falls back to the manual download dialog - downloads remain speed-limited by the account tier
-            - On first start: option to import data (profiles, mods, settings, downloads) from an existing official Vortex install; also available later via Settings -> Interface -> "Import data from Vortex" (staging paths inside the data directory are rewritten to the new location; only Vortex' own data is copied - caches/logs are skipped; the import refuses to run while the official client is open; locked files outside the state database are skipped and reported instead of failing the import; existing data is backed up and restored on failure)
-            - Keeps its data separate from official Vortex: %APPDATA%\vortex-unlocked (official Vortex uses %APPDATA%\Vortex), so both can run side by side
-            - Uninstaller: removes the electron-updater cache (%LOCALAPPDATA%\vortex-unlocked-updater) and asks whether to also delete the application data; the upstream uninstall feedback survey was removed
-            - Usage analytics / event reporting disabled
-            - In-app auto-update: the client checks this repository's releases (on launch and every 4 hours, or via Settings -> Application -> "Check for updates") and can download and install the update on restart - updates only ever come from Chaython/Vortex-unlocked, never from upstream
-            - Installs side-by-side with official Vortex as "Vortex Unlocked"
-          artifacts: |
-            vortex/dist/vortex-unlocked-setup-*.exe
-            vortex/dist/vortex-unlocked-setup-*.exe.blockmap
-            vortex/dist/latest.yml
-          allowUpdates: true
-          replacesArtifacts: true
-          token: ${{ secrets.GITHUB_TOKEN }}
-) {
-            Write-Output "::error::Invalid .upstream-base commit SHA."
-            exit 1
-          }
-          git fetch --no-tags origin $patchBase
-          if ($LASTEXITCODE -ne 0) {
-            Write-Output "::error::Could not fetch the original patch base."
-            exit 1
-          }
-          git cat-file -e "$($patchBase)^{commit}"
-          if ($LASTEXITCODE -ne 0) {
-            Write-Output "::error::Original patch base commit is unavailable."
-            exit 1
-          }
-
-          git apply --3way ..\patches\vortex-unlocked.patch
-          $applyExit = $LASTEXITCODE
-          $unmerged = @(git diff --name-only --diff-filter=U)
-          $allowedConflicts = @(
-            "src/renderer/src/extensions/dashboard/index.ts",
-            "src/renderer/src/extensions/health_check/views/HealthCheckPage.tsx",
-            "src/renderer/src/extensions/health_check/hooks/useModRequirementActions.ts"
-          )
-          $unexpected = @($unmerged | Where-Object { $_ -notin $allowedConflicts })
-          if ($unexpected.Count -gt 0) {
-            Write-Output "::error::Patch conflicts outside the explicitly rebased UI files: $($unexpected -join ', ')"
-            exit 1
-          }
-          if ($applyExit -ne 0 -and $unmerged.Count -eq 0) {
-            Write-Output "::error::Patch application failed without resolvable UI conflicts."
-            exit 1
-          }
-
-          # Restore the current upstream versions of the known conflict files,
-          # then reapply Vortex Unlocked changes with explicit semantic checks.
-          foreach ($path in $unmerged) {
-            git checkout --ours -- $path
-            if ($LASTEXITCODE -ne 0) {
-              Write-Output "::error::Could not restore upstream file $path for rebasing."
-              exit 1
-            }
-          }
-
-          foreach ($path in $allowedConflicts) {
-            git checkout HEAD -- $path
-            if ($LASTEXITCODE -ne 0) {
-              Write-Output "::error::Could not reset $path to the cloned upstream version."
-              exit 1
-            }
-          }
-
-          # Reapply the Dashboard visibility option against upstream's current
-          # registerMainPage API (which uses menuIcon rather than the old mdi prop).
-          $dashboardPath = "src\renderer\src\extensions\dashboard\index.ts"
-          # Read the upstream blob directly so an earlier failed three-way apply
-          # cannot leave a conflicted/partially restored working-tree version.
-          $dashboard = (git show "HEAD:src/renderer/src/extensions/dashboard/index.ts" | Out-String).Replace("`r`n", "`n")
-          $dashboard = $dashboard.TrimEnd("`r", "`n") + "`n"
-          $registrationStart = $dashboard.IndexOf('context.registerMainPage("dashboard"', [System.StringComparison]::Ordinal)
-          if ($registrationStart -lt 0) {
-            Write-Output "::error::Could not find the Dashboard page registration in upstream source."
-            exit 1
-          }
-          $registrationEnd = $dashboard.IndexOf("`n  });", $registrationStart, [System.StringComparison]::Ordinal)
-          if ($registrationEnd -lt 0) {
-            Write-Output "::error::Could not find the end of the Dashboard page registration."
-            exit 1
-          }
-          $registration = $dashboard.Substring($registrationStart, $registrationEnd - $registrationStart)
-          if (-not $registration.Contains("Vortex Unlocked: allow the Dashboard tab to be hidden")) {
-            $visibility = "`n    // Vortex Unlocked: allow the Dashboard tab to be hidden in Interface settings.`n    visible: () => {`n      const state = context.api.store.getState();`n      return !(state as any)?.settings?.interface?.hideDashboard;`n    },"
-            $dashboard = $dashboard.Insert($registrationEnd, $visibility)
-          }
-          [System.IO.File]::WriteAllText($dashboardPath, $dashboard, [System.Text.UTF8Encoding]::new($false))
-
-          # Remove premium surfaces using explicit regexes. Avoid nested PowerShell
-          # arrays here: PowerShell enumerates them and can silently shift replacement pairs.
-          $healthPath = "src\renderer\src\extensions\health_check\views\HealthCheckPage.tsx"
-          $health = [System.IO.File]::ReadAllText($healthPath).Replace("`r`n", "`n")
-          $health = [regex]::Replace($health, '(?m)^import \{ PremiumBadge \} from "@\/ui\/components\/(?:badges\/)?premium_badge\/PremiumBadge";\r?\n', '')
-          $health = $health.Replace('import { isLoggedIn, shouldShowPremiumAd } from "../../nexus_integration/selectors";', 'import { isLoggedIn } from "../../nexus_integration/selectors";')
-          $health = [regex]::Replace($health, '(?m)^import \{ PremiumBanner \} from "\.\.\/components\/premium_banner\/PremiumBanner";\n', '')
-          $health = [regex]::Replace($health, '(?m)^import \{ PremiumModal \} from "\.\.\/components\/premium_modal\/PremiumModal";\n', '')
-          $health = [regex]::Replace($health, '(?m)^  const showPremiumAd = useSelector\(shouldShowPremiumAd\);\n', '')
-          $health = [regex]::Replace($health, '(?m)^  // The section whose install all is waiting on the premium modal\.\n  const \[premiumInstallType, setPremiumInstallType\] = useState<IssueType \| undefined>\(\);\n', '')
-          $health = [regex]::Replace($health, '(?m)^  // Without tabs the active list is all there is, and selectedTab stays on it\.\n  const listIsEmpty = selectedTab === "hidden" \? hiddenCount === 0 : activeCount === 0;\n', '')
-          $health = [regex]::Replace($health, '(?m)^  // 1-click install all: premium-gated for free users\. Items are de-duplicated first by\n  // collectInstallAllItems \(by key\) and again here at execution time via the seen set,\n  // so a file shared across multiple source reports is only queued once\.\n', "  // Vortex Unlocked: bulk remediation is available to every account.`n  // Preserve upstream de-duplication and author-note review.`n")
-          # Match the complete known gate body, but do not require the next statement to be adjacent: upstream has a blank line before reviewThenInstall.
-          $health = [regex]::Replace($health, '(?m)^[ \t]*if \(showPremiumAd\) \{\n[ \t]*setPremiumInstallType\(issueType\);\n[ \t]*return;\n[ \t]*\}\n?', '')
-          $health = [regex]::Replace($health, '(?m)^[ \t]*rightIcon=\{showPremiumAd \? <PremiumBadge \/> : undefined\}\r?\n', '')
-          # Remove the two premium UI blocks independently. Match indentation and
-          # multiline JSX structurally instead of depending on one exact whitespace layout.
-          $health = [regex]::Replace($health, '(?ms)^[ \t]*\{!listIsEmpty && \(\s*<PremiumBanner\b.*?^[ \t]*\)\}\s*', "`n")
-          $health = [regex]::Replace($health, '(?ms)^[ \t]*<PremiumModal\b.*?^[ \t]*/>\s*', '')
-          # Use explicit .NET regex checks and name each missing invariant in the error.
-          # This makes failures diagnosable instead of grouping unrelated markers together.
-          $missingHealthBehaviors = @()
-          if (-not [regex]::IsMatch($health, 'reviewThenInstall\(issueType\);')) {
-            $missingHealthBehaviors += "reviewThenInstall(issueType)"
-          }
-          if (-not [regex]::IsMatch($health, '<AuthorNotesModal\b')) {
-            $missingHealthBehaviors += "AuthorNotesModal"
-          }
-          if (-not [regex]::IsMatch($health, 'splitByAuthorNote')) {
-            $missingHealthBehaviors += "splitByAuthorNote"
-          }
-          if ($missingHealthBehaviors.Count -gt 0) {
-            Write-Output "::error::Health Check rebase is missing required behavior markers: $($missingHealthBehaviors -join ', ')"
-            Write-Output "Diagnostic: reviewThenInstall=$([regex]::IsMatch($health, 'reviewThenInstall\(issueType\);')); AuthorNotesModal=$([regex]::IsMatch($health, '<AuthorNotesModal\b')); splitByAuthorNote=$([regex]::IsMatch($health, 'splitByAuthorNote'))"
-            exit 1
-          }
-          if ($health -match 'showPremiumAd|premiumInstallType|PremiumBanner|PremiumModal|PremiumBadge|shouldShowPremiumAd|listIsEmpty') {
-            $remaining = @($health -split "`n" | Where-Object { $_ -match 'showPremiumAd|premiumInstallType|PremiumBanner|PremiumModal|PremiumBadge|shouldShowPremiumAd|listIsEmpty' })
-            Write-Output "::error::Health Check premium removal incomplete; remaining markers: $($remaining -join ' | ')"
-            exit 1
-          }
-          [System.IO.File]::WriteAllText($healthPath, $health, [System.Text.UTF8Encoding]::new($false))
-
-          # Reapply the single-mod Health Check install change against the latest
-          # upstream hook. Keep its modal state/API for existing callers, but
-          # remove only the client-side Premium gate; the normal Nexus resolver
-          # and server-side download policy remain responsible for the request.
-          $requirementActionsPath = "src\renderer\src\extensions\health_check\hooks\useModRequirementActions.ts"
-          $requirementActions = (git show "HEAD:src/renderer/src/extensions/health_check/hooks/useModRequirementActions.ts" | Out-String).Replace(([string][char]13 + [string][char]10), [string][char]10)
-          $requirementActions = $requirementActions.TrimEnd([char]13, [char]10) + [string][char]10
-          $requirementActions = $requirementActions.Replace('import { shouldShowPremiumAd } from "@/extensions/nexus_integration/selectors";' + [string][char]10, '')
-          $requirementActions = $requirementActions.Replace('premium-gated 1-click install', '1-click install')
-          $requirementActions = [regex]::Replace($requirementActions, '(?m)^  const showPremiumAd = useSelector\(shouldShowPremiumAd\);$', '  const showPremiumAd = false;')
-          $requirementActions = [regex]::Replace($requirementActions, '(?ms)^    if \(showPremiumAd\) \{\r?\n      setShowPremiumModal\(true\);\r?\n      return;\r?\n    \}\r?\n', '')
-          $missingRequirementActions = @()
-          if ($requirementActions -match 'shouldShowPremiumAd') { $missingRequirementActions += "premium selector import/reference" }
-          if ($requirementActions -match 'if \(showPremiumAd\)') { $missingRequirementActions += "client-side install gate" }
-          if ($missingRequirementActions.Count -gt 0 -or $requirementActions -notmatch 'const showPremiumAd = false;' -or $requirementActions -notmatch 'setShowPremiumModal,') {
-            Write-Output "::error::Health Check requirement-action rebase failed validation: $($missingRequirementActions -join ', ')"
-            exit 1
-          }
-          [System.IO.File]::WriteAllText($requirementActionsPath, $requirementActions, [System.Text.UTF8Encoding]::new($false))
-
-          # Catch whitespace/conflict-marker mistakes before compiling.
-          git diff --check
-          if ($LASTEXITCODE -ne 0) {
-            Write-Output "::error::Patched tree failed git diff --check."
-            exit 1
-          }
-
-          Write-Output "Patch applied and validated. Changed files:"
-          git status --short
-
-      - name: Read Node.js version from package.json
-        id: node-version
-        if: steps.upstream-check.outputs.skip != 'true'
-        shell: pwsh
-        run: |
-          $packageJson = Get-Content vortex\package.json | ConvertFrom-Json
-          $nodeVersion = $packageJson.engines.node
-          echo "NODE_VERSION=$nodeVersion" >> $env:GITHUB_OUTPUT
-          echo "Using Node.js version: $nodeVersion"
-
-      - name: Install pnpm
-        if: steps.upstream-check.outputs.skip != 'true'
-        uses: pnpm/action-setup@v6
-
-      - name: Use Node.js
-        if: steps.upstream-check.outputs.skip != 'true'
-        uses: actions/setup-node@v6
-        with:
-          node-version: ${{ steps.node-version.outputs.NODE_VERSION }}
-          cache: "pnpm"
-          cache-dependency-path: vortex/pnpm-lock.yaml
-
-      - name: Setup .NET 9
-        if: steps.upstream-check.outputs.skip != 'true'
-        uses: actions/setup-dotnet@v5
-        with:
-          dotnet-version: "9.0.x"
-
-      - name: Setup Python 3.11
-        if: steps.upstream-check.outputs.skip != 'true'
-        uses: actions/setup-python@v6
-        with:
-          python-version: "3.11"
-
-      - name: Derive build version
-        id: version
-        if: steps.upstream-check.outputs.skip != 'true'
-        shell: pwsh
-        run: |
-          $pkg = Get-Content vortex\package.json | ConvertFrom-Json
-          $rawVersion = "$($pkg.version)-unlocked.$env:BUILD_DATE.$env:UPSTREAM_SHA"
-          echo "RAW_VERSION=$rawVersion" >> $env:GITHUB_OUTPUT
-          echo "TAG_VERSION=v$rawVersion" >> $env:GITHUB_OUTPUT
-          echo "Version: $rawVersion"
-
-      - name: Bump versions
-        if: steps.upstream-check.outputs.skip != 'true'
-        shell: pwsh
-        run: pnpm -F "@vortex/main" -F "@nexusmods/vortex-api" version ${{ steps.version.outputs.RAW_VERSION }} --no-git-tag-version --no-git-checks --allow-same-version
-        working-directory: vortex
-
-      - name: Install dependencies
-        if: steps.upstream-check.outputs.skip != 'true'
-        shell: pwsh
-        run: pnpm install --frozen-lockfile
-        working-directory: vortex
-        env:
-          VORTEX_ELECTRON_REBUILD: "defer"
-
-      - name: Cache Electron native build headers
-        if: steps.upstream-check.outputs.skip != 'true'
-        uses: actions/cache@v5
-        with:
-          path: |
-            ~/.electron-gyp
-            ~/.cache/node-gyp
-          key: unlocked-native-headers-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('vortex/package.json', 'vortex/pnpm-lock.yaml', 'vortex/src/main/package.json') }}
-
-      - name: Build workspace
-        if: steps.upstream-check.outputs.skip != 'true'
-        shell: pwsh
-        run: pnpm run build
-        working-directory: vortex
-        env:
-          NODE_ENV: production
-
-      - name: Test unlocked download and collection paths
-        if: steps.upstream-check.outputs.skip != 'true'
-        shell: pwsh
-        working-directory: vortex
-        run: |
-          pnpm -F @vortex/renderer exec vitest run src/IPCDownloadAdapter.existingFile.test.ts src/IPCDownloadAdapter.naming.test.ts src/extensions/collections/util/InstallDriver.test.ts src/extensions/mod_management/InstallManager.sharedDownloads.test.ts src/util/collectionInstallSession.stateMachine.test.ts
-          if ($LASTEXITCODE -ne 0) {
-            Write-Output "::error::Focused unlocked regression tests failed."
-            exit 1
-          }
-
-      - name: Publish dist package
-        if: steps.upstream-check.outputs.skip != 'true'
-        shell: pwsh
-        run: pnpm nx run @vortex/main:publish
-        working-directory: vortex
-        env:
-          NODE_ENV: production
-          VORTEX_ELECTRON_REBUILD: "skip"
-
-      - name: Cache packaged Electron native rebuild outputs
-        id: packaged-native-cache
-        if: steps.upstream-check.outputs.skip != 'true'
-        uses: actions/cache@v5
-        with:
-          path: |
-            vortex/src/main/dist/node_modules/@nexusmods/fomod-installer-native/build
-            vortex/src/main/dist/node_modules/@nexusmods/fomod-installer-native/bin
-            vortex/src/main/dist/node_modules/drivelist/build
-            vortex/src/main/dist/node_modules/drivelist/bin
-            vortex/src/main/dist/node_modules/leveldown/build
-            vortex/src/main/dist/node_modules/leveldown/bin
-            vortex/src/main/dist/node_modules/winapi-bindings/build
-            vortex/src/main/dist/node_modules/winapi-bindings/bin
-            vortex/src/main/dist/node_modules/xxhash-addon/build
-            vortex/src/main/dist/node_modules/xxhash-addon/bin
-            vortex/src/main/dist/node_modules/@parcel/watcher/build
-            vortex/src/main/dist/node_modules/@parcel/watcher/bin
-          key: unlocked-dist-electron-native-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('vortex/pnpm-lock.yaml', 'vortex/pnpm-workspace.yaml', 'vortex/src/main/package.json', 'vortex/src/main/postinstall.mjs') }}
-
-      - name: Rebuild packaged Electron native modules
-        if: steps.upstream-check.outputs.skip != 'true' && steps.packaged-native-cache.outputs.cache-hit != 'true'
-        shell: pwsh
-        working-directory: vortex/src/main/dist
-        run: npx electron-rebuild
-
-      - name: Build installer (unsigned)
-        if: steps.upstream-check.outputs.skip != 'true'
-        shell: pwsh
-        run: pnpm -F @vortex/main run package:nosign
-        working-directory: vortex
-
-      - name: Validate package creation
-        if: steps.upstream-check.outputs.skip != 'true'
-        shell: pwsh
-        working-directory: vortex
-        run: |
-          $installerExists = Test-Path "./dist/vortex-unlocked-setup-*.exe"
-          $latestYmlExists = Test-Path "./dist/latest.yml"
-          if (-not $installerExists) {
-            Write-Error "Installer executable not found in ./dist/"
-            exit 1
-          }
-          if (-not $latestYmlExists) {
-            Write-Error "latest.yml not found in ./dist/"
-            exit 1
-          }
-          # Guards against the packager mangling nested dependency versions in
-          # the asar (upstream script - identical check to official Vortex CI).
-          node scripts/verify-packaged-asar.mjs
-          if ($LASTEXITCODE -ne 0) {
-            Write-Error "packaged asar does not match the deploy tree"
-            exit 1
-          }
-          Write-Output "Package validation successful - installer, latest.yml and asar verified"
-
-      - name: Upload installer artifact
-        if: steps.upstream-check.outputs.skip != 'true'
-        uses: actions/upload-artifact@v4
-        with:
-          name: vortex-unlocked-${{ steps.version.outputs.RAW_VERSION }}
-          path: |
-            vortex/dist/vortex-unlocked-setup-*.exe
-            vortex/dist/vortex-unlocked-setup-*.exe.blockmap
-            vortex/dist/latest.yml
-          if-no-files-found: error
-
-      - name: Create release
-        if: steps.upstream-check.outputs.skip != 'true'
-        uses: ncipollo/release-action@v1
-        with:
-          tag: ${{ steps.version.outputs.TAG_VERSION }}
-          name: Vortex Unlocked ${{ steps.version.outputs.RAW_VERSION }}
-          body: |
-            Vortex Unlocked build
-
-            - Upstream commit: ${{ env.UPSTREAM_SHA }} (Nexus-Mods/Vortex master)
-            - Patch: `patches/vortex-unlocked.patch`
-            - Unlocked by [Chaython](https://github.com/Chaython)
-
-            **What this build changes**
-            - No premium upsell UI (banners, dashlets, dialogs, badges, membership status)
-            - No client-side premium gates (parallel download threads, Update All, collection bulk-install, Health Check 1-click/Install All)
-            - Parallel downloads on by default: 5 download threads out of the box (Settings -> Downloads -> "Download Threads", adjustable 1-10; the setting is now an upper bound and the downloader adapts effective concurrency to throughput/failures)
-            - When Nexus returns multiple authorised download URLs, Vortex learns host reliability and spreads new transfers across healthier returned hosts
-            - Interrupted downloads without a usable checkpoint are re-resolved and restarted under the same download ID instead of being discarded
-            - Optional: fully hide the Dashboard tab via Settings -> Interface -> Customisation -> "Hide Dashboard tab"
-            - Optional: auto-authorise refused download links through an embedded nexusmods.com website session (Settings -> Interface -> "Auto-authorise downloads via website session"); requests are serialized and paced, any failure falls back to the manual download dialog - downloads remain speed-limited by the account tier
-            - On first start: option to import data (profiles, mods, settings, downloads) from an existing official Vortex install; also available later via Settings -> Interface -> "Import data from Vortex" (staging paths inside the data directory are rewritten to the new location; only Vortex' own data is copied - caches/logs are skipped; the import refuses to run while the official client is open; locked files outside the state database are skipped and reported instead of failing the import; existing data is backed up and restored on failure)
-            - Keeps its data separate from official Vortex: %APPDATA%\vortex-unlocked (official Vortex uses %APPDATA%\Vortex), so both can run side by side
-            - Uninstaller: removes the electron-updater cache (%LOCALAPPDATA%\vortex-unlocked-updater) and asks whether to also delete the application data; the upstream uninstall feedback survey was removed
-            - Usage analytics / event reporting disabled
-            - In-app auto-update: the client checks this repository's releases (on launch and every 4 hours, or via Settings -> Application -> "Check for updates") and can download and install the update on restart - updates only ever come from Chaython/Vortex-unlocked, never from upstream
-            - Installs side-by-side with official Vortex as "Vortex Unlocked"
-          artifacts: |
-            vortex/dist/vortex-unlocked-setup-*.exe
-            vortex/dist/vortex-unlocked-setup-*.exe.blockmap
-            vortex/dist/latest.yml
-          allowUpdates: true
-          replacesArtifacts: true
-          token: ${{ secrets.GITHUB_TOKEN }}
-) {
-            Write-Output "::error::Invalid .upstream-base commit SHA."
-            exit 1
-          }
-          git fetch --no-tags origin $patchBase
-          if ($LASTEXITCODE -ne 0) {
-            Write-Output "::error::Could not fetch the original patch base."
-            exit 1
-          }
-          git cat-file -e "$($patchBase)^{commit}"
-          if ($LASTEXITCODE -ne 0) {
-            Write-Output "::error::Original patch base commit is unavailable."
-            exit 1
-          }
-          git apply --3way ..\patches\vortex-unlocked.patch
-          $applyExit = $LASTEXITCODE
-          $unmerged = @(git diff --name-only --diff-filter=U)
-          $allowedConflicts = @(
-            "src/renderer/src/extensions/dashboard/index.ts",
-            "src/renderer/src/extensions/health_check/views/HealthCheckPage.tsx",
-            "src/renderer/src/extensions/health_check/hooks/useModRequirementActions.ts"
-          )
-          $unexpected = @($unmerged | Where-Object { $_ -notin $allowedConflicts })
-          if ($unexpected.Count -gt 0) {
-            Write-Output "::error::Patch conflicts outside the explicitly rebased UI files: $($unexpected -join ', ')"
-            exit 1
-          }
-          if ($applyExit -ne 0 -and $unmerged.Count -eq 0) {
-            Write-Output "::error::Patch application failed without resolvable UI conflicts."
-            exit 1
-          }
-
-          # Restore the current upstream versions of the known conflict files,
-          # then reapply Vortex Unlocked changes with explicit semantic checks.
-          foreach ($path in $unmerged) {
-            git checkout --ours -- $path
-            if ($LASTEXITCODE -ne 0) {
-              Write-Output "::error::Could not restore upstream file $path for rebasing."
-              exit 1
-            }
-          }
-
-          foreach ($path in $allowedConflicts) {
-            git checkout HEAD -- $path
-            if ($LASTEXITCODE -ne 0) {
-              Write-Output "::error::Could not reset $path to the cloned upstream version."
-              exit 1
-            }
-          }
-
-          # Reapply the Dashboard visibility option against upstream's current
-          # registerMainPage API (which uses menuIcon rather than the old mdi prop).
-          $dashboardPath = "src\renderer\src\extensions\dashboard\index.ts"
-          # Read the upstream blob directly so an earlier failed three-way apply
-          # cannot leave a conflicted/partially restored working-tree version.
-          $dashboard = (git show "HEAD:src/renderer/src/extensions/dashboard/index.ts" | Out-String).Replace("`r`n", "`n")
-          $dashboard = $dashboard.TrimEnd("`r", "`n") + "`n"
-          $registrationStart = $dashboard.IndexOf('context.registerMainPage("dashboard"', [System.StringComparison]::Ordinal)
-          if ($registrationStart -lt 0) {
-            Write-Output "::error::Could not find the Dashboard page registration in upstream source."
-            exit 1
-          }
-          $registrationEnd = $dashboard.IndexOf("`n  });", $registrationStart, [System.StringComparison]::Ordinal)
-          if ($registrationEnd -lt 0) {
-            Write-Output "::error::Could not find the end of the Dashboard page registration."
-            exit 1
-          }
-          $registration = $dashboard.Substring($registrationStart, $registrationEnd - $registrationStart)
-          if (-not $registration.Contains("Vortex Unlocked: allow the Dashboard tab to be hidden")) {
-            $visibility = "`n    // Vortex Unlocked: allow the Dashboard tab to be hidden in Interface settings.`n    visible: () => {`n      const state = context.api.store.getState();`n      return !(state as any)?.settings?.interface?.hideDashboard;`n    },"
-            $dashboard = $dashboard.Insert($registrationEnd, $visibility)
-          }
-          [System.IO.File]::WriteAllText($dashboardPath, $dashboard, [System.Text.UTF8Encoding]::new($false))
-
-          # Remove premium surfaces using explicit regexes. Avoid nested PowerShell
-          # arrays here: PowerShell enumerates them and can silently shift replacement pairs.
-          $healthPath = "src\renderer\src\extensions\health_check\views\HealthCheckPage.tsx"
-          $health = [System.IO.File]::ReadAllText($healthPath).Replace("`r`n", "`n")
-          $health = [regex]::Replace($health, '(?m)^import \{ PremiumBadge \} from "@\/ui\/components\/(?:badges\/)?premium_badge\/PremiumBadge";\r?\n', '')
-          $health = $health.Replace('import { isLoggedIn, shouldShowPremiumAd } from "../../nexus_integration/selectors";', 'import { isLoggedIn } from "../../nexus_integration/selectors";')
-          $health = [regex]::Replace($health, '(?m)^import \{ PremiumBanner \} from "\.\.\/components\/premium_banner\/PremiumBanner";\n', '')
-          $health = [regex]::Replace($health, '(?m)^import \{ PremiumModal \} from "\.\.\/components\/premium_modal\/PremiumModal";\n', '')
-          $health = [regex]::Replace($health, '(?m)^  const showPremiumAd = useSelector\(shouldShowPremiumAd\);\n', '')
-          $health = [regex]::Replace($health, '(?m)^  // The section whose install all is waiting on the premium modal\.\n  const \[premiumInstallType, setPremiumInstallType\] = useState<IssueType \| undefined>\(\);\n', '')
-          $health = [regex]::Replace($health, '(?m)^  // Without tabs the active list is all there is, and selectedTab stays on it\.\n  const listIsEmpty = selectedTab === "hidden" \? hiddenCount === 0 : activeCount === 0;\n', '')
-          $health = [regex]::Replace($health, '(?m)^  // 1-click install all: premium-gated for free users\. Items are de-duplicated first by\n  // collectInstallAllItems \(by key\) and again here at execution time via the seen set,\n  // so a file shared across multiple source reports is only queued once\.\n', "  // Vortex Unlocked: bulk remediation is available to every account.`n  // Preserve upstream de-duplication and author-note review.`n")
-          # Match the complete known gate body, but do not require the next statement to be adjacent: upstream has a blank line before reviewThenInstall.
-          $health = [regex]::Replace($health, '(?m)^[ \t]*if \(showPremiumAd\) \{\n[ \t]*setPremiumInstallType\(issueType\);\n[ \t]*return;\n[ \t]*\}\n?', '')
-          $health = [regex]::Replace($health, '(?m)^[ \t]*rightIcon=\{showPremiumAd \? <PremiumBadge \/> : undefined\}\r?\n', '')
-          # Remove the two premium UI blocks independently. Match indentation and
-          # multiline JSX structurally instead of depending on one exact whitespace layout.
-          $health = [regex]::Replace($health, '(?ms)^[ \t]*\{!listIsEmpty && \(\s*<PremiumBanner\b.*?^[ \t]*\)\}\s*', "`n")
-          $health = [regex]::Replace($health, '(?ms)^[ \t]*<PremiumModal\b.*?^[ \t]*/>\s*', '')
-          # Use explicit .NET regex checks and name each missing invariant in the error.
-          # This makes failures diagnosable instead of grouping unrelated markers together.
-          $missingHealthBehaviors = @()
-          if (-not [regex]::IsMatch($health, 'reviewThenInstall\(issueType\);')) {
-            $missingHealthBehaviors += "reviewThenInstall(issueType)"
-          }
-          if (-not [regex]::IsMatch($health, '<AuthorNotesModal\b')) {
-            $missingHealthBehaviors += "AuthorNotesModal"
-          }
-          if (-not [regex]::IsMatch($health, 'splitByAuthorNote')) {
-            $missingHealthBehaviors += "splitByAuthorNote"
-          }
-          if ($missingHealthBehaviors.Count -gt 0) {
-            Write-Output "::error::Health Check rebase is missing required behavior markers: $($missingHealthBehaviors -join ', ')"
-            Write-Output "Diagnostic: reviewThenInstall=$([regex]::IsMatch($health, 'reviewThenInstall\(issueType\);')); AuthorNotesModal=$([regex]::IsMatch($health, '<AuthorNotesModal\b')); splitByAuthorNote=$([regex]::IsMatch($health, 'splitByAuthorNote'))"
-            exit 1
-          }
-          if ($health -match 'showPremiumAd|premiumInstallType|PremiumBanner|PremiumModal|PremiumBadge|shouldShowPremiumAd|listIsEmpty') {
-            $remaining = @($health -split "`n" | Where-Object { $_ -match 'showPremiumAd|premiumInstallType|PremiumBanner|PremiumModal|PremiumBadge|shouldShowPremiumAd|listIsEmpty' })
-            Write-Output "::error::Health Check premium removal incomplete; remaining markers: $($remaining -join ' | ')"
-            exit 1
-          }
-          [System.IO.File]::WriteAllText($healthPath, $health, [System.Text.UTF8Encoding]::new($false))
-
-          # Reapply the single-mod Health Check install change against the latest
-          # upstream hook. Keep its modal state/API for existing callers, but
-          # remove only the client-side Premium gate; the normal Nexus resolver
-          # and server-side download policy remain responsible for the request.
-          $requirementActionsPath = "src\renderer\src\extensions\health_check\hooks\useModRequirementActions.ts"
-          $requirementActions = (git show "HEAD:src/renderer/src/extensions/health_check/hooks/useModRequirementActions.ts" | Out-String).Replace(([string][char]13 + [string][char]10), [string][char]10)
-          $requirementActions = $requirementActions.TrimEnd([char]13, [char]10) + [string][char]10
-          $requirementActions = $requirementActions.Replace('import { shouldShowPremiumAd } from "@/extensions/nexus_integration/selectors";' + [string][char]10, '')
-          $requirementActions = $requirementActions.Replace('premium-gated 1-click install', '1-click install')
-          $requirementActions = [regex]::Replace($requirementActions, '(?m)^  const showPremiumAd = useSelector\(shouldShowPremiumAd\);$', '  const showPremiumAd = false;')
-          $requirementActions = [regex]::Replace($requirementActions, '(?ms)^    if \(showPremiumAd\) \{\r?\n      setShowPremiumModal\(true\);\r?\n      return;\r?\n    \}\r?\n', '')
-          $missingRequirementActions = @()
-          if ($requirementActions -match 'shouldShowPremiumAd') { $missingRequirementActions += "premium selector import/reference" }
-          if ($requirementActions -match 'if \(showPremiumAd\)') { $missingRequirementActions += "client-side install gate" }
-          if ($missingRequirementActions.Count -gt 0 -or $requirementActions -notmatch 'const showPremiumAd = false;' -or $requirementActions -notmatch 'setShowPremiumModal,') {
-            Write-Output "::error::Health Check requirement-action rebase failed validation: $($missingRequirementActions -join ', ')"
-            exit 1
-          }
-          [System.IO.File]::WriteAllText($requirementActionsPath, $requirementActions, [System.Text.UTF8Encoding]::new($false))
-
-          # Catch whitespace/conflict-marker mistakes before compiling.
-          git diff --check
-          if ($LASTEXITCODE -ne 0) {
-            Write-Output "::error::Patched tree failed git diff --check."
-            exit 1
-          }
-
-          Write-Output "Patch applied and validated. Changed files:"
-          git status --short
-
-      - name: Read Node.js version from package.json
-        id: node-version
-        if: steps.upstream-check.outputs.skip != 'true'
-        shell: pwsh
-        run: |
-          $packageJson = Get-Content vortex\package.json | ConvertFrom-Json
-          $nodeVersion = $packageJson.engines.node
-          echo "NODE_VERSION=$nodeVersion" >> $env:GITHUB_OUTPUT
-          echo "Using Node.js version: $nodeVersion"
-
-      - name: Install pnpm
-        if: steps.upstream-check.outputs.skip != 'true'
-        uses: pnpm/action-setup@v6
-
-      - name: Use Node.js
-        if: steps.upstream-check.outputs.skip != 'true'
-        uses: actions/setup-node@v6
-        with:
-          node-version: ${{ steps.node-version.outputs.NODE_VERSION }}
-          cache: "pnpm"
-          cache-dependency-path: vortex/pnpm-lock.yaml
-
-      - name: Setup .NET 9
-        if: steps.upstream-check.outputs.skip != 'true'
-        uses: actions/setup-dotnet@v5
-        with:
-          dotnet-version: "9.0.x"
-
-      - name: Setup Python 3.11
-        if: steps.upstream-check.outputs.skip != 'true'
-        uses: actions/setup-python@v6
-        with:
-          python-version: "3.11"
-
-      - name: Derive build version
-        id: version
-        if: steps.upstream-check.outputs.skip != 'true'
-        shell: pwsh
-        run: |
-          $pkg = Get-Content vortex\package.json | ConvertFrom-Json
-          $rawVersion = "$($pkg.version)-unlocked.$env:BUILD_DATE.$env:UPSTREAM_SHA"
-          echo "RAW_VERSION=$rawVersion" >> $env:GITHUB_OUTPUT
-          echo "TAG_VERSION=v$rawVersion" >> $env:GITHUB_OUTPUT
-          echo "Version: $rawVersion"
-
-      - name: Bump versions
-        if: steps.upstream-check.outputs.skip != 'true'
-        shell: pwsh
-        run: pnpm -F "@vortex/main" -F "@nexusmods/vortex-api" version ${{ steps.version.outputs.RAW_VERSION }} --no-git-tag-version --no-git-checks --allow-same-version
-        working-directory: vortex
-
-      - name: Install dependencies
-        if: steps.upstream-check.outputs.skip != 'true'
-        shell: pwsh
-        run: pnpm install --frozen-lockfile
-        working-directory: vortex
-        env:
-          VORTEX_ELECTRON_REBUILD: "defer"
-
-      - name: Cache Electron native build headers
-        if: steps.upstream-check.outputs.skip != 'true'
-        uses: actions/cache@v5
-        with:
-          path: |
-            ~/.electron-gyp
-            ~/.cache/node-gyp
-          key: unlocked-native-headers-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('vortex/package.json', 'vortex/pnpm-lock.yaml', 'vortex/src/main/package.json') }}
-
-      - name: Build workspace
-        if: steps.upstream-check.outputs.skip != 'true'
-        shell: pwsh
-        run: pnpm run build
-        working-directory: vortex
-        env:
-          NODE_ENV: production
-
-      - name: Test unlocked download and collection paths
-        if: steps.upstream-check.outputs.skip != 'true'
-        shell: pwsh
-        working-directory: vortex
-        run: |
-          pnpm -F @vortex/renderer exec vitest run src/IPCDownloadAdapter.existingFile.test.ts src/IPCDownloadAdapter.naming.test.ts src/extensions/collections/util/InstallDriver.test.ts src/extensions/mod_management/InstallManager.sharedDownloads.test.ts src/util/collectionInstallSession.stateMachine.test.ts
-          if ($LASTEXITCODE -ne 0) {
-            Write-Output "::error::Focused unlocked regression tests failed."
-            exit 1
-          }
-
-      - name: Publish dist package
-        if: steps.upstream-check.outputs.skip != 'true'
-        shell: pwsh
-        run: pnpm nx run @vortex/main:publish
-        working-directory: vortex
-        env:
-          NODE_ENV: production
-          VORTEX_ELECTRON_REBUILD: "skip"
-
-      - name: Cache packaged Electron native rebuild outputs
-        id: packaged-native-cache
-        if: steps.upstream-check.outputs.skip != 'true'
-        uses: actions/cache@v5
-        with:
-          path: |
-            vortex/src/main/dist/node_modules/@nexusmods/fomod-installer-native/build
-            vortex/src/main/dist/node_modules/@nexusmods/fomod-installer-native/bin
-            vortex/src/main/dist/node_modules/drivelist/build
-            vortex/src/main/dist/node_modules/drivelist/bin
-            vortex/src/main/dist/node_modules/leveldown/build
-            vortex/src/main/dist/node_modules/leveldown/bin
-            vortex/src/main/dist/node_modules/winapi-bindings/build
-            vortex/src/main/dist/node_modules/winapi-bindings/bin
-            vortex/src/main/dist/node_modules/xxhash-addon/build
-            vortex/src/main/dist/node_modules/xxhash-addon/bin
-            vortex/src/main/dist/node_modules/@parcel/watcher/build
-            vortex/src/main/dist/node_modules/@parcel/watcher/bin
-          key: unlocked-dist-electron-native-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('vortex/pnpm-lock.yaml', 'vortex/pnpm-workspace.yaml', 'vortex/src/main/package.json', 'vortex/src/main/postinstall.mjs') }}
-
-      - name: Rebuild packaged Electron native modules
-        if: steps.upstream-check.outputs.skip != 'true' && steps.packaged-native-cache.outputs.cache-hit != 'true'
-        shell: pwsh
-        working-directory: vortex/src/main/dist
-        run: npx electron-rebuild
-
-      - name: Build installer (unsigned)
-        if: steps.upstream-check.outputs.skip != 'true'
-        shell: pwsh
-        run: pnpm -F @vortex/main run package:nosign
-        working-directory: vortex
-
-      - name: Validate package creation
-        if: steps.upstream-check.outputs.skip != 'true'
-        shell: pwsh
-        working-directory: vortex
-        run: |
-          $installerExists = Test-Path "./dist/vortex-unlocked-setup-*.exe"
-          $latestYmlExists = Test-Path "./dist/latest.yml"
-          if (-not $installerExists) {
-            Write-Error "Installer executable not found in ./dist/"
-            exit 1
-          }
-          if (-not $latestYmlExists) {
-            Write-Error "latest.yml not found in ./dist/"
-            exit 1
-          }
-          # Guards against the packager mangling nested dependency versions in
-          # the asar (upstream script - identical check to official Vortex CI).
-          node scripts/verify-packaged-asar.mjs
-          if ($LASTEXITCODE -ne 0) {
-            Write-Error "packaged asar does not match the deploy tree"
-            exit 1
-          }
-          Write-Output "Package validation successful - installer, latest.yml and asar verified"
-
-      - name: Upload installer artifact
-        if: steps.upstream-check.outputs.skip != 'true'
-        uses: actions/upload-artifact@v4
-        with:
-          name: vortex-unlocked-${{ steps.version.outputs.RAW_VERSION }}
-          path: |
-            vortex/dist/vortex-unlocked-setup-*.exe
-            vortex/dist/vortex-unlocked-setup-*.exe.blockmap
-            vortex/dist/latest.yml
-          if-no-files-found: error
-
-      - name: Create release
-        if: steps.upstream-check.outputs.skip != 'true'
-        uses: ncipollo/release-action@v1
-        with:
-          tag: ${{ steps.version.outputs.TAG_VERSION }}
-          name: Vortex Unlocked ${{ steps.version.outputs.RAW_VERSION }}
-          body: |
-            Vortex Unlocked build
-
-            - Upstream commit: ${{ env.UPSTREAM_SHA }} (Nexus-Mods/Vortex master)
-            - Patch: `patches/vortex-unlocked.patch`
-            - Unlocked by [Chaython](https://github.com/Chaython)
-
-            **What this build changes**
-            - No premium upsell UI (banners, dashlets, dialogs, badges, membership status)
-            - No client-side premium gates (parallel download threads, Update All, collection bulk-install, Health Check 1-click/Install All)
-            - Parallel downloads on by default: 5 download threads out of the box (Settings -> Downloads -> "Download Threads", adjustable 1-10; the setting is now an upper bound and the downloader adapts effective concurrency to throughput/failures)
-            - When Nexus returns multiple authorised download URLs, Vortex learns host reliability and spreads new transfers across healthier returned hosts
-            - Interrupted downloads without a usable checkpoint are re-resolved and restarted under the same download ID instead of being discarded
-            - Optional: fully hide the Dashboard tab via Settings -> Interface -> Customisation -> "Hide Dashboard tab"
-            - Optional: auto-authorise refused download links through an embedded nexusmods.com website session (Settings -> Interface -> "Auto-authorise downloads via website session"); requests are serialized and paced, any failure falls back to the manual download dialog - downloads remain speed-limited by the account tier
-            - On first start: option to import data (profiles, mods, settings, downloads) from an existing official Vortex install; also available later via Settings -> Interface -> "Import data from Vortex" (staging paths inside the data directory are rewritten to the new location; only Vortex' own data is copied - caches/logs are skipped; the import refuses to run while the official client is open; locked files outside the state database are skipped and reported instead of failing the import; existing data is backed up and restored on failure)
-            - Keeps its data separate from official Vortex: %APPDATA%\vortex-unlocked (official Vortex uses %APPDATA%\Vortex), so both can run side by side
-            - Uninstaller: removes the electron-updater cache (%LOCALAPPDATA%\vortex-unlocked-updater) and asks whether to also delete the application data; the upstream uninstall feedback survey was removed
-            - Usage analytics / event reporting disabled
-            - In-app auto-update: the client checks this repository's releases (on launch and every 4 hours, or via Settings -> Application -> "Check for updates") and can download and install the update on restart - updates only ever come from Chaython/Vortex-unlocked, never from upstream
-            - Installs side-by-side with official Vortex as "Vortex Unlocked"
-          artifacts: |
-            vortex/dist/vortex-unlocked-setup-*.exe
-            vortex/dist/vortex-unlocked-setup-*.exe.blockmap
-            vortex/dist/latest.yml
-          allowUpdates: true
-          replacesArtifacts: true
-          token: ${{ secrets.GITHUB_TOKEN }}
-) {
-            Write-Output "::error::Invalid .upstream-base commit SHA."
-            exit 1
-          }
-          git fetch --no-tags origin $patchBase
-          if ($LASTEXITCODE -ne 0) {
-            Write-Output "::error::Could not fetch the original patch base."
-            exit 1
-          }
-          git cat-file -e "$($patchBase)^{commit}"
-          if ($LASTEXITCODE -ne 0) {
-            Write-Output "::error::Original patch base commit is unavailable."
-            exit 1
-          }
-
-          git apply --3way ..\patches\vortex-unlocked.patch
-          $applyExit = $LASTEXITCODE
-          $unmerged = @(git diff --name-only --diff-filter=U)
-          $allowedConflicts = @(
-            "src/renderer/src/extensions/dashboard/index.ts",
-            "src/renderer/src/extensions/health_check/views/HealthCheckPage.tsx",
-            "src/renderer/src/extensions/health_check/hooks/useModRequirementActions.ts"
-          )
-          $unexpected = @($unmerged | Where-Object { $_ -notin $allowedConflicts })
-          if ($unexpected.Count -gt 0) {
-            Write-Output "::error::Patch conflicts outside the explicitly rebased UI files: $($unexpected -join ', ')"
-            exit 1
-          }
-          if ($applyExit -ne 0 -and $unmerged.Count -eq 0) {
-            Write-Output "::error::Patch application failed without resolvable UI conflicts."
-            exit 1
-          }
-
-          # Restore the current upstream versions of the known conflict files,
-          # then reapply Vortex Unlocked changes with explicit semantic checks.
-          foreach ($path in $unmerged) {
-            git checkout --ours -- $path
-            if ($LASTEXITCODE -ne 0) {
-              Write-Output "::error::Could not restore upstream file $path for rebasing."
-              exit 1
-            }
-          }
-
-          foreach ($path in $allowedConflicts) {
-            git checkout HEAD -- $path
-            if ($LASTEXITCODE -ne 0) {
-              Write-Output "::error::Could not reset $path to the cloned upstream version."
-              exit 1
-            }
-          }
-
-          # Reapply the Dashboard visibility option against upstream's current
-          # registerMainPage API (which uses menuIcon rather than the old mdi prop).
-          $dashboardPath = "src\renderer\src\extensions\dashboard\index.ts"
-          # Read the upstream blob directly so an earlier failed three-way apply
-          # cannot leave a conflicted/partially restored working-tree version.
-          $dashboard = (git show "HEAD:src/renderer/src/extensions/dashboard/index.ts" | Out-String).Replace("`r`n", "`n")
-          $dashboard = $dashboard.TrimEnd("`r", "`n") + "`n"
-          $registrationStart = $dashboard.IndexOf('context.registerMainPage("dashboard"', [System.StringComparison]::Ordinal)
-          if ($registrationStart -lt 0) {
-            Write-Output "::error::Could not find the Dashboard page registration in upstream source."
-            exit 1
-          }
-          $registrationEnd = $dashboard.IndexOf("`n  });", $registrationStart, [System.StringComparison]::Ordinal)
-          if ($registrationEnd -lt 0) {
-            Write-Output "::error::Could not find the end of the Dashboard page registration."
-            exit 1
-          }
-          $registration = $dashboard.Substring($registrationStart, $registrationEnd - $registrationStart)
-          if (-not $registration.Contains("Vortex Unlocked: allow the Dashboard tab to be hidden")) {
-            $visibility = "`n    // Vortex Unlocked: allow the Dashboard tab to be hidden in Interface settings.`n    visible: () => {`n      const state = context.api.store.getState();`n      return !(state as any)?.settings?.interface?.hideDashboard;`n    },"
-            $dashboard = $dashboard.Insert($registrationEnd, $visibility)
-          }
-          [System.IO.File]::WriteAllText($dashboardPath, $dashboard, [System.Text.UTF8Encoding]::new($false))
-
-          # Remove premium surfaces using explicit regexes. Avoid nested PowerShell
-          # arrays here: PowerShell enumerates them and can silently shift replacement pairs.
-          $healthPath = "src\renderer\src\extensions\health_check\views\HealthCheckPage.tsx"
-          $health = [System.IO.File]::ReadAllText($healthPath).Replace("`r`n", "`n")
-          $health = [regex]::Replace($health, '(?m)^import \{ PremiumBadge \} from "@\/ui\/components\/(?:badges\/)?premium_badge\/PremiumBadge";\r?\n', '')
-          $health = $health.Replace('import { isLoggedIn, shouldShowPremiumAd } from "../../nexus_integration/selectors";', 'import { isLoggedIn } from "../../nexus_integration/selectors";')
-          $health = [regex]::Replace($health, '(?m)^import \{ PremiumBanner \} from "\.\.\/components\/premium_banner\/PremiumBanner";\n', '')
-          $health = [regex]::Replace($health, '(?m)^import \{ PremiumModal \} from "\.\.\/components\/premium_modal\/PremiumModal";\n', '')
-          $health = [regex]::Replace($health, '(?m)^  const showPremiumAd = useSelector\(shouldShowPremiumAd\);\n', '')
-          $health = [regex]::Replace($health, '(?m)^  // The section whose install all is waiting on the premium modal\.\n  const \[premiumInstallType, setPremiumInstallType\] = useState<IssueType \| undefined>\(\);\n', '')
-          $health = [regex]::Replace($health, '(?m)^  // Without tabs the active list is all there is, and selectedTab stays on it\.\n  const listIsEmpty = selectedTab === "hidden" \? hiddenCount === 0 : activeCount === 0;\n', '')
-          $health = [regex]::Replace($health, '(?m)^  // 1-click install all: premium-gated for free users\. Items are de-duplicated first by\n  // collectInstallAllItems \(by key\) and again here at execution time via the seen set,\n  // so a file shared across multiple source reports is only queued once\.\n', "  // Vortex Unlocked: bulk remediation is available to every account.`n  // Preserve upstream de-duplication and author-note review.`n")
-          # Match the complete known gate body, but do not require the next statement to be adjacent: upstream has a blank line before reviewThenInstall.
-          $health = [regex]::Replace($health, '(?m)^[ \t]*if \(showPremiumAd\) \{\n[ \t]*setPremiumInstallType\(issueType\);\n[ \t]*return;\n[ \t]*\}\n?', '')
-          $health = [regex]::Replace($health, '(?m)^[ \t]*rightIcon=\{showPremiumAd \? <PremiumBadge \/> : undefined\}\r?\n', '')
-          # Remove the two premium UI blocks independently. Match indentation and
-          # multiline JSX structurally instead of depending on one exact whitespace layout.
-          $health = [regex]::Replace($health, '(?ms)^[ \t]*\{!listIsEmpty && \(\s*<PremiumBanner\b.*?^[ \t]*\)\}\s*', "`n")
-          $health = [regex]::Replace($health, '(?ms)^[ \t]*<PremiumModal\b.*?^[ \t]*/>\s*', '')
-          # Use explicit .NET regex checks and name each missing invariant in the error.
-          # This makes failures diagnosable instead of grouping unrelated markers together.
-          $missingHealthBehaviors = @()
-          if (-not [regex]::IsMatch($health, 'reviewThenInstall\(issueType\);')) {
-            $missingHealthBehaviors += "reviewThenInstall(issueType)"
-          }
-          if (-not [regex]::IsMatch($health, '<AuthorNotesModal\b')) {
-            $missingHealthBehaviors += "AuthorNotesModal"
-          }
-          if (-not [regex]::IsMatch($health, 'splitByAuthorNote')) {
-            $missingHealthBehaviors += "splitByAuthorNote"
-          }
-          if ($missingHealthBehaviors.Count -gt 0) {
-            Write-Output "::error::Health Check rebase is missing required behavior markers: $($missingHealthBehaviors -join ', ')"
-            Write-Output "Diagnostic: reviewThenInstall=$([regex]::IsMatch($health, 'reviewThenInstall\(issueType\);')); AuthorNotesModal=$([regex]::IsMatch($health, '<AuthorNotesModal\b')); splitByAuthorNote=$([regex]::IsMatch($health, 'splitByAuthorNote'))"
-            exit 1
-          }
-          if ($health -match 'showPremiumAd|premiumInstallType|PremiumBanner|PremiumModal|PremiumBadge|shouldShowPremiumAd|listIsEmpty') {
-            $remaining = @($health -split "`n" | Where-Object { $_ -match 'showPremiumAd|premiumInstallType|PremiumBanner|PremiumModal|PremiumBadge|shouldShowPremiumAd|listIsEmpty' })
-            Write-Output "::error::Health Check premium removal incomplete; remaining markers: $($remaining -join ' | ')"
-            exit 1
-          }
-          [System.IO.File]::WriteAllText($healthPath, $health, [System.Text.UTF8Encoding]::new($false))
-
-          # Reapply the single-mod Health Check install change against the latest
-          # upstream hook. Keep its modal state/API for existing callers, but
-          # remove only the client-side Premium gate; the normal Nexus resolver
-          # and server-side download policy remain responsible for the request.
-          $requirementActionsPath = "src\renderer\src\extensions\health_check\hooks\useModRequirementActions.ts"
-          $requirementActions = (git show "HEAD:src/renderer/src/extensions/health_check/hooks/useModRequirementActions.ts" | Out-String).Replace(([string][char]13 + [string][char]10), [string][char]10)
-          $requirementActions = $requirementActions.TrimEnd([char]13, [char]10) + [string][char]10
-          $requirementActions = $requirementActions.Replace('import { shouldShowPremiumAd } from "@/extensions/nexus_integration/selectors";' + [string][char]10, '')
-          $requirementActions = $requirementActions.Replace('premium-gated 1-click install', '1-click install')
-          $requirementActions = [regex]::Replace($requirementActions, '(?m)^  const showPremiumAd = useSelector\(shouldShowPremiumAd\);$', '  const showPremiumAd = false;')
-          $requirementActions = [regex]::Replace($requirementActions, '(?ms)^    if \(showPremiumAd\) \{\r?\n      setShowPremiumModal\(true\);\r?\n      return;\r?\n    \}\r?\n', '')
-          $missingRequirementActions = @()
-          if ($requirementActions -match 'shouldShowPremiumAd') { $missingRequirementActions += "premium selector import/reference" }
-          if ($requirementActions -match 'if \(showPremiumAd\)') { $missingRequirementActions += "client-side install gate" }
-          if ($missingRequirementActions.Count -gt 0 -or $requirementActions -notmatch 'const showPremiumAd = false;' -or $requirementActions -notmatch 'setShowPremiumModal,') {
-            Write-Output "::error::Health Check requirement-action rebase failed validation: $($missingRequirementActions -join ', ')"
-            exit 1
-          }
-          [System.IO.File]::WriteAllText($requirementActionsPath, $requirementActions, [System.Text.UTF8Encoding]::new($false))
-
-          # Catch whitespace/conflict-marker mistakes before compiling.
-          git diff --check
-          if ($LASTEXITCODE -ne 0) {
-            Write-Output "::error::Patched tree failed git diff --check."
-            exit 1
-          }
-
-          Write-Output "Patch applied and validated. Changed files:"
-          git status --short
-
-      - name: Read Node.js version from package.json
-        id: node-version
-        if: steps.upstream-check.outputs.skip != 'true'
-        shell: pwsh
-        run: |
-          $packageJson = Get-Content vortex\package.json | ConvertFrom-Json
-          $nodeVersion = $packageJson.engines.node
-          echo "NODE_VERSION=$nodeVersion" >> $env:GITHUB_OUTPUT
-          echo "Using Node.js version: $nodeVersion"
-
-      - name: Install pnpm
-        if: steps.upstream-check.outputs.skip != 'true'
-        uses: pnpm/action-setup@v6
-
-      - name: Use Node.js
-        if: steps.upstream-check.outputs.skip != 'true'
-        uses: actions/setup-node@v6
-        with:
-          node-version: ${{ steps.node-version.outputs.NODE_VERSION }}
-          cache: "pnpm"
-          cache-dependency-path: vortex/pnpm-lock.yaml
-
-      - name: Setup .NET 9
-        if: steps.upstream-check.outputs.skip != 'true'
-        uses: actions/setup-dotnet@v5
-        with:
-          dotnet-version: "9.0.x"
-
-      - name: Setup Python 3.11
-        if: steps.upstream-check.outputs.skip != 'true'
-        uses: actions/setup-python@v6
-        with:
-          python-version: "3.11"
-
-      - name: Derive build version
-        id: version
-        if: steps.upstream-check.outputs.skip != 'true'
-        shell: pwsh
-        run: |
-          $pkg = Get-Content vortex\package.json | ConvertFrom-Json
-          $rawVersion = "$($pkg.version)-unlocked.$env:BUILD_DATE.$env:UPSTREAM_SHA"
-          echo "RAW_VERSION=$rawVersion" >> $env:GITHUB_OUTPUT
-          echo "TAG_VERSION=v$rawVersion" >> $env:GITHUB_OUTPUT
-          echo "Version: $rawVersion"
-
-      - name: Bump versions
-        if: steps.upstream-check.outputs.skip != 'true'
-        shell: pwsh
-        run: pnpm -F "@vortex/main" -F "@nexusmods/vortex-api" version ${{ steps.version.outputs.RAW_VERSION }} --no-git-tag-version --no-git-checks --allow-same-version
-        working-directory: vortex
-
-      - name: Install dependencies
-        if: steps.upstream-check.outputs.skip != 'true'
-        shell: pwsh
-        run: pnpm install --frozen-lockfile
-        working-directory: vortex
-        env:
-          VORTEX_ELECTRON_REBUILD: "defer"
-
-      - name: Cache Electron native build headers
-        if: steps.upstream-check.outputs.skip != 'true'
-        uses: actions/cache@v5
-        with:
-          path: |
-            ~/.electron-gyp
-            ~/.cache/node-gyp
-          key: unlocked-native-headers-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('vortex/package.json', 'vortex/pnpm-lock.yaml', 'vortex/src/main/package.json') }}
-
-      - name: Build workspace
-        if: steps.upstream-check.outputs.skip != 'true'
-        shell: pwsh
-        run: pnpm run build
-        working-directory: vortex
-        env:
-          NODE_ENV: production
-
-      - name: Test unlocked download and collection paths
-        if: steps.upstream-check.outputs.skip != 'true'
-        shell: pwsh
-        working-directory: vortex
-        run: |
-          pnpm -F @vortex/renderer exec vitest run src/IPCDownloadAdapter.existingFile.test.ts src/IPCDownloadAdapter.naming.test.ts src/extensions/collections/util/InstallDriver.test.ts src/extensions/mod_management/InstallManager.sharedDownloads.test.ts src/util/collectionInstallSession.stateMachine.test.ts
-          if ($LASTEXITCODE -ne 0) {
-            Write-Output "::error::Focused unlocked regression tests failed."
-            exit 1
-          }
-
-      - name: Publish dist package
-        if: steps.upstream-check.outputs.skip != 'true'
-        shell: pwsh
-        run: pnpm nx run @vortex/main:publish
-        working-directory: vortex
-        env:
-          NODE_ENV: production
-          VORTEX_ELECTRON_REBUILD: "skip"
-
-      - name: Cache packaged Electron native rebuild outputs
-        id: packaged-native-cache
-        if: steps.upstream-check.outputs.skip != 'true'
-        uses: actions/cache@v5
-        with:
-          path: |
-            vortex/src/main/dist/node_modules/@nexusmods/fomod-installer-native/build
-            vortex/src/main/dist/node_modules/@nexusmods/fomod-installer-native/bin
-            vortex/src/main/dist/node_modules/drivelist/build
-            vortex/src/main/dist/node_modules/drivelist/bin
-            vortex/src/main/dist/node_modules/leveldown/build
-            vortex/src/main/dist/node_modules/leveldown/bin
-            vortex/src/main/dist/node_modules/winapi-bindings/build
-            vortex/src/main/dist/node_modules/winapi-bindings/bin
-            vortex/src/main/dist/node_modules/xxhash-addon/build
-            vortex/src/main/dist/node_modules/xxhash-addon/bin
-            vortex/src/main/dist/node_modules/@parcel/watcher/build
-            vortex/src/main/dist/node_modules/@parcel/watcher/bin
-          key: unlocked-dist-electron-native-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('vortex/pnpm-lock.yaml', 'vortex/pnpm-workspace.yaml', 'vortex/src/main/package.json', 'vortex/src/main/postinstall.mjs') }}
-
-      - name: Rebuild packaged Electron native modules
-        if: steps.upstream-check.outputs.skip != 'true' && steps.packaged-native-cache.outputs.cache-hit != 'true'
-        shell: pwsh
-        working-directory: vortex/src/main/dist
-        run: npx electron-rebuild
-
-      - name: Build installer (unsigned)
-        if: steps.upstream-check.outputs.skip != 'true'
-        shell: pwsh
-        run: pnpm -F @vortex/main run package:nosign
-        working-directory: vortex
-
-      - name: Validate package creation
-        if: steps.upstream-check.outputs.skip != 'true'
-        shell: pwsh
-        working-directory: vortex
-        run: |
-          $installerExists = Test-Path "./dist/vortex-unlocked-setup-*.exe"
-          $latestYmlExists = Test-Path "./dist/latest.yml"
-          if (-not $installerExists) {
-            Write-Error "Installer executable not found in ./dist/"
-            exit 1
-          }
-          if (-not $latestYmlExists) {
-            Write-Error "latest.yml not found in ./dist/"
-            exit 1
-          }
-          # Guards against the packager mangling nested dependency versions in
-          # the asar (upstream script - identical check to official Vortex CI).
-          node scripts/verify-packaged-asar.mjs
-          if ($LASTEXITCODE -ne 0) {
-            Write-Error "packaged asar does not match the deploy tree"
-            exit 1
-          }
-          Write-Output "Package validation successful - installer, latest.yml and asar verified"
-
-      - name: Upload installer artifact
-        if: steps.upstream-check.outputs.skip != 'true'
-        uses: actions/upload-artifact@v4
-        with:
-          name: vortex-unlocked-${{ steps.version.outputs.RAW_VERSION }}
-          path: |
-            vortex/dist/vortex-unlocked-setup-*.exe
-            vortex/dist/vortex-unlocked-setup-*.exe.blockmap
-            vortex/dist/latest.yml
-          if-no-files-found: error
-
-      - name: Create release
-        if: steps.upstream-check.outputs.skip != 'true'
-        uses: ncipollo/release-action@v1
-        with:
-          tag: ${{ steps.version.outputs.TAG_VERSION }}
-          name: Vortex Unlocked ${{ steps.version.outputs.RAW_VERSION }}
-          body: |
-            Vortex Unlocked build
-
-            - Upstream commit: ${{ env.UPSTREAM_SHA }} (Nexus-Mods/Vortex master)
+            - Upstream commit: ${{ env.UPSTREAM_SHA }} (Nexus-Mods/Vortex ${{ needs.plan.outputs.mode == 'pinned' && 'pinned base - latest master did not accept the patch yet' || 'master' }})
             - Patch: `patches/vortex-unlocked.patch`
             - Unlocked by [Chaython](https://github.com/Chaython)
 

@@ -1,5 +1,5 @@
 diff --git a/extensions/modtype-umm/src/ummDownloader.ts b/extensions/modtype-umm/src/ummDownloader.ts
-index 04527bc..6df9873 100644
+index 04527bc3e24c1c3c8f0edc6502fb9c99e91f7158..6df9873bdc729b76e4fcd3467fb96c69074cacaf 100644
 --- a/extensions/modtype-umm/src/ummDownloader.ts
 +++ b/extensions/modtype-umm/src/ummDownloader.ts
 @@ -237,9 +237,8 @@ async function download(
@@ -15,7 +15,7 @@ index 04527bc..6df9873 100644
    const downloadId = genDownloadInfo(api, archiveName).downloadId;
    if (downloadId !== undefined) {
 diff --git a/src/main/electron-builder.config.json b/src/main/electron-builder.config.json
-index 4242d92..40f07c4 100644
+index 41318379e8512cbf8900dcd160e27e2549187cfa..7ad206ad553bd9fd632139e9d6b1e7da6a275f98 100644
 --- a/src/main/electron-builder.config.json
 +++ b/src/main/electron-builder.config.json
 @@ -1,6 +1,6 @@
@@ -37,7 +37,7 @@ index 4242d92..40f07c4 100644
          "private": false
        }
      ],
-@@ -24,6 +24,7 @@
+@@ -23,6 +23,7 @@
      "rfc3161TimeStampServer": "http://timestamp.comodoca.com/rfc3161",
      "timeStampServer": "http://timestamp.comodoca.com"
    },
@@ -45,7 +45,7 @@ index 4242d92..40f07c4 100644
    "nsis": {
      "perMachine": true,
      "runAfterFinish": true,
-@@ -32,7 +33,7 @@
+@@ -31,7 +32,7 @@
      "allowToChangeInstallationDirectory": true,
      "uninstallDisplayName": "${productName}",
      "include": "./nsis/installer.nsh",
@@ -55,7 +55,7 @@ index 4242d92..40f07c4 100644
      "installerHeaderIcon": "nsis/icon.ico"
    },
 diff --git a/src/main/nsis/installer.nsh b/src/main/nsis/installer.nsh
-index 9477351..a80e84c 100644
+index 947735168aa7513add23b0ed2965a17748a3cb22..a80e84c02425c8f443c74e338dbdbb7b26518390 100644
 --- a/src/main/nsis/installer.nsh
 +++ b/src/main/nsis/installer.nsh
 @@ -71,10 +71,37 @@ ignore:
@@ -101,10 +101,10 @@ index 9477351..a80e84c 100644
    ${endIf}
  !macroend
 diff --git a/src/main/prepare-dist-package.mjs b/src/main/prepare-dist-package.mjs
-index 4ae13de..015c800 100644
+index 235594a4ba90bff3fe38e5f4a2bf2696523e653e..8be1c32500a690f840b6f8140f4ef076180be77e 100644
 --- a/src/main/prepare-dist-package.mjs
 +++ b/src/main/prepare-dist-package.mjs
-@@ -50,7 +50,15 @@ async function main() {
+@@ -68,7 +68,15 @@ async function main() {
    const json = await readFile(MAIN_PACKAGE_PATH, "utf8");
    const mainPkg = JSON.parse(json);
  
@@ -122,7 +122,7 @@ index 4ae13de..015c800 100644
  
    // NOTE(erri120): this is the minimal amount of bullshit required to get the piece of shit software called "electron-builder" to work with PNPM.
 diff --git a/src/main/src/Application.ts b/src/main/src/Application.ts
-index c54d37a..7d2d83d 100644
+index 64ca5390834caa2cb5bbe2b63c021521757dda3a..aa3e596a0e3064339116930b89af497d4df982bf 100644
 --- a/src/main/src/Application.ts
 +++ b/src/main/src/Application.ts
 @@ -36,6 +36,7 @@ import { shutdownHashWorker } from "./hash/host";
@@ -133,7 +133,7 @@ index c54d37a..7d2d83d 100644
  import { ReloadBudget } from "./reloadBudget";
  import SplashScreen from "./SplashScreen";
  import DuckDBSingleton from "./store/DuckDBSingleton";
-@@ -54,6 +55,7 @@ import { isTelemetryEnabled, setTelemetryEnabled } from "./telemetry/state";
+@@ -54,6 +55,7 @@ import { isTelemetryEnabled, setTelemetryEnabled, setTelemetryInstanceId } from
  import TrayIcon from "./TrayIcon";
  import { UnleashClient } from "./unleash/client";
  import { synchronizeFeatureFlags } from "./unleash/ipc";
@@ -152,7 +152,7 @@ index c54d37a..7d2d83d 100644
      ipcMain.on("show-window", () => this.showMainWindow(args?.startMinimized));
      app.commandLine.appendSwitch("js-flags", `--max-old-space-size=${args.maxMemory || 4096}`);
  
-@@ -623,13 +629,22 @@ class Application {
+@@ -625,13 +631,22 @@ class Application {
       *
       */
  
@@ -181,7 +181,7 @@ index c54d37a..7d2d83d 100644
    }
  
    private async warnAdmin(): Promise<void> {
-@@ -918,6 +933,11 @@ class Application {
+@@ -920,6 +935,11 @@ class Application {
        return startupSettings;
      });
  
@@ -194,7 +194,7 @@ index c54d37a..7d2d83d 100644
      this.mAppMetadata = {
        commandLine: this.mArgs as unknown as Record<string, unknown>,
 diff --git a/src/main/src/MainWindow.ts b/src/main/src/MainWindow.ts
-index 1de32cc..bb3ad00 100644
+index 1de32ccd05484e3a264e113f06b2cc6b802f49e6..bb3ad00ae4648848e589246ac0acbde7bc09f96e 100644
 --- a/src/main/src/MainWindow.ts
 +++ b/src/main/src/MainWindow.ts
 @@ -426,7 +426,7 @@ class MainWindow {
@@ -206,8 +206,107 @@ index 1de32cc..bb3ad00 100644
        titleBarStyle: windowMetrics?.customTitlebar === true ? "hidden" : "default",
        webPreferences: {
          preload: path.join(getVortexPath("base"), "preload.cjs"),
+diff --git a/src/main/src/downloading/ipc.ts b/src/main/src/downloading/ipc.ts
+index 0520c23f133169f1caa4c62468278a5d0b66619c..051fcc39123f30fa6afb159b8e4a39932bc5dad4 100644
+--- a/src/main/src/downloading/ipc.ts
++++ b/src/main/src/downloading/ipc.ts
+@@ -20,12 +20,21 @@ function wireToResolvedEndpoint(wire: WireEndpoint): ResolvedEndpoint {
+ function wireToResolvedResource(wire: WireResolvedResource): ResolvedResource {
+   const probe = wireToResolvedEndpoint(wire.probeEndpoint);
+   if (!wire.chunkEndpoints?.length) return probe;
++
++  // Each call for a chunk may be a retry. Rotate that chunk through the
++  // authorised endpoint set so a transiently bad mirror does not pin the retry
++  // strategy to the same host. The downloader sends the probe's strong ETag as
++  // If-Match on ranged requests, so an inconsistent mirror is rejected safely.
++  const attempts = new Map<number, number>();
+   return {
+     probeEndpoint: probe,
+-    chunkEndpoint: (chunk) =>
+-      Promise.resolve(
+-        wireToResolvedEndpoint(wire.chunkEndpoints?.[chunk.index] ?? wire.probeEndpoint),
+-      ),
++    chunkEndpoint: (chunk) => {
++      const attempt = attempts.get(chunk.index) ?? 0;
++      attempts.set(chunk.index, attempt + 1);
++      const idx = (chunk.index + attempt) % wire.chunkEndpoints!.length;
++      const endpoint = wire.chunkEndpoints?.[idx] ?? wire.probeEndpoint;
++      return Promise.resolve(wireToResolvedEndpoint(endpoint));
++    },
+   };
+ }
+ 
+@@ -41,7 +50,9 @@ export function init(manager: DownloadManager): void {
+ 
+   const webContentsByDownloadId = new Map<string, WebContents>();
+ 
+-  betterIpcMain.handle("download:start", async (event, dest, collationId, downloadId) => {
++  betterIpcMain.handle(
++    "download:start",
++    async (event, dest, collationId, downloadId, priority) => {
+     const webContents = event.sender;
+     // free users must click through the website serially at their own pace (~10-13s each),
+     // so any wall-clock timer abandons every download past the first few in a batch.
+@@ -55,13 +66,22 @@ export function init(manager: DownloadManager): void {
+     );
+     const resource = wireToResolvedResource(wireResource);
+     const resolver = () => Promise.resolve(resource);
+-    const handle = manager.download(resource, dest, resolver, undefined, undefined, downloadId);
++    const handle = manager.download(
++      resource,
++      dest,
++      resolver,
++      undefined,
++      undefined,
++      downloadId,
++      Number(priority ?? 0),
++    );
+     webContentsByDownloadId.set(handle.downloadId, webContents);
+     handle.promise.catch((err) =>
+       log("error", "download failed", { downloadId: handle.downloadId, err }),
+     );
+-    return { downloadId: handle.downloadId };
+-  });
++      return { downloadId: handle.downloadId };
++    },
++  );
+ 
+   betterIpcMain.handle("download:cancel", (_event, downloadId) => {
+     manager.cancel(downloadId);
+diff --git a/src/main/src/downloading/manager.ts b/src/main/src/downloading/manager.ts
+index 879f372e81e2266fdf3fe9d48ba62f7e1d28e7ac..624a5cfbc6592802432b5fcb5878284278e1a1fa 100644
+--- a/src/main/src/downloading/manager.ts
++++ b/src/main/src/downloading/manager.ts
+@@ -202,8 +202,9 @@ export class DownloadManager {
+     chunker: Chunker<T> = staticChunker(),
+     retry: RetryStrategy = defaultRetryStrategy(),
+     downloadId?: string,
++    priority = 0,
+   ): DownloadHandle<T> {
+-    return this.#download(resource, dest, resolver, chunker, retry, undefined, downloadId);
++    return this.#download(resource, dest, resolver, chunker, retry, undefined, downloadId, priority);
+   }
+ 
+   #download<T>(
+@@ -214,6 +215,7 @@ export class DownloadManager {
+     retry: RetryStrategy,
+     checkpoint?: DownloadCheckpoint<T>,
+     downloadId: string = randomUUID(),
++    priority = 0,
+   ): DownloadHandle<T> {
+     const progressReporter = new ProgressReporter();
+     const abortController = new AbortController();
+@@ -241,7 +243,7 @@ export class DownloadManager {
+           userAgent: this.#userAgent,
+         },
+       );
+-    });
++    }, { priority });
+ 
+     // Swallow all rejections on one fork so that pause()/cancel() flows
+     // never surface as unhandled rejections.
 diff --git a/src/main/src/extensions/autoupdater/releaseResolver.ts b/src/main/src/extensions/autoupdater/releaseResolver.ts
-index ab04007..e004cbc 100644
+index e583f994a34bb7eff50407174fbbb2d5f9072777..e71dd2ec6a058b14792e23916761617209f7a2f8 100644
 --- a/src/main/src/extensions/autoupdater/releaseResolver.ts
 +++ b/src/main/src/extensions/autoupdater/releaseResolver.ts
 @@ -41,9 +41,12 @@ export class RateLimitError extends Error {
@@ -287,7 +386,7 @@ index ab04007..e004cbc 100644
    const picked = pickRelease(releases, channel);
 diff --git a/src/main/src/migrateOfficialData.ts b/src/main/src/migrateOfficialData.ts
 new file mode 100644
-index 0000000..32a5da2
+index 0000000000000000000000000000000000000000..32a5da28674a8bb91afd4d22551167052b5af837
 --- /dev/null
 +++ b/src/main/src/migrateOfficialData.ts
 @@ -0,0 +1,779 @@
@@ -1071,10 +1170,10 @@ index 0000000..32a5da2
 +  }
 +}
 diff --git a/src/main/src/telemetry/state.ts b/src/main/src/telemetry/state.ts
-index 0eafd55..d918f46 100644
+index ef35b293357fc311eaf319aac490abd41958774f..42e5a6d535fcd16c638787d561fe248fbaafd998 100644
 --- a/src/main/src/telemetry/state.ts
 +++ b/src/main/src/telemetry/state.ts
-@@ -15,7 +15,10 @@ export const getProcessor = (): SpanProcessor | undefined => {
+@@ -16,7 +16,10 @@ export const getProcessor = (): SpanProcessor | undefined => {
  };
  
  export const setTelemetryEnabled = (enabled: boolean): void => {
@@ -1088,7 +1187,7 @@ index 0eafd55..d918f46 100644
  export const isTelemetryEnabled = (): boolean => {
 diff --git a/src/main/src/websiteSession.ts b/src/main/src/websiteSession.ts
 new file mode 100644
-index 0000000..8a8fb7c
+index 0000000000000000000000000000000000000000..4b68393a9a238c9e3a19fa9df3e0e5f2f97d9fff
 --- /dev/null
 +++ b/src/main/src/websiteSession.ts
 @@ -0,0 +1,390 @@
@@ -1483,10 +1582,10 @@ index 0000000..8a8fb7c
 +  log("debug", "website session service initialised");
 +}
 diff --git a/src/preload/src/index.ts b/src/preload/src/index.ts
-index 1d99195..0a6e13c 100644
+index 7b21673f3f0f7733730da14281813fe0b0c0ea19..0b21f3e2cd2cfefdd94c424f3df7f3dd713e2ea1 100644
 --- a/src/preload/src/index.ts
 +++ b/src/preload/src/index.ts
-@@ -39,6 +39,14 @@ try {
+@@ -53,6 +53,14 @@ try {
        showItemInFolder: (filePath) => betterIpcRenderer.send("shell:showItemInFolder", filePath),
      },
  
@@ -1501,1845 +1600,22 @@ index 1d99195..0a6e13c 100644
      persist: {
        sendDiff: (hive, operations) => betterIpcRenderer.send("persist:diff", hive, operations),
  
-diff --git a/src/renderer/src/extensions/about_dialog/views/AboutPage.tsx b/src/renderer/src/extensions/about_dialog/views/AboutPage.tsx
-index 7645efc..96bd53d 100644
---- a/src/renderer/src/extensions/about_dialog/views/AboutPage.tsx
-+++ b/src/renderer/src/extensions/about_dialog/views/AboutPage.tsx
-@@ -168,11 +168,17 @@ class AboutPage extends ComponentEx<IProps, IComponentState> {
-               </Media.Left>
-               <Media.Body>
-                 <h2 className="media-heading">
--                  Vortex {this.mVersion}{" "}
-+                  Vortex Unlocked {this.mVersion}{" "}
-                   {releaseDate !== undefined
-                     ? `(${releaseDate.toLocaleDateString(I18next.language)})`
-                     : ""}
-                 </h2>
-+                <p>
-+                  Unlocked by{" "}
-+                  <a onClick={() => opn("https://github.com/Chaython").catch(() => null)}>
-+                    https://github.com/Chaython
-+                  </a>
-+                </p>
-                 <p>&#169;2026 Black Tree Gaming Ltd.</p>
-                 <p>
-                   {t("Released under")} <a onClick={this.showOwnLicense}>GPL-3</a> {t("License")}
-diff --git a/src/renderer/src/extensions/analytics/index.ts b/src/renderer/src/extensions/analytics/index.ts
-index def21ee..2a358d7 100644
---- a/src/renderer/src/extensions/analytics/index.ts
-+++ b/src/renderer/src/extensions/analytics/index.ts
-@@ -20,11 +20,23 @@ import SettingsAnalytics from "./views/SettingsAnalytics";
- 
- let ignoreNextAnalyticsStateChange = false;
- 
-+/** Vortex Unlocked: analytics and event reporting are permanently disabled. */
-+const ANALYTICS_ENABLED: boolean = false;
-+
- function init(context: IExtensionContext): boolean {
-   context.registerReducer(["settings", "analytics"], settingsReducer);
-   context.registerSettings("Vortex", SettingsAnalytics, undefined, undefined, 110);
- 
-   context.once(() => {
-+    // Vortex Unlocked: usage analytics / event reporting is disabled.
-+    // No mixpanel session is started, no consent dialog is raised and no
-+    // analytics event listeners are registered. The settings page remains,
-+    // but toggling it no longer enables any tracking.
-+    if (!ANALYTICS_ENABLED) {
-+      analyticsLog("info", "Vortex Unlocked: analytics disabled");
-+      return;
-+    }
-+
-     const enabled = () => context.api.store.getState().settings.analytics.enabled;
-     const getUserInfo = () => context.api.store.getState().persistent.nexus.userInfo;
-     // `?? true` because state persisted before the setting existed has no value for it.
-diff --git a/src/renderer/src/extensions/collections/index.ts b/src/renderer/src/extensions/collections/index.ts
-index 53777be..a61c1cc 100644
---- a/src/renderer/src/extensions/collections/index.ts
-+++ b/src/renderer/src/extensions/collections/index.ts
-@@ -1694,26 +1694,10 @@ function once(api: IExtensionApi, collectionsCB: () => ICallbackMap) {
-   api.onStateChange(["persistent", "nexus", "userInfo"], (prev, cur) => {
-     const gameMode = selectors.activeGameId(api.getState());
-     updateOwnCollectionsCB(gameMode);
--    if (prev?.isPremium !== cur?.isPremium) {
--      restartDebouncer.schedule();
--    }
-+    // Vortex Unlocked: membership no longer changes, so the install-driver
-+    // restart on a plan change is gone with it.
-   });
- 
--  const restartDebouncer = new Debouncer(
--    async () => {
--      if (driver?.collection !== undefined) {
--        // user info changed, so we need to update the collection info
--        await api.emitAndAwait("reset-dependency-installs");
--        const profile = selectors.activeProfile(api.getState());
--        await driver.start(profile, driver.collection);
--      }
--      return Promise.resolve();
--    },
--    2000,
--    true,
--    false,
--  );
--
-   driver.infoCache.clearCache();
- }
- 
-diff --git a/src/renderer/src/extensions/collections/views/InstallDialog/InstallStartDialog.tsx b/src/renderer/src/extensions/collections/views/InstallDialog/InstallStartDialog.tsx
-index a6378b5..05cec2a 100644
---- a/src/renderer/src/extensions/collections/views/InstallDialog/InstallStartDialog.tsx
-+++ b/src/renderer/src/extensions/collections/views/InstallDialog/InstallStartDialog.tsx
-@@ -14,7 +14,9 @@
- import More from "../../../../controls/More";
- import Toggle from "../../../../controls/Toggle";
- import { getGame } from "../../../../extensions/gamemode_management/util/getGame";
-+import type { IDownload } from "../../../../extensions/download_management/types/IDownload";
- import type { IMod, IModRule } from "../../../../extensions/mod_management/types/IMod";
-+import { findDownloadByRef } from "../../../../extensions/mod_management/util/dependencies";
- import renderModName from "../../../../extensions/mod_management/util/modName";
- import getTextProfileManagement from "../../../../extensions/profile_management/texts";
- import type { IProfile } from "../../../../extensions/profile_management/types/IProfile";
-@@ -38,7 +40,7 @@
- interface IConnectedProps {
-   allProfiles: { [profileId: string]: IProfile };
-   mods: { [modId: string]: IMod };
--  isPremium: boolean;
-+  downloads: { [downloadId: string]: IDownload };
-   userInfo: { userId: number };
-   nextProfileId: string;
-   collectionsInstallWhileDownloading: boolean;
-@@ -225,6 +227,15 @@
-     const ownCollection: boolean =
-       userInfo?.userId !== undefined && driver.collectionInfo?.user?.memberId === userInfo?.userId;
-     const collectionName = renderModName(driver.collection);
-+    const dependencyRules = (driver.collection?.rules ?? []).filter(
-+      (rule) => rule.type === "requires" || rule.type === "recommends",
-+    );
-+    const requiredCount = dependencyRules.filter((rule) => rule.type === "requires").length;
-+    const optionalCount = dependencyRules.length - requiredCount;
-+    const cachedCount = dependencyRules.filter(
-+      (rule) => findDownloadByRef(rule.reference, this.props.downloads) !== undefined,
-+    ).length;
-+    const missingDownloadCount = dependencyRules.length - cachedCount;
-     return (
-       <Modal show={driver.collection !== undefined && driver.step === "query"} onHide={nop}>
-         <Modal.Header>
-@@ -299,6 +310,25 @@
-             />
-           )}
- 
-+          <div className="collections-preflight-summary">
-+            <strong>{t("Preflight")}</strong>
-+            <p>
-+              {t("{{required}} required mods, {{optional}} optional mods", {
-+                replace: { required: requiredCount, optional: optionalCount },
-+              })}
-+            </p>
-+            <p>
-+              {t("{{cached}} archives already available, {{missing}} still need downloading", {
-+                replace: { cached: cachedCount, missing: missingDownloadCount },
-+              })}
-+            </p>
-+            <p>
-+              {this.props.collectionsInstallWhileDownloading
-+                ? t("Downloads and installs will be pipelined to reduce total install time.")
-+                : t("Mods will finish downloading before installation begins.")}
-+            </p>
-+          </div>
-+
-           <Toggle
-             checked={this.props.collectionsInstallWhileDownloading}
-             onToggle={this.props.onSetCollectionConcurrency}
-@@ -416,7 +446,6 @@
-   const { editCollectionId } = (state.session as any).collections;
-   const gameMode = ownProps.driver?.profile?.gameId;
- 
--  const isPremium = getSafe(state, ["persistent", "nexus", "userInfo", "isPremium"], false);
-   const collectionsInstallWhileDownloading = getSafe(
-     state,
-     ["settings", "downloads", "collectionsInstallWhileDownloading"],
-@@ -426,7 +455,7 @@
-   return {
-     allProfiles: state.persistent.profiles,
-     mods: editCollectionId !== undefined ? state.persistent.mods[gameMode] : emptyObject,
--    isPremium,
-+    downloads: state.persistent.downloads.files,
-     userInfo,
-     nextProfileId: state.settings.profiles.nextProfileId,
-     collectionsInstallWhileDownloading,
-diff --git a/src/renderer/src/extensions/dashboard/index.ts b/src/renderer/src/extensions/dashboard/index.ts
-index 52e62b0..1ea0504 100644
---- a/src/renderer/src/extensions/dashboard/index.ts
-+++ b/src/renderer/src/extensions/dashboard/index.ts
-@@ -39,12 +39,18 @@ function registerDashlet(
- 
- function init(context: IExtensionContext): boolean {
-   context.registerReducer(["settings", "interface"], settingsReducer);
-+  // Vortex Unlocked: the Dashboard tab can be fully hidden from
-+  // Settings -> Interface ("Hide Dashboard tab").
-   context.registerMainPage("dashboard", "Dashboard", Dashboard, {
-     priority: 1,
-     hotkey: "1",
-     group: "dashboard",
-     props: () => ({ dashlets }),
-     mdi: mdiViewDashboardOutline,
-+    visible: () => {
-+      const state = context.api.store.getState();
-+      return !(state as any)?.settings?.interface?.hideDashboard;
-+    },
-   });
- 
-   context.registerSettings("Interface", Settings, () => ({ dashlets }), undefined, 1000);
-diff --git a/src/renderer/src/extensions/download_management/reducers/settings.ts b/src/renderer/src/extensions/download_management/reducers/settings.ts
-index ce7faa5..b07bfa3 100644
---- a/src/renderer/src/extensions/download_management/reducers/settings.ts
-+++ b/src/renderer/src/extensions/download_management/reducers/settings.ts
-@@ -24,7 +24,10 @@ export const settingsReducer: IReducerSpec<ISettingsDownloads> = {
-   defaults: {
-     minChunkSize: 1024 * 1024,
-     maxChunks: 10,
--    maxParallelDownloads: 1,
-+    // Vortex Unlocked: upstream defaults this to 1 and only premium accounts
-+    // were allowed to raise it. The premium gate is gone, so start parallel
-+    // downloads on by default; adjustable 1-10 in Settings -> Downloads.
-+    maxParallelDownloads: 5,
-     maxBandwidth: 0,
-     path: path.join("{USERDATA}", "downloads"),
-     showDropzone: true,
-diff --git a/src/renderer/src/extensions/download_management/views/Settings.tsx b/src/renderer/src/extensions/download_management/views/Settings.tsx
-index 34e5763..5617e2e 100644
---- a/src/renderer/src/extensions/download_management/views/Settings.tsx
-+++ b/src/renderer/src/extensions/download_management/views/Settings.tsx
-@@ -22,7 +22,6 @@ import { ComponentEx, connect, translate } from "../../../controls/ComponentEx";
- import FlexLayout from "../../../controls/FlexLayout";
- import FormInput from "../../../controls/FormInput";
- import Icon from "../../../controls/Icon";
--import Image from "../../../controls/Image";
- import More from "../../../controls/More";
- import Spinner from "../../../controls/Spinner";
- import Toggle from "../../../controls/Toggle";
-@@ -53,18 +52,8 @@ import opn from "../../../util/opn";
- import * as selectors from "../../../util/selectors";
- import { getSafe } from "../../../util/storeHelper";
- import { cleanFailedTransfer, testPathTransfer, transferPath } from "../../../util/transferPath";
--import {
--  Campaign,
--  ciEqual,
--  isChildPath,
--  isPathValid,
--  isReservedDirectory,
--  nexusModsURL,
--  Section,
--  Content,
--} from "../../../util/util";
-+import { ciEqual, isChildPath, isPathValid, isReservedDirectory } from "../../../util/util";
- import getTextMod from "../../mod_management/texts";
--import { PREMIUM_PATH } from "../../nexus_integration/constants";
- import {
-   setCopyOnIFF,
-   setDownloadPath,
-@@ -81,7 +70,6 @@ const MB = 1024 * 1024;
- 
- interface IConnectedProps {
-   parallelDownloads: number;
--  isPremium: boolean;
-   downloadPath: string;
-   modsInstallPath: string;
-   downloads: { [downloadId: string]: IDownload };
-@@ -143,7 +131,7 @@ class Settings extends ComponentEx<IProps, IComponentState> {
-   }
- 
-   public render(): JSX.Element {
--    const { t, copyOnIFF, downloads, isPremium, maxBandwidth, parallelDownloads } = this.props;
-+    const { t, copyOnIFF, downloads, maxBandwidth, parallelDownloads } = this.props;
-     const { downloadPath, progress, progressFile } = this.state;
- 
-     const pathPreview = getDownloadPath(downloadPath);
-@@ -151,7 +139,6 @@ class Settings extends ComponentEx<IProps, IComponentState> {
-     const validationState = this.validateDownloadPath(pathPreview);
- 
-     const pathValid = validationState.state !== "error";
--    const electricBoltIconPath = "assets/icons/electric-bolt.svg";
- 
-     const hasActivity =
-       Object.keys(downloads).find((dlId) => downloads[dlId].state === "started") !== undefined;
-@@ -230,24 +217,7 @@ class Settings extends ComponentEx<IProps, IComponentState> {
-               min={1}
-               max={10}
-               onChange={this.onChangeParallelDownloads}
--              disabled={!isPremium}
-             />
--            {!isPremium ? (
--              <BSButton id="get-premium-button" onClick={this.goBuyPremium}>
--                <Image srcs={[electricBoltIconPath]} />
--                {t("Unlock max download speeds")}
--              </BSButton>
--            ) : null}
--          </div>
--          <div>
--            {!isPremium ? (
--              <p>
--                {t(
--                  "Regular users are restricted to 1 download thread - " +
--                    "Go Premium for up to 10 download threads!",
--                )}
--              </p>
--            ) : null}
-           </div>
-         </FormGroup>
-         <FormGroup id="download-bandwidth-limit">
-@@ -399,15 +369,8 @@ class Settings extends ComponentEx<IProps, IComponentState> {
-     opn(url).catch((err) => undefined);
-   };
- 
--  private goBuyPremium = () => {
--    opn(
--      nexusModsURL(PREMIUM_PATH, {
--        section: Section.Users,
--        campaign: Campaign.BuyPremium,
--        content: Content.SettingsDownloadAd,
--      }),
--    ).catch(() => null);
--  };
-+  // Vortex Unlocked: goBuyPremium was removed along with the thread-count
-+  // premium gate - all download threads are available to every account.
- 
-   private setDownloadPath = (newPath: string) => {
-     this.nextState.downloadPath = newPath;
-@@ -836,11 +799,9 @@ class Settings extends ComponentEx<IProps, IComponentState> {
- 
- function mapStateToProps(state: IState): IConnectedProps {
-   const modsInstallPath = selectors.installPath(state);
--  const isPremium = getSafe(state, ["persistent", "nexus", "userInfo", "isPremium"], false);
-   return {
--    parallelDownloads: isPremium ? state.settings.downloads.maxParallelDownloads : 1,
--    // TODO: this breaks encapsulation
--    isPremium,
-+    // Vortex Unlocked: the thread count is no longer membership-gated
-+    parallelDownloads: state.settings.downloads.maxParallelDownloads,
-     downloadPath: state.settings.downloads.path,
-     downloads: state.persistent.downloads.files,
-     modsInstallPath,
-diff --git a/src/renderer/src/extensions/mod_management/hooks/useModToolbarActions.hook.tsx b/src/renderer/src/extensions/mod_management/hooks/useModToolbarActions.hook.tsx
-index bd3f102..619fce8 100644
---- a/src/renderer/src/extensions/mod_management/hooks/useModToolbarActions.hook.tsx
-+++ b/src/renderer/src/extensions/mod_management/hooks/useModToolbarActions.hook.tsx
-@@ -420,9 +420,6 @@ const useCheckVersionsAction = (t: TFunction): IPositionedAction => {
-   const updateRunning = useSelector((state: IState) =>
-     getSafe<boolean>(state, ["session", "mods", "updatingMods", gameMode], false),
-   );
--  const isPremium = useSelector((state: IState) =>
--    getSafe<boolean>(state, ["persistent", "nexus", "userInfo", "isPremium"], false),
--  );
- 
-   /**
-    * The mods as they are *now*, not as they were when this action was built. The
-@@ -505,7 +502,8 @@ const useCheckVersionsAction = (t: TFunction): IPositionedAction => {
-               ? "All mods up to date"
-               : `${outdated.length} mod update${outdated.length === 1 ? "" : "s"} available`,
-           actions:
--            isPremium && outdated.length > 0
-+            // Vortex Unlocked: "Update All" is offered to every account
-+            outdated.length > 0
-               ? [
-                   {
-                     title: "Update All",
-@@ -519,7 +517,7 @@ const useCheckVersionsAction = (t: TFunction): IPositionedAction => {
-           displayMS: outdated.length === 0 ? 5000 : undefined,
-         });
-       });
--  }, [api, gameMode, isPremium, readModsWithState, updateAll]);
-+  }, [api, gameMode, readModsWithState, updateAll]);
- 
-   return useMemo(
-     () => ({
-diff --git a/src/renderer/src/extensions/mod_management/views/CheckModVersionsButton.tsx b/src/renderer/src/extensions/mod_management/views/CheckModVersionsButton.tsx
-index aadc590..aafb593 100644
---- a/src/renderer/src/extensions/mod_management/views/CheckModVersionsButton.tsx
-+++ b/src/renderer/src/extensions/mod_management/views/CheckModVersionsButton.tsx
-@@ -22,7 +22,6 @@ interface IConnectedProps {
-   mods: { [modId: string]: IModWithState };
-   gameMode: string;
-   updateRunning: boolean;
--  isPremium: boolean;
- }
- 
- type IProps = IBaseProps & IConnectedProps;
-@@ -65,7 +64,8 @@ class CheckVersionsButton extends ComponentEx<IProps, {}> {
-       type: "success",
-       message: message,
-       actions:
--        this.props.isPremium && modIds.length > 0
-+        // Vortex Unlocked: "Update All" is offered to every account
-+        modIds.length > 0
-           ? [
-               {
-                 title: "Update All",
-@@ -173,7 +173,6 @@ function mapStateToProps(state: any): IConnectedProps {
-     mods: modsWithState,
-     gameMode,
-     updateRunning: getSafe(state, ["session", "mods", "updatingMods", gameMode], false),
--    isPremium: getSafe(state, ["persistent", "nexus", "userInfo", "isPremium"], false),
-   };
- }
- 
-diff --git a/src/renderer/src/extensions/nexus_integration/eventHandlers.ts b/src/renderer/src/extensions/nexus_integration/eventHandlers.ts
-index a8e16fc..ad06d00 100644
---- a/src/renderer/src/extensions/nexus_integration/eventHandlers.ts
-+++ b/src/renderer/src/extensions/nexus_integration/eventHandlers.ts
-@@ -55,9 +55,9 @@ import type { IModListItem } from "../news_dashlet/types";
- import { setUserInfo } from "./actions/persistent";
- import { NEXUS_BASE_URL, NEXUS_GAMES_URL } from "./constants";
--import { ensureFreshMembership, refreshMembership } from "./membership";
-+import { refreshMembership } from "./membership";
- import { nxmModUrl } from "./NXMUrl";
- import { isRateLimited, notifyRateLimited } from "./rateLimit";
--import { isLoggedIn, isPremium } from "./selectors";
-+import { isLoggedIn } from "./selectors";
- import type { IValidateKeyDataV2 } from "./types/IValidateKeyData";
- import {
-   checkModVersionsImpl,
-@@ -367,18 +367,9 @@ function downloadFile(
- ): Bluebird<string> {
-   const state: IState = api.getState();
-   const gameId = game?.id ?? SITE_ID;
--  if (game != null && gameId !== SITE_ID && !isPremium(state)) {
--    // The cached membership is the only thing saying no, and a plan bought on the website pushes
--    // nothing to Vortex - so confirm it before refusing a download the user can now make.
--    return Bluebird.resolve(ensureFreshMembership(api, nexus)).then(() => {
--      if (isPremium(api.getState())) {
--        return downloadFile(api, nexus, game, modId, fileId, fileName, allowInstall);
--      }
--      // nexusmods can't let users download files directly from client, without
--      // showing ads
--      return Bluebird.reject(new ProcessCanceled("Only available to premium users"));
--    });
--  }
-+  // Vortex Unlocked: the premium gate is gone - the generated nxm link goes
-+  // straight to the resolver; if the api refuses it, the protocol handler
-+  // falls back to the website round trip.
-   // TODO: Need some way to identify if this request is actually for a nexus mod
-   const url = nxmModUrl(game, gameId, modId, fileId);
-   log("debug", "downloading from generated nxm link", { url, fileName });
-diff --git a/src/renderer/src/extensions/nexus_integration/index.tsx b/src/renderer/src/extensions/nexus_integration/index.tsx
-index 0a10fcc..ef38dad 100644
---- a/src/renderer/src/extensions/nexus_integration/index.tsx
-+++ b/src/renderer/src/extensions/nexus_integration/index.tsx
-@@ -17,24 +17,18 @@ import { TimeoutError } from "@nexusmods/nexus-api";
- import { getErrorMessageOrDefault, unknownToError } from "@vortex/shared";
- import PromiseBB from "bluebird";
- import * as fuzz from "fuzzball";
--import type { TFunction } from "i18next";
- import * as React from "react";
--import { Button } from "react-bootstrap";
- import type { Action } from "redux";
- import {} from "uuid";
- 
- import { setDownloadModInfo, setForcedLogout, setModAttribute } from "../../actions";
- import type { IDialogResult } from "../../actions/notifications";
- import { showDialog } from "../../actions/notifications";
--import FlexLayout from "../../controls/FlexLayout";
--import Image from "../../controls/Image";
- import LazyComponent from "../../controls/LazyComponent";
- import { log } from "../../logging";
--import type { IComponentContext } from "../../types/IComponentContext";
- import type { IExtensionApi, IExtensionContext } from "../../types/IExtensionContext";
- import type { IModLookupResult } from "../../types/IModLookupResult";
- import type { IState } from "../../types/IState";
--import { Pictogram } from "../../ui/components/pictogram/Pictogram";
- import { getApplication } from "../../util/application";
- import { ProcessCanceled } from "../../util/CustomErrors";
- import Debouncer from "../../util/Debouncer";
-@@ -45,16 +39,7 @@ import { showError } from "../../util/message";
- import opn from "../../util/opn";
- import { activeGameId, downloadPathForGame, gameById } from "../../util/selectors";
- import { currentGame, getSafe } from "../../util/storeHelper";
--import {
--  batchDispatch,
--  decodeHTML,
--  nexusModsURL,
--  Section,
--  truthy,
--  Content,
--  Campaign,
--} from "../../util/util";
--import { MainContext } from "../../views/MainWindow";
-+import { batchDispatch, decodeHTML, truthy } from "../../util/util";
- import type { ICategoryDictionary } from "../category_management/types/ICategoryDictionary";
- import type { IDownload } from "../download_management/types/IDownload";
- import { SITE_ID } from "../gamemode_management/constants";
-@@ -74,7 +59,6 @@ import {
-   NEXUS_API_SUBDOMAIN,
-   NEXUS_BASE_URL,
-   NEXUS_DOMAIN,
--  PREMIUM_PATH,
-   REVALIDATION_FREQUENCY,
- } from "./constants";
- import * as eh from "./eventHandlers";
-@@ -114,7 +98,6 @@ import retrieveCategoryList from "./util/retrieveCategories";
- import Tracking from "./util/tracking";
- import { makeFileUID } from "./util/UIDs";
- import FreeUserDLDialog from "./views/FreeUserDLDialog";
--import GoPremiumDashlet from "./views/GoPremiumDashlet";
- import LoginDialog from "./views/LoginDialog";
- import LoginIcon from "./views/LoginIcon";
- import {} from "./views/Settings";
-@@ -1155,63 +1138,6 @@ function once(api: IExtensionApi, callbacks: Array<(nexus: NexusT) => void>) {
-   callbacks.forEach((cb) => cb(nexus));
- }
- 
--function toolbarBanner(t: TFunction): React.FunctionComponent<React.PropsWithChildren<any>> {
--  return () => {
--    const context = React.useContext<IComponentContext>(MainContext);
--    const trackAndGoToPremium = (e) => {
--      context.api.events.emit("analytics-track-click-event", "Go Premium", "Header");
--      goBuyPremium(e);
--    };
--
--    return (
--      <div id="nexus-header-ad">
--        <button data-campaign={Content.HeaderAd} onClick={trackAndGoToPremium}>
--          <FlexLayout className="ad-flex-container" type="row">
--            <FlexLayout.Flex>
--              <FlexLayout className="text-flex-container" type="column">
--                <div className="nexus-header-ad-title">
--                  Want <span className="ad-title-highlight">more time</span> playing?
--                </div>
--
--                <div className="nexus-header-ad-body">
--                  Save time with <span className="ad-body-highlight">max download speeds</span>,{" "}
--                  <span className="ad-body-highlight">auto-install collections</span>, and{" "}
--                  <span className="ad-body-highlight">no ads</span>.
--                </div>
--              </FlexLayout>
--            </FlexLayout.Flex>
--
--            <FlexLayout.Fixed>
--              <Pictogram brand="premium" className="size-16" name="premium" size="none" />
--            </FlexLayout.Fixed>
--          </FlexLayout>
--
--          <FlexLayout className="custom-hover-overlay" type="row">
--            <FlexLayout.Fixed>
--              <FlexLayout className="hover-overlay-content" type="row">
--                {t("Go Premium")}
--
--                <div className="arrow-forward" />
--              </FlexLayout>
--            </FlexLayout.Fixed>
--          </FlexLayout>
--        </button>
--      </div>
--    );
--  };
--}
--
--function goBuyPremium(evt: React.MouseEvent<any>) {
--  const content = evt.currentTarget.getAttribute("data-campaign");
--  opn(
--    nexusModsURL(PREMIUM_PATH, {
--      section: Section.Users,
--      campaign: Campaign.BuyPremium,
--      content: content,
--    }),
--  ).catch((err) => undefined);
--}
--
- function idValid(
-   thingId: string,
-   mods: { [modId: string]: IMod },
-@@ -1507,49 +1433,8 @@ function init(context: IExtensionContext): boolean {
-     ...nxmProtocol.dialogHandlers,
-   }));
- 
--  context.registerBanner(
--    "downloads",
--    () => {
--      const t = context.api.translate;
--      const electricBoltIconPath = "assets/icons/electric-bolt.svg";
--      const trackAndGoToPremium = (e) => {
--        context.api.events.emit("analytics-track-click-event", "Go Premium", "Downloads");
--        goBuyPremium(e);
--      };
--      return (
--        <div id="nexus-download-banner">
--          <div className="banner-text">
--            Free users are <span className="text-highlight">capped at 3MB/s</span> (1.5 MB/s with
--            AdBlock). Play your modded games{" "}
--            <span className="text-highlight">faster with premium</span>.
--          </div>
--
--          <Button
--            data-campaign={Content.DownloadsBannerAd}
--            id="get-premium-button"
--            onClick={trackAndGoToPremium}
--          >
--            <Image srcs={[electricBoltIconPath]} />
--
--            {t("Unlock max download speeds")}
--          </Button>
--        </div>
--      );
--    },
--    {
--      props: {
--        showAd: (state) => sel.shouldShowPremiumAd(state),
--      },
--      condition: (props: any): boolean => props.showAd,
--    },
--  );
--
--  context.registerBanner("main-toolbar", toolbarBanner(context.api.translate), {
--    props: {
--      showAd: (state) => sel.shouldShowPremiumAd(state),
--    },
--    condition: (props: any): boolean => props.showAd,
--  });
-+  // Vortex Unlocked: the downloads-page speed-cap banner and the "Go Premium"
-+  // main-toolbar banner are not registered.
- 
-   context.registerModSource(
-     "nexus",
-@@ -1587,27 +1472,8 @@ function init(context: IExtensionContext): boolean {
-     genCollectionIdAttribute(context.api, () => nexus),
-   );
- 
--  /* tentatively removed, deemed unnecessary
--  context.registerDashlet('Nexus Mods Account Banner', 3, 1, 0, DashboardBanner,
--                          undefined, undefined, {
--    fixed: true,
--    closable: true,
--  });
--  */
--
--  context.registerDashlet(
--    "Go Premium",
--    1,
--    2,
--    200,
--    GoPremiumDashlet,
--    (state: IState) => sel.shouldShowPremiumAd(state),
--    undefined,
--    {
--      fixed: false,
--      closable: false,
--    },
--  );
-+  // Vortex Unlocked: the "Nexus Mods Account Banner" and "Go Premium" dashlets
-+  // are not registered - the dashboard shows no membership upsell.
- 
-   context.registerAttributeExtractor(50, (input: any, modPath: string) => {
-     return processAttributes(context.api.store.getState(), input, modPath === undefined);
-diff --git a/src/renderer/src/extensions/nexus_integration/nxmProtocol.ts b/src/renderer/src/extensions/nexus_integration/nxmProtocol.ts
-index 61ba6c7..7d78fbd 100644
---- a/src/renderer/src/extensions/nexus_integration/nxmProtocol.ts
-+++ b/src/renderer/src/extensions/nexus_integration/nxmProtocol.ts
-@@ -19,12 +19,13 @@ import {
- } from "../../util/CustomErrors";
- import { createKeyedCache } from "../../util/keyedCache";
- import opn from "../../util/opn";
-+import { getPreloadApi } from "../../util/preloadAccess";
- import { batchDispatch } from "../../util/util";
- import type { IResolvedURL } from "../download_management/types/ProtocolHandlers";
- import { SITE_ID } from "../gamemode_management/constants";
- import { addFreeUserDLItem, removeFreeUserDLItem } from "./actions/session";
- import { NEXUS_BASE_URL } from "./constants";
--import { refreshMembership, scheduleMembershipRefresh } from "./membership";
-+import { scheduleMembershipRefresh } from "./membership";
- import NXMUrl from "./NXMUrl";
- import { isPremium, userInfo } from "./selectors";
- import { bringToFront, ensureLoggedIn, getInfoGraphQL, oauthCallback, startDownload } from "./util";
-@@ -92,6 +93,8 @@ export class NxmProtocol {
- 
-   // every parked download, each carrying whether its user has gone to fetch a link for it
-   readonly #freeQueue: IQueuedDownload[] = [];
-+  // Vortex Unlocked: files with a website-session link generation in flight
-+  readonly #autoGenInFlight = new Set<string>();
-   readonly #urlCache = createKeyedCache<{ urls: string[]; meta: unknown }>(
-     DOWNLOAD_URL_CACHE_DURATION,
-   );
-@@ -111,30 +114,14 @@ export class NxmProtocol {
-    * Reading the api is refused during `init` - the extension api is a proxy that throws
-    * "extension uses api in init function" - so anything that touches the store waits until here.
-    * The constructor only records its arguments for the same reason.
-+   *
-+   * Vortex Unlocked: the membership-change cache drop is gone along with the
-+   * membership distinction itself.
-    */
-   readonly start = (): void => {
--    this.#dropCachedUrlsOnMembershipChange();
-+    // intentionally empty
-   };
- 
--  /**
--   * The api mints a download url for the membership that asked for it, but the cache is keyed by
--   * file, so an entry outlives the plan it was issued under. Both directions matter: after an
--   * upgrade a cached free url still downloads at free speed, and after a downgrade a cached premium
--   * url serves a download the account is no longer entitled to. Neither is worth keeping, so a plan
--   * change drops the lot.
--   */
--  #dropCachedUrlsOnMembershipChange(): void {
--    let premium = isPremium(this.#api.getState());
--    this.#api.store.subscribe(() => {
--      const current = isPremium(this.#api.getState());
--      if (current === premium) {
--        return;
--      }
--      premium = current;
--      this.#urlCache.clear();
--    });
--  }
--
-   get #nexus(): NexusT {
-     return this.#getNexus();
-   }
-@@ -303,7 +290,11 @@ export class NxmProtocol {
+@@ -241,8 +249,8 @@ try {
      },
-   };
  
--  /** Whether this download can go through the api, or has to go via the website. */
-+  /**
-+   * Whether this download can go through the api, or has to go via the website.
-+   * Vortex Unlocked: always eligible - if the server refuses, the 403 handler
-+   * in `resolve` falls back to the website round trip.
-+   */
-   #canDownloadInApp(url: NXMUrl): boolean {
-     if (!needsAuthorisedLink(url)) {
-       return true;
-@@ -321,28 +312,15 @@ export class NxmProtocol {
-   }
- 
-   /**
--   * Whether a refused download link confirms the account is no longer premium. The api answers a
--   * keyless link with 403 when it isn't, so the refusal prompts the re-read and the answer decides;
--   * a refusal raised for any other reason keeps the original error.
--   *
--   * This asks unconditionally rather than through the freshness gate. A 403 is the server saying the
--   * cached answer is wrong, and no read is recent enough to argue with it - during active use one
--   * almost always is, which would leave this confirming the membership against the very state the
--   * refusal contradicts. Concurrent refusals still share the one request.
-+   * Whether a refused download link should fall back to the website round trip. The api answers a
-+   * keyless link with 403 when the account can't generate one directly, so that refusal routes the
-+   * download through the website queue, where the user can pick up an authorised link; a refusal
-+   * raised for any other reason keeps the original error.
-    *
--   * The refreshed membership is in state before this returns, because FreeUserDLDialog only shows
--   * itself while the user is non-premium.
-+   * Vortex Unlocked: the server's answer decides, not the cached membership.
-    */
-   async #confirmMembershipEnded(url: NXMUrl, err: unknown): Promise<boolean> {
--    if (!needsAuthorisedLink(url) || !(err instanceof HTTPError) || err.statusCode !== 403) {
--      return false;
--    }
--    await refreshMembership(this.#api, this.#nexus);
--    const ended = !isPremium(this.#api.getState());
--    if (ended) {
--      log("info", "premium membership has ended, downloading as a free user");
--    }
--    return ended;
-+    return needsAuthorisedLink(url) && err instanceof HTTPError && err.statusCode === 403;
-   }
- 
-   #queuedFor(inputUrl: string): IQueuedDownload | undefined {
-@@ -377,6 +355,10 @@ export class NxmProtocol {
-   /**
-    * Park the download until the user brings back an authorised link from the website (or cancels
-    * or skips it). FreeUserDLDialog renders off the redux queue this dispatches into.
-+   *
-+   * Vortex Unlocked: when the embedded website session is enabled, an authorised
-+   * link is generated automatically and delivered through the same path a
-+   * browser handoff uses, so the dialog only stays up as a fallback.
-    */
-   #websiteDownload(input: string, url: NXMUrl): Promise<IResolvedURL> {
-     // a promise settles once and #dequeue tolerates a repeat, so cancelling after a skip is safe
-@@ -396,9 +378,96 @@ export class NxmProtocol {
-         awaitingLink: false,
-       });
-       this.#api.store.dispatch(addFreeUserDLItem(input));
-+      void this.#tryAutoGenerate(input, url);
-     });
-   }
- 
-+  /**
-+   * Vortex Unlocked: whether automatic link generation applies right now. Off by
-+   * default; collection installs qualify on their own and single downloads only
-+   * with the "always" setting, to keep the request pace conservative.
-+   */
-+  #autoGenEnabled(): boolean {
-+    // Vortex Unlocked: the two settings live in the interface reducer but not
-+    // in the (upstream) ISettingsInterface type - read them the same way the
-+    // hideDashboard toggle reads its setting.
-+    const interfaceSettings = this.#api.getState().settings.interface as any;
-+    if (interfaceSettings?.["websiteLinkGen"] !== true) {
-+      return false;
-+    }
-+    const inCollectionInstall = getCollectionActiveSession(this.#api.getState()) !== undefined;
-+    return inCollectionInstall || interfaceSettings?.["websiteLinkGenAlways"] === true;
-+  }
-+
-+  /**
-+   * Vortex Unlocked: generate an authorised link for a parked download through the
-+   * embedded website session and deliver it to everything waiting on that file.
-+   * Any failure leaves the download parked for the manual website flow.
-+   */
-+  async #tryAutoGenerate(input: string, url: NXMUrl): Promise<void> {
-+    if (!this.#autoGenEnabled()) {
-+      return;
-+    }
-+
-+    const dedupKey = `${url.gameId}_${url.modId}_${url.fileId}`;
-+    if (this.#autoGenInFlight.has(dedupKey)) {
-+      return;
-+    }
-+
-+    const queued = this.#freeQueue.find((iter) => iter.input === input);
-+    if (queued === undefined || queued.awaitingLink) {
-+      // already fetching a link for this one (user clicked the dialog's website button)
-+      return;
-+    }
-+    queued.awaitingLink = true;
-+    this.#autoGenInFlight.add(dedupKey);
-+
-+    try {
-+      const pageId = nxmPageId(this.#api.getState(), url.gameId);
-+      const reply = await getPreloadApi().websiteSession.generateLink({
-+        domain: url.gameId,
-+        gameId: pageId,
-+        modId: url.modId,
-+        fileId: url.fileId,
-+      });
-+
-+      if (
-+        reply?.ok === true &&
-+        typeof reply.nxmUrl === "string" &&
-+        reply.nxmUrl.startsWith("nxm://")
-+      ) {
-+        log("info", "website session auto-authorised download", {
-+          modId: url.modId,
-+          fileId: url.fileId,
-+        });
-+        // deliver to every parked download waiting on this file, not just the first
-+        const keyedUrl = new NXMUrl(reply.nxmUrl);
-+        let deliveries = 0;
-+        while (this.#deliverAwaitedLink(keyedUrl, reply.nxmUrl) && ++deliveries < 32) {
-+          // keep delivering while entries for this file are still awaiting
-+        }
-+        return;
-+      }
-+
-+      log("warn", "website session link generation failed", {
-+        modId: url.modId,
-+        fileId: url.fileId,
-+        reason: reply?.reason,
-+      });
-+    } catch (err) {
-+      log("warn", "website session link generation failed", {
-+        error: getErrorMessageOrDefault(err),
-+      });
-+    } finally {
-+      // release the entry for the manual flow (or a later retry) if it is still parked
-+      const stillQueued = this.#freeQueue.find((iter) => iter.input === input);
-+      if (stillQueued !== undefined && stillQueued.awaitingLink) {
-+        stillQueued.awaitingLink = false;
-+      }
-+      this.#autoGenInFlight.delete(dedupKey);
-+    }
-+  }
-+
-   /**
-    * The file's full update chain. Skipping has to name every file id the chain covers, because a
-    * dependency may reference an older or newer file than the one being skipped and the nxm url
-diff --git a/src/renderer/src/extensions/nexus_integration/selectors.ts b/src/renderer/src/extensions/nexus_integration/selectors.ts
-index 258e858..34b3cff 100644
---- a/src/renderer/src/extensions/nexus_integration/selectors.ts
-+++ b/src/renderer/src/extensions/nexus_integration/selectors.ts
-@@ -22,28 +22,22 @@ export const userInfo = (state: IState) => {
-   return state.persistent.nexus.userInfo;
- };
- 
--export const isPremium = (state: IState) => {
--  if (!hasPersistentWithNexus(state.persistent)) {
--    return false;
--  }
--  return state.persistent.nexus.userInfo?.isPremium ?? false;
-+/**
-+ * Vortex Unlocked: every premium gate in the client is open.
-+ * The upstream build restricted parallel downloads, in-app link resolution,
-+ * update-all and collection bulk-install flows to premium members; this fork
-+ * treats every account as premium so those client-side gates never engage.
-+ * (What the Nexus API itself allows is still decided server-side.)
-+ */
-+export const isPremium = (_state: IState) => {
-+  return true;
- };
- 
- /**
-- * Returns true only when we know for certain the user is not premium.
-- * While userInfo is still loading, assumes premium to avoid flashing
-- * "Go Premium" ads at paying customers on startup.
-- * Use this for ad/banner visibility only — not for feature gating.
-+ * Vortex Unlocked: premium upsell UI is permanently suppressed.
-  */
--export const shouldShowPremiumAd = (state: IState) => {
--  if (!hasPersistentWithNexus(state.persistent)) {
--    return false;
--  }
--  const info = state.persistent.nexus.userInfo;
--  if (info === undefined) {
--    return false;
--  }
--  return !info.isPremium && !info.isSupporter;
-+export const shouldShowPremiumAd = (_state: IState) => {
-+  return false;
- };
- 
- export const isLoggedIn = (state: IState) => {
-diff --git a/src/renderer/src/extensions/nexus_integration/util.ts b/src/renderer/src/extensions/nexus_integration/util.ts
-index 27176fc..4a010f5 100644
---- a/src/renderer/src/extensions/nexus_integration/util.ts
-+++ b/src/renderer/src/extensions/nexus_integration/util.ts
-@@ -1796,10 +1796,13 @@ export const MEMBERSHIP_ROLE = {
-  * Derive the membership-related fields of userInfo from a user payload (API
-  * response or decoded JWT). Single source of truth for the role checks, used by
-  * both transformUserInfoFromApi and updateUserInfoFromRefreshedToken.
-+ *
-+ * Vortex Unlocked: membership is always reported as premium so no client-side
-+ * gate can ever engage, regardless of what the API says about the account.
-  */
- function deriveMembership(user: Pick<IUserInfo, "membership_roles">): IMembership {
-   return {
--    isPremium: user.membership_roles.includes(MEMBERSHIP_ROLE.premium),
-+    isPremium: true,
-     isSupporter: user.membership_roles.includes(MEMBERSHIP_ROLE.supporter),
-     isLifetime: user.membership_roles.includes(MEMBERSHIP_ROLE.lifetime),
-   };
-diff --git a/src/renderer/src/extensions/nexus_integration/util/transformUserInfo.ts b/src/renderer/src/extensions/nexus_integration/util/transformUserInfo.ts
-index bf53184..63bdd1f 100644
---- a/src/renderer/src/extensions/nexus_integration/util/transformUserInfo.ts
-+++ b/src/renderer/src/extensions/nexus_integration/util/transformUserInfo.ts
-@@ -3,10 +3,12 @@ import type { IValidateKeyResponse } from "@nexusmods/nexus-api";
- import type { IValidateKeyData } from "../types/IValidateKeyData";
- 
- // transform the server response into the format we store internally
-+// Vortex Unlocked: membership is always reported as premium so no client-side
-+// gate can ever engage, regardless of what the API says about the account.
- function transformUserInfo(input: IValidateKeyResponse): IValidateKeyData {
-   return {
-     email: input.email,
--    isPremium: input.is_premium,
-+    isPremium: true,
-     isSupporter: input.is_supporter,
-     name: input.name,
-     profileUrl: input.profile_url,
-diff --git a/src/renderer/src/extensions/nexus_integration/views/FreeUserDLDialog.tsx b/src/renderer/src/extensions/nexus_integration/views/FreeUserDLDialog.tsx
-index 53e9496..a10b624 100644
---- a/src/renderer/src/extensions/nexus_integration/views/FreeUserDLDialog.tsx
-+++ b/src/renderer/src/extensions/nexus_integration/views/FreeUserDLDialog.tsx
-@@ -13,12 +13,10 @@
- import { freeUserDownloadPosition } from "../../../util/collectionInstallSession";
- import { log } from "../../../util/log";
- import opn from "../../../util/opn";
--import { Campaign, Content, nexusModsURL, Section } from "../../../util/util";
- import { MainContext } from "../../../views/MainWindow";
--import { NEXUS_BASE_URL, PREMIUM_PATH } from "../constants";
-+import { NEXUS_BASE_URL } from "../constants";
- import { useRefreshUserInfoOnFocus } from "../hooks/useRefreshUserInfoOnFocus";
- import NXMUrl from "../NXMUrl";
--import { isPremium } from "../selectors";
- import { nexusGamesProm } from "../util";
- import { makeFileUID } from "../util/UIDs";
- import NewFreeDownloadModal from "./NewFreeDownloadModal";
-@@ -92,27 +90,29 @@
- }
- 
- function FreeUserDLDialog(props: IFreeUserDLDialogProps) {
--  const { t, nexus, onCancel, onDownload, onSkip, onUpdated, onRetry } = props;
-+  const { t, nexus, onCancel, onDownload, onSkip, onUpdated } = props;
- 
-   const urls: string[] = useSelector<IState, string[]>(
-     (state) => state.session["nexus"].freeUserDLQueue,
-   );
- 
--  const premium = useSelector(isPremium);
--
-   const collectionInstallSession = useSelector<IState, ICollectionInstallSession | undefined>(
-     (state) => state.session?.["collections"]?.activeSession,
-   );
-   const context = React.useContext<IComponentContext>(MainContext);
- 
-   const [fileInfo, setFileInfo] = React.useState<any>(null);
--  const [campaign, setCampaign] = React.useState<string>(undefined);
-   const [positionText, setPositionText] = React.useState<string>("1/1");
-+  const [autoOpenNext, setAutoOpenNext] = React.useState(
-+    () => window.localStorage.getItem("vortex-unlocked:auto-open-next") === "true",
-+  );
-   const lastFetchUrl = React.useRef<string>();
-+  const lastAutoOpenedUrl = React.useRef<string>();
- 
--  const show = urls.length > 0 && !premium;
-+  // Vortex Unlocked: the queue dialog shows whenever a download is parked
-+  // waiting for an authorised link from the website, regardless of membership.
-+  const show = urls.length > 0;
- 
--  // the user leaves for the website to buy premium, so re-read on their return
-   useRefreshUserInfoOnFocus(context.api, show);
- 
-   React.useEffect(() => {
-@@ -124,19 +124,11 @@
-   }, [collectionInstallSession]);
- 
-   React.useEffect(() => {
--    // an upgrade mid-dialog means the download can go through the api instead
--    if (premium && urls.length > 0) {
--      retry();
--    }
--  }, [premium]);
--
--  React.useEffect(() => {
-     const fetchFileInfo = async () => {
-       const url: NXMUrl = new NXMUrl(urls[0]);
- 
-       onUpdated();
-       setFileInfo(null);
--      setCampaign(url.getParam("campaign"));
- 
-       try {
-         // makeFileUID needs the nexus games list to map domain -> numeric game id.
-@@ -166,10 +158,21 @@
-     }
-   }, [urls]);
- 
--  const retry = React.useCallback(() => {
--    onRetry();
--  }, [onRetry]);
-+  React.useEffect(() => {
-+    if (!autoOpenNext) {
-+      lastAutoOpenedUrl.current = undefined;
-+      return;
-+    }
- 
-+    const current = urls[0];
-+    if (current === undefined || current === lastAutoOpenedUrl.current) {
-+      return;
-+    }
-+
-+    lastAutoOpenedUrl.current = current;
-+    onDownload(current);
-+  }, [autoOpenNext, onDownload, urls]);
-+
-   const cancel = React.useCallback(() => {
-     onCancel(urls[0]);
-   }, [onCancel, urls]);
-@@ -190,28 +193,15 @@
-     opn(`${NEXUS_BASE_URL}/${fileInfo.game.domainName}/users/${fileInfo.owner.memberId}`);
-   }, [fileInfo]);
- 
--  const goPremium = React.useCallback(() => {
--    context.api.events.emit("analytics-track-click-event", "Go Premium", "Download Mod");
--
--    opn(
--      nexusModsURL(PREMIUM_PATH, {
--        section: Section.Users,
--        campaign: Campaign.BuyPremium,
--        content: Content.DownloadModModal,
--      }),
--    ).catch(() => null);
--  }, [campaign]);
--
-   return (
-     <Modal id="free-user-dl-dialog" show={show} onHide={nop}>
-       <Modal.Header>
--        <Modal.Title>{t("Download mod")}</Modal.Title>
-+        <Modal.Title>{t("Download mod ({{count}} remaining)", { count: urls.length })}</Modal.Title>
-       </Modal.Header>
- 
-       <Modal.Body>
-         <NewFreeDownloadModal
-           fileInfo={fileInfo}
--          goPremium={goPremium}
-           openModPage={openModPage}
-           positionText={positionText}
-           t={t}
-@@ -220,6 +210,23 @@
-       </Modal.Body>
- 
-       <Modal.Footer>
-+        <Button
-+          id="auto-open-next-button"
-+          active={autoOpenNext}
-+          title={t(
-+            "Automatically open the next Nexus file page after each authorised download returns",
-+          )}
-+          onClick={() =>
-+            setAutoOpenNext((enabled) => {
-+              const next = !enabled;
-+              window.localStorage.setItem("vortex-unlocked:auto-open-next", String(next));
-+              return next;
-+            })
-+          }
-+        >
-+          {autoOpenNext ? t("Auto-open next: On") : t("Auto-open next: Off")}
-+        </Button>
-+
-         <Button id="cancel-button" onClick={cancel}>
-           {t("Cancel install")}
-         </Button>
-diff --git a/src/renderer/src/extensions/nexus_integration/views/LoginIcon.tsx b/src/renderer/src/extensions/nexus_integration/views/LoginIcon.tsx
-index 0d77c88..d9b0012 100644
---- a/src/renderer/src/extensions/nexus_integration/views/LoginIcon.tsx
-+++ b/src/renderer/src/extensions/nexus_integration/views/LoginIcon.tsx
-@@ -22,7 +22,7 @@ import { setUserInfo } from "../actions/persistent";
- import { setOauthPending } from "../actions/session";
- import { FALLBACK_AVATAR, NEXUS_BASE_URL, OAUTH_URL } from "../constants";
- import { isLoggedIn } from "../selectors";
--import type { IMembership, IValidateKeyDataV2 } from "../types/IValidateKeyData";
-+import type { IValidateKeyDataV2 } from "../types/IValidateKeyData";
- 
- export interface IBaseProps extends WithTranslation {
-   nexus: NexusT;
-@@ -58,7 +58,6 @@ class LoginIcon extends ComponentEx<IProps, {}> {
-     }
-     return (
-       <span id="login-control">
--        {this.renderMembershipStatus()}
-         {this.renderLoginName()}
-         {this.renderAvatar()}
-       </span>
-@@ -72,33 +71,8 @@ class LoginIcon extends ComponentEx<IProps, {}> {
-     onClearUserInfo();
-   };
- 
--  private getMembershipText(userInfo: IMembership): string {
--    if (userInfo?.isPremium === true) {
--      return "★ Premium";
--    } else if (userInfo?.isSupporter === true && userInfo?.isPremium === false) {
--      return "Supporter";
--    } else if (userInfo?.isLifetime === true) {
--      return "Premium";
--    }
--    return "Free";
--  }
--
--  private renderMembershipStatus = () => {
--    const { t, userInfo } = this.props;
--
--    const membership = this.getMembershipText(userInfo);
--    const classes = `membership-status ${membership.toLocaleLowerCase()}`;
--
--    if (this.isLoggedIn()) {
--      return (
--        <div id="membership-status" className={classes}>
--          <div className="membership-status-text">{membership}</div>
--        </div>
--      );
--    } else {
--      return null;
--    }
--  };
-+  // Vortex Unlocked: the membership status badge ("Free"/"Premium"/"Supporter")
-+  // is not rendered.
- 
-   private renderLoginName = () => {
-     const { t, userInfo } = this.props;
-diff --git a/src/renderer/src/extensions/nexus_integration/views/NewFreeDownloadModal.tsx b/src/renderer/src/extensions/nexus_integration/views/NewFreeDownloadModal.tsx
-index 0492857..98a8698 100644
---- a/src/renderer/src/extensions/nexus_integration/views/NewFreeDownloadModal.tsx
-+++ b/src/renderer/src/extensions/nexus_integration/views/NewFreeDownloadModal.tsx
-@@ -1,25 +1,21 @@
- import type { TFunction } from "i18next";
- import * as React from "react";
--import { Button, Panel } from "react-bootstrap";
-+import { Button } from "react-bootstrap";
- 
- import FlexLayout from "../../../controls/FlexLayout";
- import Image from "../../../controls/Image";
--import { IconButton } from "../../../controls/TooltipControls";
- import { Pictogram } from "../../../ui/components/pictogram/Pictogram";
- 
--const electricBoltIconPath = "assets/icons/electric-bolt.svg";
--
- export interface INewFreeDownloadModal {
-   t: TFunction;
-   fileInfo: any;
-   openModPage: () => void;
--  goPremium: () => void;
-   onDownload: () => void;
-   positionText: string;
- }
- 
- function NewFreeDownloadModal(props: INewFreeDownloadModal) {
--  const { t, fileInfo, openModPage, goPremium, onDownload, positionText } = props;
-+  const { t, fileInfo, openModPage, onDownload, positionText } = props;
- 
-   return (
-     <div>
-@@ -52,40 +48,28 @@ function NewFreeDownloadModal(props: INewFreeDownloadModal) {
-           )}
-         </FlexLayout.Fixed>
- 
--        {/* Second row - two columns */}
-+        {/* Vortex Unlocked: the free/premium membership comparison was removed;
-+            only the functional "fetch an authorised link" flow remains. */}
-         <FlexLayout.Fixed>
-           <FlexLayout type="row" id="bottom-row">
-             <FlexLayout.Flex>
-               <FlexLayout type="column" id="free-container">
-                 <Pictogram brand="none" className="mb-3" name="no-mod" size="xs" />
--                <div className="membership-type">Free</div>
--                <div className="title">Download one by one</div>
-+                <div className="title">{t("Fetch the download link from the website")}</div>
-                 <hr />
-                 <ul>
--                  <li>Manual download for collections</li>
--                  <li>Throttled download speeds (3 MB/s)</li>
--                  <li>Ads and delay for each download</li>
-+                  <li>{t("The download will continue automatically once the link arrives")}</li>
-+                  <li>
-+                    {t(
-+                      "You can also open the file page and start the download from there directly",
-+                    )}
-+                  </li>
-                 </ul>
-                 <Button id="download-mod-button" onClick={onDownload}>
--                  {t("Download manually")}
-+                  {t("Open file page")}
-                 </Button>
--              </FlexLayout>
--            </FlexLayout.Flex>
--
--            <FlexLayout.Flex>
--              <FlexLayout type="column" id="premium-container">
--                <Pictogram brand="premium" className="mb-3" name="premium" size="xs" />
--                <div className="membership-type">Premium</div>
--                <div className="title">Get all your mods fast</div>
--                <hr />
--                <ul>
--                  <li>Auto-download collections</li>
--                  <li>Max download speeds</li>
--                  <li>No more ads</li>
--                </ul>
--                <Button id="get-premium-button" onClick={goPremium}>
--                  <Image srcs={[electricBoltIconPath]} />
--                  {t("Auto-download all")}
-+                <Button id="mod-page-button" bsStyle="link" onClick={openModPage}>
-+                  {t("Open mod page")}
-                 </Button>
-               </FlexLayout>
-             </FlexLayout.Flex>
-diff --git a/src/renderer/src/extensions/settings_interface/SettingsInterface.tsx b/src/renderer/src/extensions/settings_interface/SettingsInterface.tsx
-index a72650a..f34b545 100644
---- a/src/renderer/src/extensions/settings_interface/SettingsInterface.tsx
-+++ b/src/renderer/src/extensions/settings_interface/SettingsInterface.tsx
-@@ -1,7 +1,7 @@
- import { readdir } from "node:fs/promises";
- import * as path from "path";
- 
--import { getErrorCode } from "@vortex/shared";
-+import { getErrorCode, getErrorMessageOrDefault } from "@vortex/shared";
- import type { IParameters } from "@vortex/shared/cli";
- import React, { useCallback, useEffect, useReducer, useRef, useState } from "react";
- import { ControlLabel, FormGroup } from "react-bootstrap";
-@@ -37,11 +37,14 @@
-   setAlwaysCompactHeaders,
-   setDesktopNotifications,
-   setForegroundDL,
-+  setHideDashboard,
-   setHideTopLevelCategory,
-   setLanguage,
-   setProfilesVisible,
-   setReduceMotion,
-   setRelativeTimes,
-+  setWebsiteLinkGen,
-+  setWebsiteLinkGenAlways,
- } from "./actions/interface";
- import { buildLanguageOptions, type ILanguage, type ILanguageOption } from "./languageOptions";
- import getText from "./texts";
-@@ -85,6 +88,17 @@
-     (state: IState) => state.settings.interface.alwaysCompactHeaders === true,
-   );
-   const foregroundDL = useSelector((state: IState) => state.settings.interface.foregroundDL);
-+  // Vortex Unlocked settings are intentionally kept in the existing interface
-+  // settings reducer so they persist with the rest of the UI preferences.
-+  const hideDashboard = useSelector(
-+    (state: IState) => (state.settings.interface as any)?.hideDashboard === true,
-+  );
-+  const websiteLinkGen = useSelector(
-+    (state: IState) => (state.settings.interface as any)?.websiteLinkGen === true,
-+  );
-+  const websiteLinkGenAlways = useSelector(
-+    (state: IState) => (state.settings.interface as any)?.websiteLinkGenAlways === true,
-+  );
-   const autoDeployment = useSelector((state: IState) => state.settings.automation.deploy);
-   const autoInstall = useSelector((state: IState) => state.settings.automation.install);
-   const autoEnable = useSelector((state: IState) => state.settings.automation.enable);
-@@ -202,6 +216,32 @@
-     });
-   };
- 
-+  const importVortexData = () => {
-+    dispatch(
-+      showDialog(
-+        "question",
-+        t("Import data from Vortex"),
-+        {
-+          text: t(
-+            "This restarts Vortex Unlocked and imports the data of your official Vortex " +
-+              "installation - profiles, mods, settings and downloads. The Vortex " +
-+              "installation is not modified and a backup of the current Vortex Unlocked " +
-+              "data is kept. Please close the official Vortex client before continuing. " +
-+              "This may take a while for large mod libraries.",
-+          ),
-+          options: { translated: true, wrap: true },
-+        },
-+        [
-+          { label: "Cancel" },
-+          {
-+            label: t("Import and restart"),
-+            action: () => relaunch(["--import-vortex-data"]),
-+          },
-+        ],
-+      ),
-+    );
-+  };
-+
-   const needRestartNotification = needRestart ? (
-     <div className="flex items-center gap-x-4 rounded-lg border border-info-weak bg-info-950 p-3">
-       <Typography brand="neutral-translucent" className="grow">
-@@ -307,8 +347,66 @@
-             {t("Bring Vortex to foreground when starting downloads in browser")}
-           </Toggle>
-         </div>
-+
-+        {/* Vortex Unlocked: fully hides the Dashboard tab from the main navigation. */}
-+        <div>
-+          <Toggle
-+            checked={hideDashboard}
-+            onToggle={(enabled) => dispatch(setHideDashboard(enabled))}
-+          >
-+            {t("Hide Dashboard tab")}
-+          </Toggle>
-+        </div>
-       </FormGroup>
- 
-+      {/* Vortex Unlocked: import data and website-session download authorisation. */}
-+      <FormGroup controlId="unlockedImport">
-+        <ControlLabel>{t("Vortex Unlocked")}</ControlLabel>
-+
-+        <div>
-+          <Typography>
-+            {t(
-+              "Vortex Unlocked keeps its data separate from the official Vortex client, " +
-+                "so both can be used side by side. Import the data of an existing " +
-+                "Vortex installation to carry over profiles, mods, settings and downloads.",
-+            )}
-+          </Typography>
-+        </div>
-+
-+        <Button brand="neutral" onClick={importVortexData}>
-+          {t("Import data from Vortex")}
-+        </Button>
-+
-+        <div>
-+          <Toggle
-+            checked={websiteLinkGen}
-+            onToggle={(enabled) => dispatch(setWebsiteLinkGen(enabled))}
-+          >
-+            {t("Auto-authorise downloads via website session")}
-+
-+            <Typography appearance="subdued" typographyType="body-sm">
-+              {t(
-+                "When the api refuses a download link, generate an authorised link " +
-+                  "automatically through the website session connected below. Applies to " +
-+                  "collection installs unless extended below. Downloads stay speed-limited " +
-+                  "by the account tier.",
-+              )}
-+            </Typography>
-+          </Toggle>
-+        </div>
-+
-+        <div>
-+          <Toggle
-+            checked={websiteLinkGenAlways}
-+            onToggle={(enabled) => dispatch(setWebsiteLinkGenAlways(enabled))}
-+          >
-+            {t("Also auto-authorise downloads outside collections")}
-+          </Toggle>
-+        </div>
-+
-+        <WebsiteSessionSection />
-+      </FormGroup>
-+
-       <FormGroup className="mt-4" controlId="accessibility">
-         <ControlLabel>{t("Accessibility")}</ControlLabel>
- 
-@@ -439,6 +537,75 @@
-   );
- }
- 
-+/**
-+ * Vortex Unlocked: connection status and login button for the embedded
-+ * nexusmods.com website session the auto-authorisation feature uses.
-+ */
-+function WebsiteSessionSection() {
-+  const { t } = useTranslation(["common"]);
-+  const [connected, setConnected] = React.useState<boolean | null>(null);
-+  const [busy, setBusy] = React.useState(false);
-+
-+  const refresh = React.useCallback(async () => {
-+    try {
-+      const res = await getPreloadApi().websiteSession.status();
-+      setConnected(res?.loggedIn === true);
-+    } catch (err) {
-+      log("warn", "failed to query website session status", {
-+        error: getErrorMessageOrDefault(err),
-+      });
-+      setConnected(null);
-+    }
-+  }, []);
-+
-+  React.useEffect(() => {
-+    void refresh();
-+  }, [refresh]);
-+
-+  const connect = React.useCallback(async () => {
-+    setBusy(true);
-+    try {
-+      await getPreloadApi().websiteSession.login();
-+      await refresh();
-+    } catch (err) {
-+      log("warn", "website session login failed", { error: getErrorMessageOrDefault(err) });
-+    } finally {
-+      setBusy(false);
-+    }
-+  }, [refresh]);
-+
-+  const disconnect = React.useCallback(async () => {
-+    setBusy(true);
-+    try {
-+      await getPreloadApi().websiteSession.logout();
-+    } catch (err) {
-+      log("warn", "website session logout failed", { error: getErrorMessageOrDefault(err) });
-+    } finally {
-+      await refresh();
-+      setBusy(false);
-+    }
-+  }, [refresh]);
-+
-+  return (
-+    <div className="flex items-center gap-x-4">
-+      <Button brand="neutral" disabled={busy} onClick={connected === true ? disconnect : connect}>
-+        {connected === true ? t("Disconnect website session") : t("Connect website session")}
-+      </Button>
-+
-+      <Typography appearance="subdued" typographyType="body-sm">
-+        {connected === null
-+          ? t("Website session status unknown")
-+          : connected === true
-+            ? t("Website session connected")
-+            : t(
-+                "Not connected - click connect and log in to nexusmods.com in the window " +
-+                  "that opens. Use the same account as in Vortex.",
-+              )}
-+      </Typography>
-+    </div>
-+  );
-+}
-+
- /** List the subdirectories of a base directory; a missing base yields none. */
- async function listSubdirectories(basePath: string): Promise<string[]> {
-   try {
-diff --git a/src/renderer/src/extensions/settings_interface/actions/interface.ts b/src/renderer/src/extensions/settings_interface/actions/interface.ts
-index cace1c1..487ded8 100644
---- a/src/renderer/src/extensions/settings_interface/actions/interface.ts
-+++ b/src/renderer/src/extensions/settings_interface/actions/interface.ts
-@@ -53,3 +53,27 @@ export const setAlwaysCompactHeaders = safeCreateAction(
-  * then the setting is absent and the operating system's preference is followed.
-  */
- export const setReduceMotion = safeCreateAction("SET_REDUCE_MOTION", (enabled: boolean) => enabled);
-+
-+/**
-+ * Vortex Unlocked: hide or show the Dashboard tab in the main navigation.
-+ */
-+export const setHideDashboard = safeCreateAction("SET_HIDE_DASHBOARD", (hide: boolean) => hide);
-+
-+/**
-+ * Vortex Unlocked: automatically authorise refused download links through the
-+ * embedded nexusmods.com website session. Applies to collection installs; see
-+ * setWebsiteLinkGenAlways for single downloads.
-+ */
-+export const setWebsiteLinkGen = safeCreateAction(
-+  "SET_WEBSITE_LINK_GEN",
-+  (enabled: boolean) => enabled,
-+);
-+
-+/**
-+ * Vortex Unlocked: extend automatic link generation to downloads outside
-+ * collection installs.
-+ */
-+export const setWebsiteLinkGenAlways = safeCreateAction(
-+  "SET_WEBSITE_LINK_GEN_ALWAYS",
-+  (enabled: boolean) => enabled,
-+);
-diff --git a/src/renderer/src/extensions/settings_interface/reducers/interface.ts b/src/renderer/src/extensions/settings_interface/reducers/interface.ts
-index e283185..19718ac 100644
---- a/src/renderer/src/extensions/settings_interface/reducers/interface.ts
-+++ b/src/renderer/src/extensions/settings_interface/reducers/interface.ts
-@@ -30,6 +30,12 @@ const settingsReducer: IReducerSpec = {
-     // Deliberately absent from the defaults below: unset means "follow the OS".
-     [actions.setReduceMotion as any]: (state, payload) =>
-       update(state, { reduceMotion: { $set: payload } }),
-+    [actions.setHideDashboard as any]: (state, payload) =>
-+      update(state, { hideDashboard: { $set: payload } }),
-+    [actions.setWebsiteLinkGen as any]: (state, payload) =>
-+      update(state, { websiteLinkGen: { $set: payload } }),
-+    [actions.setWebsiteLinkGenAlways as any]: (state, payload) =>
-+      update(state, { websiteLinkGenAlways: { $set: payload } }),
-   },
-   defaults: {
-     language: "en",
-@@ -40,6 +46,9 @@ const settingsReducer: IReducerSpec = {
-     relativeTimes: true,
-     foregroundDL: true,
-     alwaysCompactHeaders: false,
-+    hideDashboard: false,
-+    websiteLinkGen: false,
-+    websiteLinkGenAlways: false,
-     usage: {},
-   },
- };
-diff --git a/src/renderer/src/index.html b/src/renderer/src/index.html
-index a6ac1a2..29437e4 100644
---- a/src/renderer/src/index.html
-+++ b/src/renderer/src/index.html
-@@ -6,7 +6,7 @@
-             http-equiv="Content-Security-Policy"
-             content="script-src 'self' 'sha256-bFRIEmBXWkB30lOfVGw1yYX8VUoq6PSmi6cNnDehTqU='"
-         />
--        <title>Vortex</title>
-+        <title>Vortex Unlocked</title>
-         <link rel="stylesheet" href="assets/css/loadingScreen.css" />
-         <link rel="stylesheet" href="assets/css/tailwind-v4.css" />
-     </head>
-diff --git a/src/renderer/src/views/components/Header/Header.tsx b/src/renderer/src/views/components/Header/Header.tsx
-index 62728d1..7224cf9 100644
---- a/src/renderer/src/views/components/Header/Header.tsx
-+++ b/src/renderer/src/views/components/Header/Header.tsx
-@@ -14,7 +14,6 @@ import {
-   knownGames as knownGamesSelector,
- } from "../../../util/selectors";
- import { useSpineContext } from "../Spine/SpineContext";
--import { PremiumIndicator } from "./premium/PremiumIndicator";
- import { ProfileSection } from "./profile/ProfileSection";
- import { StagingIndicator } from "./StagingIndicator";
- import { VersionIndicator } from "./VersionIndicator";
-@@ -84,8 +83,6 @@ export const Header: FC<React.PropsWithChildren<unknown>> = () => {
- 
-         <VersionIndicator />
- 
--        <PremiumIndicator />
--
-         <div className="flex items-center gap-x-5">
-           <ProfileSection />
- 
-diff --git a/src/renderer/src/views/components/Spine/SpineContext.tsx b/src/renderer/src/views/components/Spine/SpineContext.tsx
-index 51fa6f2..5053c04 100644
---- a/src/renderer/src/views/components/Spine/SpineContext.tsx
-+++ b/src/renderer/src/views/components/Spine/SpineContext.tsx
-@@ -67,6 +67,11 @@ export const SpineProvider: FC<React.PropsWithChildren<unknown>> = ({
-   const dispatch = useDispatch();
- 
-   const profilesVisible = useSelector((state: IState) => state.settings.interface.profilesVisible);
-+  // Vortex Unlocked: watched so the "Hide Dashboard tab" setting re-filters
-+  // the menu immediately, without a restart.
-+  const hideDashboard = useSelector(
-+    (state: IState) => (state.settings.interface as any)?.hideDashboard === true,
-+  );
-   const lastActiveProfile = useSelector(lastActiveProfilesSelector);
-   const activeProfileId = useSelector(activeProfileIdSelector);
-   const activeGameId = useSelector(activeGameIdSelector);
-@@ -132,7 +137,14 @@ export const SpineProvider: FC<React.PropsWithChildren<unknown>> = ({
-           page.id !== "Downloads" &&
-           isPageVisible(page),
-       ),
--    [mainPages, isPageVisible, activeGameId, profilesVisible, pluginManagementEnabled],
-+    [
-+      mainPages,
-+      isPageVisible,
-+      activeGameId,
-+      profilesVisible,
-+      pluginManagementEnabled,
-+      hideDashboard,
-+    ],
-   );
- 
-   const gamePages: IMainPage[] = useMemo(
-diff --git a/src/renderer/src/views/layout/PageGroup.tsx b/src/renderer/src/views/layout/PageGroup.tsx
-index 6535760..14a55e4 100644
---- a/src/renderer/src/views/layout/PageGroup.tsx
-+++ b/src/renderer/src/views/layout/PageGroup.tsx
-@@ -2,10 +2,12 @@ import { getErrorMessageOrDefault } from "@vortex/shared";
- import React, { memo, useMemo, type FC } from "react";
- import { Nav } from "react-bootstrap";
- import { useTranslation } from "react-i18next";
-+import { useSelector } from "react-redux";
- 
- import { NavItem } from "../../controls/TooltipControls";
- import { log } from "../../logging";
- import type { IMainPage } from "../../types/IMainPage";
-+import type { IState } from "../../types/IState";
- import { PageButton } from "../PageButton";
- 
- export interface IPageGroupProps {
-@@ -27,6 +29,12 @@ export const PageGroup: FC<React.PropsWithChildren<IPageGroupProps>> = memo((pro
- 
-   const { t } = useTranslation();
- 
-+  // Vortex Unlocked: watched so the "Hide Dashboard tab" setting re-filters
-+  // the classic-layout sidebar immediately, without a restart.
-+  const hideDashboard = useSelector(
-+    (state: IState) => (state.settings.interface as any)?.hideDashboard === true,
-+  );
-+
-   const visiblePages = useMemo(() => {
-     return pages.filter((page) => {
-       try {
-@@ -39,7 +47,7 @@ export const PageGroup: FC<React.PropsWithChildren<IPageGroupProps>> = memo((pro
-         return false;
-       }
-     });
--  }, [pages]);
-+  }, [pages, hideDashboard]);
- 
-   if (visiblePages.length === 0) {
-     return null;
-diff --git a/src/shared/src/types/ipc.ts b/src/shared/src/types/ipc.ts
-index b5b9ac5..6b7f9f6 100644
---- a/src/shared/src/types/ipc.ts
-+++ b/src/shared/src/types/ipc.ts
-@@ -629,6 +629,28 @@
-   "fs:stream-read": (handle: number, max: number) => Promise<StreamReadReply>;
-   "fs:stream-write": (handle: number, bytes: Uint8Array) => Promise<void>;
-   "fs:stream-close": (handle: number) => Promise<void>;
-+
-+  // Vortex Unlocked: the embedded nexusmods.com website session, used to
-+  // auto-authorise download links the api would refuse for the account tier.
-+  /** Whether the website session is logged in (login cookies present). */
-+  "website-session:status": () => Promise<{ loggedIn: boolean }>;
-+  /** Open the login window; resolves once the session cookie appears or the window is closed. */
-+  "website-session:login": () => Promise<{ ok: boolean; reason?: string }>;
-+  /** Wipe the website session (cookies and storage of its partition). */
-+  "website-session:logout": () => Promise<void>;
-+  /**
-+   * Generate an authorised download link for one file through the website
-+   * session, returning it as a keyed nxm:// url the download pipeline can
-+   * resolve directly. Serialized and paced server-side courtesy.
-+   */
-+  "website-session:generate": (request: {
-+    /** game domain, e.g. "fallout4" - used to build the nxm url */
-+    domain: string;
-+    /** numeric game id, as expected by the website endpoint's game_id param */
-+    gameId: string;
-+    modId: number;
-+    fileId: number;
-+  }) => Promise<{ ok: boolean; nxmUrl?: string; reason?: string }>;
- }
- 
- /** Wire reply of {@link InvokeChannels["fs:stream-read"]}. `bytes` holds the
-diff --git a/src/shared/src/types/preload.ts b/src/shared/src/types/preload.ts
-index 4299c4a..d3b998e 100644
---- a/src/shared/src/types/preload.ts
-+++ b/src/shared/src/types/preload.ts
-@@ -82,6 +82,9 @@ export interface Api {
-   /** Session APIs */
-   session: Session;
- 
-+  /** Vortex Unlocked: embedded nexusmods.com website session APIs */
-+  websiteSession: WebsiteSessionApi;
-+
-   /** Window APIs */
-   window: WindowAPI;
- 
-@@ -240,6 +243,26 @@ export interface Session {
-   getCookies(filter: CookiesGetFilter): Promise<Cookie[]>;
- }
- 
-+/**
-+ * Vortex Unlocked: the embedded nexusmods.com website session, used to
-+ * auto-authorise download links the api refuses for the account tier.
-+ */
-+export interface WebsiteSessionApi {
-+  /** Whether the website session is logged in (login cookies present). */
-+  status(): Promise<{ loggedIn: boolean }>;
-+  /** Open the login window; resolves once logged in or the window is closed. */
-+  login(): Promise<{ ok: boolean; reason?: string }>;
-+  /** Wipe the website session. */
-+  logout(): Promise<void>;
-+  /** Generate an authorised (keyed) nxm link for one file. */
-+  generateLink(request: {
-+    domain: string;
-+    gameId: string;
-+    modId: number;
-+    fileId: number;
-+  }): Promise<{ ok: boolean; nxmUrl?: string; reason?: string }>;
-+}
-+
- export interface WindowAPI {
-   /** Get the current window ID */
-   getId(): Promise<number>;
-diff --git a/src/renderer/src/extensions/health_check/views/HealthCheckPage.tsx b/src/renderer/src/extensions/health_check/views/HealthCheckPage.tsx
-index cc6d979..2e4571c 100644
---- a/src/renderer/src/extensions/health_check/views/HealthCheckPage.tsx
-+++ b/src/renderer/src/extensions/health_check/views/HealthCheckPage.tsx
-@@ -16,7 +16,6 @@
- import type { IState } from "@/types/IState";
- import { Button } from "@/ui/components/button/Button";
- import { NoResults } from "@/ui/components/no_results/NoResults";
--import { PremiumBadge } from "@/ui/components/premium_badge/PremiumBadge";
- import { TabBar } from "@/ui/components/tabs/TabBar";
- import { TabButton } from "@/ui/components/tabs/TabButton";
- import { TabPanel } from "@/ui/components/tabs/TabPanel";
-@@ -31,12 +30,10 @@
- import { PageHeader } from "@/views/components/Page/PageHeader";
- import { PageScroll } from "@/views/components/Page/PageScroll";
- 
--import { isLoggedIn, shouldShowPremiumAd } from "../../nexus_integration/selectors";
-+import { isLoggedIn } from "../../nexus_integration/selectors";
- import { AuthorNotesModal } from "../components/author_notes_modal/AuthorNotesModal";
- import { BetaBadge } from "../components/beta_badge/BetaBadge";
- import { IssueSection } from "../components/issue_section/IssueSection";
--import { PremiumBanner } from "../components/premium_banner/PremiumBanner";
--import { PremiumModal } from "../components/premium_modal/PremiumModal";
- import { createHealthCheckTracker } from "../hooks/healthCheckTracker";
- import { HealthCheckTrackingProvider, IssueProvider } from "../hooks/HealthCheckTracking.context";
- import {
-@@ -152,9 +149,6 @@
-   const modResult = useSelector(modRequirementsCheckResult);
-   const hiddenFile = useSelector(hiddenFileRequirements);
-   const hiddenMod = useSelector(hiddenModRequirements);
--  const showPremiumAd = useSelector(shouldShowPremiumAd);
--  // The section whose install all is waiting on the premium modal.
--  const [premiumInstallType, setPremiumInstallType] = useState<IssueType | undefined>();
-   // The section whose install all is waiting on the author notes review.
-   const [notesInstallType, setNotesInstallType] = useState<IssueType | undefined>();
-   const isRefreshing = useSelector(isAnyHealthCheckRunning);
-@@ -254,7 +248,6 @@
-   const activeCount = activeItems.length;
-   const hiddenCount = hiddenItems.length;
-   // Without tabs the active list is all there is, and selectedTab stays on it.
--  const listIsEmpty = selectedTab === "hidden" ? hiddenCount === 0 : activeCount === 0;
- 
-   const renderRow = (item: IListedEntry) => {
-     const { content, entry } = item;
-@@ -293,9 +286,9 @@
-     sectionItems.forEach((item) => item.content.toggleHide?.(api, item.entry));
-   };
- 
--  // 1-click install all: premium-gated for free users. Items are de-duplicated first by
--  // collectInstallAllItems (by key) and again here at execution time via the seen set,
--  // so a file shared across multiple source reports is only queued once.
-+  // Vortex Unlocked: bulk remediation uses the normal download/install path for every
-+  // account. Keep upstream's de-duplication and author-note review, but remove the
-+  // subscription gate.
-   const runInstallAll = (items: IBulkInstallItem[]) => {
-     const seen = new Set<string>();
- 
-@@ -314,11 +307,6 @@
-       mod_count: installAllItems[issueType].length,
-     });
- 
--    if (showPremiumAd) {
--      setPremiumInstallType(issueType);
--      return;
--    }
--
-     reviewThenInstall(issueType);
-   };
- 
-@@ -363,7 +351,6 @@
-                   <Button
-                     brand="neutral"
-                     leftIconPath={mdiMonitorArrowDownVariant}
--                    rightIcon={showPremiumAd ? <PremiumBadge /> : undefined}
-                     size="sm"
-                     onClick={() => installAll(issueType, sectionItems.length)}
-                   >
-@@ -495,21 +482,6 @@
-             activeList
-           )}
- 
--          {!listIsEmpty && (
--            <PremiumBanner api={api} placement="list" totalIssues={activeCount + hiddenCount} />
--          )}
--
--          <PremiumModal
--            api={api}
--            downloadScope="all"
--            isOpen={premiumInstallType !== undefined}
--            modCount={premiumInstallType ? installAllItems[premiumInstallType].length : 0}
--            trigger="install_all"
--            onClose={() => setPremiumInstallType(undefined)}
--            onDownload={() => setPremiumInstallType(undefined)}
--            onPremiumUnlocked={() => premiumInstallType && reviewThenInstall(premiumInstallType)}
--          />
--
-           <AuthorNotesModal
-             isOpen={notesInstallType !== undefined}
-             // Falls back while closing, so the list doesn't empty mid-transition.
-diff --git a/src/renderer/src/extensions/health_check/hooks/useModRequirementActions.ts b/src/renderer/src/extensions/health_check/hooks/useModRequirementActions.ts
-index c4e7fd8..6e30b80 100644
---- a/src/renderer/src/extensions/health_check/hooks/useModRequirementActions.ts
-+++ b/src/renderer/src/extensions/health_check/hooks/useModRequirementActions.ts
-@@ -2,7 +2,6 @@
- import { useSelector } from "react-redux";
- 
- import { onDownloadRequirement } from "@/extensions/health_check/utils/modRequirements/onDownloadRequirement";
--import { shouldShowPremiumAd } from "@/extensions/nexus_integration/selectors";
- import type { IExtensionApi } from "@/types/IExtensionContext";
- import opn from "@/util/opn";
- 
-@@ -13,7 +12,7 @@
- 
- /**
-  * Shared action logic for a single mod requirement, used by both the listing row
-- * and the detail view: premium-gated 1-click install, thumbs feedback (with
-+ * and the detail view: 1-click install, thumbs feedback (with
-  * analytics + the negative-reason modal), and opening the mod page. Keeps the two
-  * call sites behaviourally identical.
-  *
-@@ -34,7 +33,9 @@
-     [feedbackMap, mod.requiredBy.modId, mod.id],
-   );
- 
--  const showPremiumAd = useSelector(shouldShowPremiumAd);
-+  // Vortex Unlocked: this client-side gate is deliberately open. The actual
-+  // download still goes through the normal Nexus resolver and server policy.
-+  const showPremiumAd = false;
- 
-   const openModPage = useCallback(() => {
-     if (mod.modUrl) {
-@@ -42,16 +43,11 @@
-     }
-   }, [mod.modUrl]);
- 
--  // 1-click install is a Premium feature; free users get the upgrade prompt
--  // (which routes them to the mod page) instead of an in-app download.
-+  // Vortex Unlocked: use the normal in-app download path for every account.
-   // onDownloadRequirement reports its own failures and never rejects, so the
-   // fire-and-forget call sites have nothing to catch; a failed install leaves the
-   // detail page open rather than navigating away from the issue.
-   const installInApp = useCallback(async () => {
--    if (showPremiumAd) {
--      setShowPremiumModal(true);
--      return;
--    }
-     if (await onDownloadRequirement(api, mod, undefined, identity)) {
-       onInstalled?.();
-     }
+     downloader: {
+-      start: (dest, collationId, downloadId) =>
+-        betterIpcRenderer.invoke("download:start", dest, collationId, downloadId),
++      start: (dest, collationId, downloadId, priority) =>
++        betterIpcRenderer.invoke("download:start", dest, collationId, downloadId, priority),
+       pause: (downloadId) => betterIpcRenderer.invoke("download:pause", downloadId),
+       resume: (checkpoint) => betterIpcRenderer.invoke("download:resume", checkpoint),
+       cancel: (downloadId) => betterIpcRenderer.invoke("download:cancel", downloadId),
 diff --git a/src/renderer/src/IPCDownloadAdapter.ts b/src/renderer/src/IPCDownloadAdapter.ts
-index b74a8a5..fa4cd0b 100644
+index b74a8a52a5a5d0b7310657c830f2195de5f67346..fa4cd0bc097da67d6a289372d38ea2f8a576c63e 100644
 --- a/src/renderer/src/IPCDownloadAdapter.ts
 +++ b/src/renderer/src/IPCDownloadAdapter.ts
-@@ -35,7 +35,6 @@
+@@ -35,7 +35,6 @@ import {
    initDownload,
    pauseDownload,
    removeDownload,
@@ -3347,7 +1623,7 @@ index b74a8a5..fa4cd0b 100644
    setCompatibleGames,
    setDownloadFilePath,
    setDownloadHash,
-@@ -144,11 +143,19 @@
+@@ -144,11 +143,19 @@ type ActiveDownload = {
    callback?: (err: Error | null, id?: string) => void;
    fileNameHint?: string;
    allowInstall?: boolean;
@@ -3367,7 +1643,7 @@ index b74a8a5..fa4cd0b 100644
  export class IPCDownloadAdapter {
    readonly #api: IExtensionApi;
    readonly #handlers: Record<string, ProtocolHandler> = {};
-@@ -158,6 +165,8 @@
+@@ -158,6 +165,8 @@ export class IPCDownloadAdapter {
    // into download.modInfo once the downloadId is known. The nxm resolver returns
    // nexus IDs (modId/fileId or collectionId/revisionId) here.
    readonly #resolvedMeta = new Map<number, unknown>();
@@ -3376,7 +1652,7 @@ index b74a8a5..fa4cd0b 100644
    readonly #activeDownloads = new Map<string, ActiveDownload>();
    // Ids with a restore in flight. A restore un-pauses the record and clears its checkpoint before
    // awaiting the fresh start, so without this guard a second resume-download for the same id would
-@@ -168,6 +177,11 @@
+@@ -168,6 +177,11 @@ export class IPCDownloadAdapter {
    #nextCollationId = 0;
    #currentMaxParallelDownloads: number | undefined;
    #currentMaxBandwidth: number | undefined;
@@ -3388,7 +1664,7 @@ index b74a8a5..fa4cd0b 100644
  
    constructor(api: IExtensionApi) {
      this.#api = api;
-@@ -257,12 +271,128 @@
+@@ -257,12 +271,128 @@ export class IPCDownloadAdapter {
      });
    }
  
@@ -3518,7 +1794,7 @@ index b74a8a5..fa4cd0b 100644
  
      this.#api.store.subscribe(() => {
        const { maxParallelDownloads: concurrency, maxBandwidth: bandwidth } =
-@@ -273,7 +403,8 @@
+@@ -273,7 +403,8 @@ export class IPCDownloadAdapter {
        ) {
          this.#currentMaxParallelDownloads = concurrency;
          this.#currentMaxBandwidth = bandwidth;
@@ -3528,7 +1804,7 @@ index b74a8a5..fa4cd0b 100644
        }
      });
  
-@@ -297,33 +428,19 @@
+@@ -297,33 +428,19 @@ export class IPCDownloadAdapter {
            this.#api.store.dispatch(setDownloadInterrupted(id, download.received));
          });
        } else {
@@ -3570,7 +1846,7 @@ index b74a8a5..fa4cd0b 100644
    #emitAnalytics(
      downloadId: string,
      eventType: "started" | "completed" | "failed" | "canceled",
-@@ -605,14 +722,23 @@
+@@ -605,14 +722,23 @@ export class IPCDownloadAdapter {
          collationId,
        });
  
@@ -3595,7 +1871,7 @@ index b74a8a5..fa4cd0b 100644
          lastBytesReceived: 0,
          lastProgressDispatch: 0,
          startedEventEmitted: false,
-@@ -650,6 +776,7 @@
+@@ -650,6 +776,7 @@ export class IPCDownloadAdapter {
        }
      } catch (err) {
        this.#resolvedMeta.delete(collationId);
@@ -3603,7 +1879,7 @@ index b74a8a5..fa4cd0b 100644
        callback?.(unknownToError(err));
      }
    }
-@@ -876,10 +1003,14 @@
+@@ -876,10 +1003,14 @@ export class IPCDownloadAdapter {
        await rm(dest, { force: true });
        this.#api.store.dispatch(clearDownloadCheckpoint(downloadId));
  
@@ -3619,7 +1895,7 @@ index b74a8a5..fa4cd0b 100644
        } catch (err) {
          // The partial and checkpoint are already gone, so mark the record failed rather than
          // leaving it stuck in an active state the poll loop never tracks.
-@@ -888,6 +1019,7 @@
+@@ -888,6 +1019,7 @@ export class IPCDownloadAdapter {
        } finally {
          this.#pending.delete(collationId);
          this.#resolvedMeta.delete(collationId);
@@ -3627,7 +1903,7 @@ index b74a8a5..fa4cd0b 100644
        }
  
        // Register the poll entry after start resolves (as #handleStartDownload does) so the poll
-@@ -897,6 +1029,7 @@
+@@ -897,6 +1029,7 @@ export class IPCDownloadAdapter {
        this.#activeDownloads.set(downloadId, {
          callback,
          allowInstall,
@@ -3635,7 +1911,7 @@ index b74a8a5..fa4cd0b 100644
          lastBytesReceived: 0,
          lastProgressDispatch: 0,
          startedEventEmitted: false,
-@@ -980,6 +1113,7 @@
+@@ -980,6 +1113,7 @@ export class IPCDownloadAdapter {
        this.#api.store.dispatch(clearDownloadCheckpoint(downloadId));
  
        if (state.status === "completed") {
@@ -3643,7 +1919,7 @@ index b74a8a5..fa4cd0b 100644
          this.#emitAnalytics(downloadId, "completed");
          this.#completeDownload(downloadId, state, activeDownload).catch((err) => {
            log("error", "failed to finalize download", { downloadId, err });
-@@ -990,6 +1124,8 @@
+@@ -990,6 +1124,8 @@ export class IPCDownloadAdapter {
          this.#api.store.dispatch(removeDownload(downloadId));
          activeDownload.callback?.(new UserCanceled(), downloadId);
        } else {
@@ -3652,7 +1928,7 @@ index b74a8a5..fa4cd0b 100644
          this.#emitAnalytics(downloadId, "failed", err ?? undefined);
          // Mark record as failed so the UI can show an error state.
          this.#api.store.dispatch(finishDownload(downloadId, "failed", err));
-@@ -1019,6 +1155,7 @@
+@@ -1019,6 +1155,7 @@ export class IPCDownloadAdapter {
            // Update speed display and speedHistory for the download graph.
            // Aggregated over 1s to avoid thrashing Redux with every poll tick.
            this.#api.store.dispatch(setDownloadSpeed(Math.round(speed)));
@@ -3660,7 +1936,7 @@ index b74a8a5..fa4cd0b 100644
          }
        }
      }
-@@ -1053,12 +1190,29 @@
+@@ -1053,12 +1190,29 @@ export class IPCDownloadAdapter {
          this.#resolvedMeta.set(collationId, resolved.meta);
        }
  
@@ -3692,155 +1968,96 @@ index b74a8a5..fa4cd0b 100644
        return { probeEndpoint: { url: encodedUrl.url.toString(), headers } };
      }
  
-diff --git a/src/main/src/downloading/manager.ts b/src/main/src/downloading/manager.ts
-index 879f372..624a5cf 100644
---- a/src/main/src/downloading/manager.ts
-+++ b/src/main/src/downloading/manager.ts
-@@ -202,8 +202,9 @@
-     chunker: Chunker<T> = staticChunker(),
-     retry: RetryStrategy = defaultRetryStrategy(),
-     downloadId?: string,
-+    priority = 0,
-   ): DownloadHandle<T> {
--    return this.#download(resource, dest, resolver, chunker, retry, undefined, downloadId);
-+    return this.#download(resource, dest, resolver, chunker, retry, undefined, downloadId, priority);
-   }
+diff --git a/src/renderer/src/extensions/about_dialog/views/AboutPage.tsx b/src/renderer/src/extensions/about_dialog/views/AboutPage.tsx
+index 7645efcb4aa86a5377faea39e9a71638e629d0fe..96bd53d19cce24532ac5a1e10f5044eb5372083b 100644
+--- a/src/renderer/src/extensions/about_dialog/views/AboutPage.tsx
++++ b/src/renderer/src/extensions/about_dialog/views/AboutPage.tsx
+@@ -168,11 +168,17 @@ class AboutPage extends ComponentEx<IProps, IComponentState> {
+               </Media.Left>
+               <Media.Body>
+                 <h2 className="media-heading">
+-                  Vortex {this.mVersion}{" "}
++                  Vortex Unlocked {this.mVersion}{" "}
+                   {releaseDate !== undefined
+                     ? `(${releaseDate.toLocaleDateString(I18next.language)})`
+                     : ""}
+                 </h2>
++                <p>
++                  Unlocked by{" "}
++                  <a onClick={() => opn("https://github.com/Chaython").catch(() => null)}>
++                    https://github.com/Chaython
++                  </a>
++                </p>
+                 <p>&#169;2026 Black Tree Gaming Ltd.</p>
+                 <p>
+                   {t("Released under")} <a onClick={this.showOwnLicense}>GPL-3</a> {t("License")}
+diff --git a/src/renderer/src/extensions/analytics/index.ts b/src/renderer/src/extensions/analytics/index.ts
+index 8b2b8e7c3964b433b2ef639b108d9341f81bd204..94409e7893440ed9674302afb7687c16c3ec89dd 100644
+--- a/src/renderer/src/extensions/analytics/index.ts
++++ b/src/renderer/src/extensions/analytics/index.ts
+@@ -24,12 +24,24 @@ import SettingsAnalytics from "./views/SettingsAnalytics";
  
-   #download<T>(
-@@ -214,6 +215,7 @@
-     retry: RetryStrategy,
-     checkpoint?: DownloadCheckpoint<T>,
-     downloadId: string = randomUUID(),
-+    priority = 0,
-   ): DownloadHandle<T> {
-     const progressReporter = new ProgressReporter();
-     const abortController = new AbortController();
-@@ -241,7 +243,7 @@
-           userAgent: this.#userAgent,
-         },
-       );
--    });
-+    }, { priority });
+ let ignoreNextAnalyticsStateChange = false;
  
-     // Swallow all rejections on one fork so that pause()/cancel() flows
-     // never surface as unhandled rejections.
-diff --git a/src/main/src/downloading/ipc.ts b/src/main/src/downloading/ipc.ts
-index 0520c23..051fcc3 100644
---- a/src/main/src/downloading/ipc.ts
-+++ b/src/main/src/downloading/ipc.ts
-@@ -20,12 +20,21 @@
- function wireToResolvedResource(wire: WireResolvedResource): ResolvedResource {
-   const probe = wireToResolvedEndpoint(wire.probeEndpoint);
-   if (!wire.chunkEndpoints?.length) return probe;
++/** Vortex Unlocked: analytics and event reporting are permanently disabled. */
++const ANALYTICS_ENABLED: boolean = false;
 +
-+  // Each call for a chunk may be a retry. Rotate that chunk through the
-+  // authorised endpoint set so a transiently bad mirror does not pin the retry
-+  // strategy to the same host. The downloader sends the probe's strong ETag as
-+  // If-Match on ranged requests, so an inconsistent mirror is rejected safely.
-+  const attempts = new Map<number, number>();
-   return {
-     probeEndpoint: probe,
--    chunkEndpoint: (chunk) =>
--      Promise.resolve(
--        wireToResolvedEndpoint(wire.chunkEndpoints?.[chunk.index] ?? wire.probeEndpoint),
--      ),
-+    chunkEndpoint: (chunk) => {
-+      const attempt = attempts.get(chunk.index) ?? 0;
-+      attempts.set(chunk.index, attempt + 1);
-+      const idx = (chunk.index + attempt) % wire.chunkEndpoints!.length;
-+      const endpoint = wire.chunkEndpoints?.[idx] ?? wire.probeEndpoint;
-+      return Promise.resolve(wireToResolvedEndpoint(endpoint));
-+    },
-   };
+ function init(context: IExtensionContext): boolean {
+   context.registerReducer(["settings", "analytics"], settingsReducer);
+   context.registerReducer(["persistent", "analyticsTelemetry"], telemetryReducer);
+   context.registerSettings("Vortex", SettingsAnalytics, undefined, undefined, 110);
+ 
+   context.once(() => {
++    // Vortex Unlocked: usage analytics / event reporting is disabled.
++    // No mixpanel session is started, no consent dialog is raised and no
++    // analytics event listeners are registered. The settings page remains,
++    // but toggling it no longer enables any tracking.
++    if (!ANALYTICS_ENABLED) {
++      analyticsLog("info", "Vortex Unlocked: analytics disabled");
++      return;
++    }
++
+     const enabled = () => context.api.store.getState().settings.analytics.enabled;
+     const getUserInfo = () => context.api.store.getState().persistent.nexus.userInfo;
+     // `?? true` because state persisted before the setting existed has no value for it.
+diff --git a/src/renderer/src/extensions/collections/index.ts b/src/renderer/src/extensions/collections/index.ts
+index 50e884d56b24a52910e1a3ecb30efc5197f9915a..85ae79b3e7f6a29f5e004529ef25e0ee9efbb27d 100644
+--- a/src/renderer/src/extensions/collections/index.ts
++++ b/src/renderer/src/extensions/collections/index.ts
+@@ -1685,26 +1685,10 @@ function once(api: IExtensionApi, collectionsCB: () => ICallbackMap) {
+   api.onStateChange(["persistent", "nexus", "userInfo"], (prev, cur) => {
+     const gameMode = selectors.activeGameId(api.getState());
+     updateOwnCollectionsCB(gameMode);
+-    if (prev?.isPremium !== cur?.isPremium) {
+-      restartDebouncer.schedule();
+-    }
++    // Vortex Unlocked: membership no longer changes, so the install-driver
++    // restart on a plan change is gone with it.
+   });
+ 
+-  const restartDebouncer = new Debouncer(
+-    async () => {
+-      if (driver?.collection !== undefined) {
+-        // user info changed, so we need to update the collection info
+-        await api.emitAndAwait("reset-dependency-installs");
+-        const profile = selectors.activeProfile(api.getState());
+-        await driver.start(profile, driver.collection);
+-      }
+-      return Promise.resolve();
+-    },
+-    2000,
+-    true,
+-    false,
+-  );
+-
+   driver.infoCache.clearCache();
  }
  
-@@ -41,7 +50,9 @@
- 
-   const webContentsByDownloadId = new Map<string, WebContents>();
- 
--  betterIpcMain.handle("download:start", async (event, dest, collationId, downloadId) => {
-+  betterIpcMain.handle(
-+    "download:start",
-+    async (event, dest, collationId, downloadId, priority) => {
-     const webContents = event.sender;
-     // free users must click through the website serially at their own pace (~10-13s each),
-     // so any wall-clock timer abandons every download past the first few in a batch.
-@@ -55,13 +66,22 @@
-     );
-     const resource = wireToResolvedResource(wireResource);
-     const resolver = () => Promise.resolve(resource);
--    const handle = manager.download(resource, dest, resolver, undefined, undefined, downloadId);
-+    const handle = manager.download(
-+      resource,
-+      dest,
-+      resolver,
-+      undefined,
-+      undefined,
-+      downloadId,
-+      Number(priority ?? 0),
-+    );
-     webContentsByDownloadId.set(handle.downloadId, webContents);
-     handle.promise.catch((err) =>
-       log("error", "download failed", { downloadId: handle.downloadId, err }),
-     );
--    return { downloadId: handle.downloadId };
--  });
-+      return { downloadId: handle.downloadId };
-+    },
-+  );
- 
-   betterIpcMain.handle("download:cancel", (_event, downloadId) => {
-     manager.cancel(downloadId);
-diff --git a/src/shared/src/types/preload.ts b/src/shared/src/types/preload.ts
-index 9cda621..b8a7353 100644
---- a/src/shared/src/types/preload.ts
-+++ b/src/shared/src/types/preload.ts
-@@ -546,7 +546,12 @@
-    * Passing `downloadId` restores an existing download: the transfer starts from
-    * scratch under that id, replacing any previous attempt tracked for it.
-    */
--  start(dest: string, collationId: number, downloadId?: string): Promise<{ downloadId: string }>;
-+  start(
-+    dest: string,
-+    collationId: number,
-+    downloadId?: string,
-+    priority?: number,
-+  ): Promise<{ downloadId: string }>;
- 
-   /** Pauses an active download and returns a checkpoint for later resumption. */
-   pause(downloadId: string): Promise<WireDownloadCheckpoint>;
-diff --git a/src/shared/src/types/ipc.ts b/src/shared/src/types/ipc.ts
-index acf7d96..61f898f 100644
---- a/src/shared/src/types/ipc.ts
-+++ b/src/shared/src/types/ipc.ts
-@@ -521,6 +521,7 @@
-     dest: string,
-     collationId: number,
-     downloadId?: string,
-+    priority?: number,
-   ) => Promise<{ downloadId: string }>;
-   "download:pause": (downloadId: string) => Promise<WireDownloadCheckpoint>;
-   "download:resume": (checkpoint: WireDownloadCheckpoint) => Promise<void>;
-diff --git a/src/preload/src/index.ts b/src/preload/src/index.ts
-index ca10f57..88ab5de 100644
---- a/src/preload/src/index.ts
-+++ b/src/preload/src/index.ts
-@@ -235,8 +235,8 @@
-     },
- 
-     downloader: {
--      start: (dest, collationId, downloadId) =>
--        betterIpcRenderer.invoke("download:start", dest, collationId, downloadId),
-+      start: (dest, collationId, downloadId, priority) =>
-+        betterIpcRenderer.invoke("download:start", dest, collationId, downloadId, priority),
-       pause: (downloadId) => betterIpcRenderer.invoke("download:pause", downloadId),
-       resume: (checkpoint) => betterIpcRenderer.invoke("download:resume", checkpoint),
-       cancel: (downloadId) => betterIpcRenderer.invoke("download:cancel", downloadId),
 diff --git a/src/renderer/src/extensions/collections/util/InstallDriver.ts b/src/renderer/src/extensions/collections/util/InstallDriver.ts
-index b4e2e2a..89c554c 100644
+index 03f192f5d0d3453510b0038aad786a82f8ae9931..230ebf4b7b7267882175cc74d21054d9323f0444 100644
 --- a/src/renderer/src/extensions/collections/util/InstallDriver.ts
 +++ b/src/renderer/src/extensions/collections/util/InstallDriver.ts
-@@ -542,6 +542,47 @@
+@@ -542,6 +542,47 @@ class InstallDriver {
      this.triggerUpdate();
    }
  
@@ -3889,10 +2106,10 @@ index b4e2e2a..89c554c 100644
      if (this.mCollection === undefined || this.mProfile?.id === undefined) {
        return;
 diff --git a/src/renderer/src/extensions/collections/views/InstallDialog/InstallFinishedDialog.tsx b/src/renderer/src/extensions/collections/views/InstallDialog/InstallFinishedDialog.tsx
-index 89a54b7..bbce868 100644
+index a1f2d41725a97dc1c7002750e53ebff9ccd002ec..52ed148e89bc121dbbf49de659bdd9b530a15c59 100644
 --- a/src/renderer/src/extensions/collections/views/InstallDialog/InstallFinishedDialog.tsx
 +++ b/src/renderer/src/extensions/collections/views/InstallDialog/InstallFinishedDialog.tsx
-@@ -87,6 +87,13 @@
+@@ -88,6 +88,13 @@ function InstallFinishedDialog(props: IInstallFinishedDialogProps) {
    // Open the collection's Mods tab filtered to the failed members. Navigate, clear any existing
    // filter, then set the status column ("collection_status") filter to "Failed" (a multi-select
    // OptionsFilter, so the value is an array).
@@ -3906,7 +2123,7 @@ index 89a54b7..bbce868 100644
    const viewFailed = React.useCallback(async () => {
      if (driver.collection !== undefined) {
        api.events.emit("view-collection", driver.collection.id, "mods");
-@@ -277,6 +284,10 @@
+@@ -281,6 +288,10 @@ function InstallFinishedDialog(props: IInstallFinishedDialogProps) {
  
        {hasFailures ? (
          <Modal.Footer>
@@ -3917,3 +2134,1777 @@ index 89a54b7..bbce868 100644
            <Button disabled={finalizing} onClick={viewFailed}>
              {t("View failed mods")}
            </Button>
+diff --git a/src/renderer/src/extensions/collections/views/InstallDialog/InstallStartDialog.tsx b/src/renderer/src/extensions/collections/views/InstallDialog/InstallStartDialog.tsx
+index a6378b50ddd82cf1012bb94bb917aa5f48fa733b..05cec2aee8868a664a25fd99427387b9d35d139c 100644
+--- a/src/renderer/src/extensions/collections/views/InstallDialog/InstallStartDialog.tsx
++++ b/src/renderer/src/extensions/collections/views/InstallDialog/InstallStartDialog.tsx
+@@ -14,7 +14,9 @@ import Modal from "../../../../controls/Modal";
+ import More from "../../../../controls/More";
+ import Toggle from "../../../../controls/Toggle";
+ import { getGame } from "../../../../extensions/gamemode_management/util/getGame";
++import type { IDownload } from "../../../../extensions/download_management/types/IDownload";
+ import type { IMod, IModRule } from "../../../../extensions/mod_management/types/IMod";
++import { findDownloadByRef } from "../../../../extensions/mod_management/util/dependencies";
+ import renderModName from "../../../../extensions/mod_management/util/modName";
+ import getTextProfileManagement from "../../../../extensions/profile_management/texts";
+ import type { IProfile } from "../../../../extensions/profile_management/types/IProfile";
+@@ -38,7 +40,7 @@ interface IInstallDialogProps {
+ interface IConnectedProps {
+   allProfiles: { [profileId: string]: IProfile };
+   mods: { [modId: string]: IMod };
+-  isPremium: boolean;
++  downloads: { [downloadId: string]: IDownload };
+   userInfo: { userId: number };
+   nextProfileId: string;
+   collectionsInstallWhileDownloading: boolean;
+@@ -225,6 +227,15 @@ class InstallDialog extends ComponentEx<IProps, IInstallDialogState> {
+     const ownCollection: boolean =
+       userInfo?.userId !== undefined && driver.collectionInfo?.user?.memberId === userInfo?.userId;
+     const collectionName = renderModName(driver.collection);
++    const dependencyRules = (driver.collection?.rules ?? []).filter(
++      (rule) => rule.type === "requires" || rule.type === "recommends",
++    );
++    const requiredCount = dependencyRules.filter((rule) => rule.type === "requires").length;
++    const optionalCount = dependencyRules.length - requiredCount;
++    const cachedCount = dependencyRules.filter(
++      (rule) => findDownloadByRef(rule.reference, this.props.downloads) !== undefined,
++    ).length;
++    const missingDownloadCount = dependencyRules.length - cachedCount;
+     return (
+       <Modal show={driver.collection !== undefined && driver.step === "query"} onHide={nop}>
+         <Modal.Header>
+@@ -299,6 +310,25 @@ class InstallDialog extends ComponentEx<IProps, IInstallDialogState> {
+             />
+           )}
+ 
++          <div className="collections-preflight-summary">
++            <strong>{t("Preflight")}</strong>
++            <p>
++              {t("{{required}} required mods, {{optional}} optional mods", {
++                replace: { required: requiredCount, optional: optionalCount },
++              })}
++            </p>
++            <p>
++              {t("{{cached}} archives already available, {{missing}} still need downloading", {
++                replace: { cached: cachedCount, missing: missingDownloadCount },
++              })}
++            </p>
++            <p>
++              {this.props.collectionsInstallWhileDownloading
++                ? t("Downloads and installs will be pipelined to reduce total install time.")
++                : t("Mods will finish downloading before installation begins.")}
++            </p>
++          </div>
++
+           <Toggle
+             checked={this.props.collectionsInstallWhileDownloading}
+             onToggle={this.props.onSetCollectionConcurrency}
+@@ -416,7 +446,6 @@ function mapStateToProps(state: IState, ownProps: IInstallDialogProps): IConnect
+   const { editCollectionId } = (state.session as any).collections;
+   const gameMode = ownProps.driver?.profile?.gameId;
+ 
+-  const isPremium = getSafe(state, ["persistent", "nexus", "userInfo", "isPremium"], false);
+   const collectionsInstallWhileDownloading = getSafe(
+     state,
+     ["settings", "downloads", "collectionsInstallWhileDownloading"],
+@@ -426,7 +455,7 @@ function mapStateToProps(state: IState, ownProps: IInstallDialogProps): IConnect
+   return {
+     allProfiles: state.persistent.profiles,
+     mods: editCollectionId !== undefined ? state.persistent.mods[gameMode] : emptyObject,
+-    isPremium,
++    downloads: state.persistent.downloads.files,
+     userInfo,
+     nextProfileId: state.settings.profiles.nextProfileId,
+     collectionsInstallWhileDownloading,
+diff --git a/src/renderer/src/extensions/dashboard/index.ts b/src/renderer/src/extensions/dashboard/index.ts
+index 56204b07446862529356cf644cc3d2ad720a6146..5f7786c15c2128c5e6e46d657766d9065a7e1338 100644
+--- a/src/renderer/src/extensions/dashboard/index.ts
++++ b/src/renderer/src/extensions/dashboard/index.ts
+@@ -37,12 +37,18 @@ function registerDashlet(
+ 
+ function init(context: IExtensionContext): boolean {
+   context.registerReducer(["settings", "interface"], settingsReducer);
++  // Vortex Unlocked: the Dashboard tab can be fully hidden from
++  // Settings -> Interface ("Hide Dashboard tab").
+   context.registerMainPage("dashboard", "Dashboard", Dashboard, {
+     priority: 1,
+     hotkey: "1",
+     group: "dashboard",
+     props: () => ({ dashlets }),
+     menuIcon: "dashboard",
++    visible: () => {
++      const state = context.api.store.getState();
++      return !(state as any)?.settings?.interface?.hideDashboard;
++    },
+   });
+ 
+   context.registerSettings("Interface", Settings, () => ({ dashlets }), undefined, 1000);
+diff --git a/src/renderer/src/extensions/download_management/reducers/settings.ts b/src/renderer/src/extensions/download_management/reducers/settings.ts
+index ce7faa56beca6370f97ee1289e761a2431db0c81..b07bfa377cf0575f4b80b03302af9fab6e48b439 100644
+--- a/src/renderer/src/extensions/download_management/reducers/settings.ts
++++ b/src/renderer/src/extensions/download_management/reducers/settings.ts
+@@ -24,7 +24,10 @@ export const settingsReducer: IReducerSpec<ISettingsDownloads> = {
+   defaults: {
+     minChunkSize: 1024 * 1024,
+     maxChunks: 10,
+-    maxParallelDownloads: 1,
++    // Vortex Unlocked: upstream defaults this to 1 and only premium accounts
++    // were allowed to raise it. The premium gate is gone, so start parallel
++    // downloads on by default; adjustable 1-10 in Settings -> Downloads.
++    maxParallelDownloads: 5,
+     maxBandwidth: 0,
+     path: path.join("{USERDATA}", "downloads"),
+     showDropzone: true,
+diff --git a/src/renderer/src/extensions/download_management/views/Settings.tsx b/src/renderer/src/extensions/download_management/views/Settings.tsx
+index 34e57632be5c9879a2665a9aee803573c8047a4c..5617e2ed1a372182c2e1e05e47d40d6592706ac0 100644
+--- a/src/renderer/src/extensions/download_management/views/Settings.tsx
++++ b/src/renderer/src/extensions/download_management/views/Settings.tsx
+@@ -22,7 +22,6 @@ import { ComponentEx, connect, translate } from "../../../controls/ComponentEx";
+ import FlexLayout from "../../../controls/FlexLayout";
+ import FormInput from "../../../controls/FormInput";
+ import Icon from "../../../controls/Icon";
+-import Image from "../../../controls/Image";
+ import More from "../../../controls/More";
+ import Spinner from "../../../controls/Spinner";
+ import Toggle from "../../../controls/Toggle";
+@@ -53,18 +52,8 @@ import opn from "../../../util/opn";
+ import * as selectors from "../../../util/selectors";
+ import { getSafe } from "../../../util/storeHelper";
+ import { cleanFailedTransfer, testPathTransfer, transferPath } from "../../../util/transferPath";
+-import {
+-  Campaign,
+-  ciEqual,
+-  isChildPath,
+-  isPathValid,
+-  isReservedDirectory,
+-  nexusModsURL,
+-  Section,
+-  Content,
+-} from "../../../util/util";
++import { ciEqual, isChildPath, isPathValid, isReservedDirectory } from "../../../util/util";
+ import getTextMod from "../../mod_management/texts";
+-import { PREMIUM_PATH } from "../../nexus_integration/constants";
+ import {
+   setCopyOnIFF,
+   setDownloadPath,
+@@ -81,7 +70,6 @@ const MB = 1024 * 1024;
+ 
+ interface IConnectedProps {
+   parallelDownloads: number;
+-  isPremium: boolean;
+   downloadPath: string;
+   modsInstallPath: string;
+   downloads: { [downloadId: string]: IDownload };
+@@ -143,7 +131,7 @@ class Settings extends ComponentEx<IProps, IComponentState> {
+   }
+ 
+   public render(): JSX.Element {
+-    const { t, copyOnIFF, downloads, isPremium, maxBandwidth, parallelDownloads } = this.props;
++    const { t, copyOnIFF, downloads, maxBandwidth, parallelDownloads } = this.props;
+     const { downloadPath, progress, progressFile } = this.state;
+ 
+     const pathPreview = getDownloadPath(downloadPath);
+@@ -151,7 +139,6 @@ class Settings extends ComponentEx<IProps, IComponentState> {
+     const validationState = this.validateDownloadPath(pathPreview);
+ 
+     const pathValid = validationState.state !== "error";
+-    const electricBoltIconPath = "assets/icons/electric-bolt.svg";
+ 
+     const hasActivity =
+       Object.keys(downloads).find((dlId) => downloads[dlId].state === "started") !== undefined;
+@@ -230,24 +217,7 @@ class Settings extends ComponentEx<IProps, IComponentState> {
+               min={1}
+               max={10}
+               onChange={this.onChangeParallelDownloads}
+-              disabled={!isPremium}
+             />
+-            {!isPremium ? (
+-              <BSButton id="get-premium-button" onClick={this.goBuyPremium}>
+-                <Image srcs={[electricBoltIconPath]} />
+-                {t("Unlock max download speeds")}
+-              </BSButton>
+-            ) : null}
+-          </div>
+-          <div>
+-            {!isPremium ? (
+-              <p>
+-                {t(
+-                  "Regular users are restricted to 1 download thread - " +
+-                    "Go Premium for up to 10 download threads!",
+-                )}
+-              </p>
+-            ) : null}
+           </div>
+         </FormGroup>
+         <FormGroup id="download-bandwidth-limit">
+@@ -399,15 +369,8 @@ class Settings extends ComponentEx<IProps, IComponentState> {
+     opn(url).catch((err) => undefined);
+   };
+ 
+-  private goBuyPremium = () => {
+-    opn(
+-      nexusModsURL(PREMIUM_PATH, {
+-        section: Section.Users,
+-        campaign: Campaign.BuyPremium,
+-        content: Content.SettingsDownloadAd,
+-      }),
+-    ).catch(() => null);
+-  };
++  // Vortex Unlocked: goBuyPremium was removed along with the thread-count
++  // premium gate - all download threads are available to every account.
+ 
+   private setDownloadPath = (newPath: string) => {
+     this.nextState.downloadPath = newPath;
+@@ -836,11 +799,9 @@ class Settings extends ComponentEx<IProps, IComponentState> {
+ 
+ function mapStateToProps(state: IState): IConnectedProps {
+   const modsInstallPath = selectors.installPath(state);
+-  const isPremium = getSafe(state, ["persistent", "nexus", "userInfo", "isPremium"], false);
+   return {
+-    parallelDownloads: isPremium ? state.settings.downloads.maxParallelDownloads : 1,
+-    // TODO: this breaks encapsulation
+-    isPremium,
++    // Vortex Unlocked: the thread count is no longer membership-gated
++    parallelDownloads: state.settings.downloads.maxParallelDownloads,
+     downloadPath: state.settings.downloads.path,
+     downloads: state.persistent.downloads.files,
+     modsInstallPath,
+diff --git a/src/renderer/src/extensions/health_check/hooks/useModRequirementActions.ts b/src/renderer/src/extensions/health_check/hooks/useModRequirementActions.ts
+index 31db6e26d2b3eceb89f21be8b22b56e2ed5fab49..8b577c393b943d9d9e5f51cd6b46c3c7d863144a 100644
+--- a/src/renderer/src/extensions/health_check/hooks/useModRequirementActions.ts
++++ b/src/renderer/src/extensions/health_check/hooks/useModRequirementActions.ts
+@@ -3,7 +3,6 @@ import { useSelector } from "react-redux";
+ 
+ import { openFilePage as openNexusFilePage } from "@/extensions/health_check/utils/fileRequirements/fileRequirementActions";
+ import { onDownloadRequirement } from "@/extensions/health_check/utils/modRequirements/onDownloadRequirement";
+-import { shouldShowPremiumAd } from "@/extensions/nexus_integration/selectors";
+ import { makeModAndFileUIDs } from "@/extensions/nexus_integration/util/UIDs";
+ import type { IExtensionApi } from "@/types/IExtensionContext";
+ import opn from "@/util/opn";
+@@ -15,7 +14,7 @@ import type { IssueAnalyticsIdentity } from "../utils/shared/tracking";
+ 
+ /**
+  * Shared action logic for a single mod requirement, used by both the listing row
+- * and the detail view: premium-gated 1-click install, thumbs feedback (with
++ * and the detail view: 1-click install, thumbs feedback (with
+  * analytics + the negative-reason modal), and opening the mod page. Keeps the two
+  * call sites behaviourally identical.
+  *
+@@ -36,7 +35,9 @@ export function useModRequirementActions(
+     [feedbackMap, mod.requiredBy.modId, mod.id],
+   );
+ 
+-  const showPremiumAd = useSelector(shouldShowPremiumAd);
++  // Vortex Unlocked: this client-side gate is deliberately open. The actual
++  // download still goes through the normal Nexus resolver and server policy.
++  const showPremiumAd = false;
+ 
+   const openModPage = useCallback(() => {
+     if (mod.modUrl) {
+@@ -59,16 +60,11 @@ export function useModRequirementActions(
+     }
+   }, [api, mod.gameId, mod.modId, mod.mainFile, openModPage]);
+ 
+-  // 1-click install is a Premium feature; free users get the upgrade prompt
+-  // (which routes them to the file page) instead of an in-app download.
++  // Vortex Unlocked: use the normal in-app download path for every account.
+   // onDownloadRequirement reports its own failures and never rejects, so the
+   // fire-and-forget call sites have nothing to catch; a failed install leaves the
+   // detail page open rather than navigating away from the issue.
+   const installInApp = useCallback(async () => {
+-    if (showPremiumAd) {
+-      setShowPremiumModal(true);
+-      return;
+-    }
+     if (await onDownloadRequirement(api, mod, undefined, identity)) {
+       onInstalled?.();
+     }
+diff --git a/src/renderer/src/extensions/health_check/views/HealthCheckPage.tsx b/src/renderer/src/extensions/health_check/views/HealthCheckPage.tsx
+index bce0ff7f073b24fd9b638e611cc477241f4a1b54..a6184eb72a0d1075a6f24031d1f2f75fc998d3fd 100644
+--- a/src/renderer/src/extensions/health_check/views/HealthCheckPage.tsx
++++ b/src/renderer/src/extensions/health_check/views/HealthCheckPage.tsx
+@@ -5,7 +5,6 @@ import { useDispatch, useSelector } from "react-redux";
+ import { setDialogVisible, setOpenMainPage, setSettingsPage } from "@/actions/session";
+ import type { IExtensionApi } from "@/types/IExtensionContext";
+ import type { IState } from "@/types/IState";
+-import { PremiumBadge } from "@/ui/components/badges/premium_badge/PremiumBadge";
+ import { Button } from "@/ui/components/button/Button";
+ import { NoResults } from "@/ui/components/no_results/NoResults";
+ import { TabBar } from "@/ui/components/tabs/TabBar";
+@@ -22,11 +21,9 @@ import { Page } from "@/views/components/Page/Page";
+ import { PageHeader } from "@/views/components/Page/PageHeader";
+ import { PageScroll } from "@/views/components/Page/PageScroll";
+ 
+-import { isLoggedIn, shouldShowPremiumAd } from "../../nexus_integration/selectors";
++import { isLoggedIn } from "../../nexus_integration/selectors";
+ import { AuthorNotesModal } from "../components/author_notes_modal/AuthorNotesModal";
+ import { IssueSection } from "../components/issue_section/IssueSection";
+-import { PremiumBanner } from "../components/premium_banner/PremiumBanner";
+-import { PremiumModal } from "../components/premium_modal/PremiumModal";
+ import { createHealthCheckTracker } from "../hooks/healthCheckTracker";
+ import { HealthCheckTrackingProvider, IssueProvider } from "../hooks/HealthCheckTracking.context";
+ import {
+@@ -142,9 +139,6 @@ const HealthCheckPage = ({ api, onRefresh, active, registerReset }: IHealthCheck
+   const modResult = useSelector(modRequirementsCheckResult);
+   const hiddenFile = useSelector(hiddenFileRequirements);
+   const hiddenMod = useSelector(hiddenModRequirements);
+-  const showPremiumAd = useSelector(shouldShowPremiumAd);
+-  // The section whose install all is waiting on the premium modal.
+-  const [premiumInstallType, setPremiumInstallType] = useState<IssueType | undefined>();
+   // The section whose install all is waiting on the author notes review.
+   const [notesInstallType, setNotesInstallType] = useState<IssueType | undefined>();
+   const isRefreshing = useSelector(isAnyHealthCheckRunning);
+@@ -244,7 +238,6 @@ const HealthCheckPage = ({ api, onRefresh, active, registerReset }: IHealthCheck
+   const activeCount = activeItems.length;
+   const hiddenCount = hiddenItems.length;
+   // Without tabs the active list is all there is, and selectedTab stays on it.
+-  const listIsEmpty = selectedTab === "hidden" ? hiddenCount === 0 : activeCount === 0;
+ 
+   const renderRow = (item: IListedEntry) => {
+     const { content, entry } = item;
+@@ -283,9 +276,9 @@ const HealthCheckPage = ({ api, onRefresh, active, registerReset }: IHealthCheck
+     sectionItems.forEach((item) => item.content.toggleHide?.(api, item.entry));
+   };
+ 
+-  // 1-click install all: premium-gated for free users. Items are de-duplicated first by
+-  // collectInstallAllItems (by key) and again here at execution time via the seen set,
+-  // so a file shared across multiple source reports is only queued once.
++  // Vortex Unlocked: bulk remediation uses the normal download/install path for every
++  // account. Keep upstream's de-duplication and author-note review, but remove the
++  // subscription gate.
+   const runInstallAll = (items: IBulkInstallItem[]) => {
+     const seen = new Set<string>();
+ 
+@@ -304,11 +297,6 @@ const HealthCheckPage = ({ api, onRefresh, active, registerReset }: IHealthCheck
+       mod_count: installAllItems[issueType].length,
+     });
+ 
+-    if (showPremiumAd) {
+-      setPremiumInstallType(issueType);
+-      return;
+-    }
+-
+     reviewThenInstall(issueType);
+   };
+ 
+@@ -353,7 +341,6 @@ const HealthCheckPage = ({ api, onRefresh, active, registerReset }: IHealthCheck
+                   <Button
+                     brand="neutral"
+                     leftIcon="install_desktop"
+-                    rightIcon={showPremiumAd ? <PremiumBadge /> : undefined}
+                     size="sm"
+                     onClick={() => installAll(issueType, sectionItems.length)}
+                   >
+@@ -473,21 +460,6 @@ const HealthCheckPage = ({ api, onRefresh, active, registerReset }: IHealthCheck
+             activeList
+           )}
+ 
+-          {!listIsEmpty && (
+-            <PremiumBanner api={api} placement="list" totalIssues={activeCount + hiddenCount} />
+-          )}
+-
+-          <PremiumModal
+-            api={api}
+-            downloadScope="all"
+-            isOpen={premiumInstallType !== undefined}
+-            modCount={premiumInstallType ? installAllItems[premiumInstallType].length : 0}
+-            trigger="install_all"
+-            onClose={() => setPremiumInstallType(undefined)}
+-            onDownload={() => setPremiumInstallType(undefined)}
+-            onPremiumUnlocked={() => premiumInstallType && reviewThenInstall(premiumInstallType)}
+-          />
+-
+           <AuthorNotesModal
+             isOpen={notesInstallType !== undefined}
+             // Falls back while closing, so the list doesn't empty mid-transition.
+diff --git a/src/renderer/src/extensions/mod_management/hooks/useModToolbarActions.hook.tsx b/src/renderer/src/extensions/mod_management/hooks/useModToolbarActions.hook.tsx
+index f9e272449ba58aeb66228d0977ce84a2267f1794..411c4f6fd5329a05c7aa3030958ae02729d57aa8 100644
+--- a/src/renderer/src/extensions/mod_management/hooks/useModToolbarActions.hook.tsx
++++ b/src/renderer/src/extensions/mod_management/hooks/useModToolbarActions.hook.tsx
+@@ -428,9 +428,6 @@ const useCheckVersionsAction = (t: TFunction): IPositionedAction => {
+   const updateRunning = useSelector((state: IState) =>
+     getSafe<boolean>(state, ["session", "mods", "updatingMods", gameMode], false),
+   );
+-  const isPremium = useSelector((state: IState) =>
+-    getSafe<boolean>(state, ["persistent", "nexus", "userInfo", "isPremium"], false),
+-  );
+ 
+   /**
+    * The mods as they are *now*, not as they were when this action was built. The
+@@ -514,7 +511,8 @@ const useCheckVersionsAction = (t: TFunction): IPositionedAction => {
+               ? "All mods up to date"
+               : `${outdated.length} mod update${outdated.length === 1 ? "" : "s"} available`,
+           actions:
+-            isPremium && outdated.length > 0
++            // Vortex Unlocked: "Update All" is offered to every account
++            outdated.length > 0
+               ? [
+                   {
+                     title: "Update All",
+@@ -528,7 +526,7 @@ const useCheckVersionsAction = (t: TFunction): IPositionedAction => {
+           displayMS: outdated.length === 0 ? 5000 : undefined,
+         });
+       });
+-  }, [api, gameMode, isPremium, readModsWithState, updateAll]);
++  }, [api, gameMode, readModsWithState, updateAll]);
+ 
+   return useMemo(
+     () => ({
+diff --git a/src/renderer/src/extensions/mod_management/views/CheckModVersionsButton.tsx b/src/renderer/src/extensions/mod_management/views/CheckModVersionsButton.tsx
+index 4c672755655b3c78a06ee03958f601090743a7ed..c21b62c6ff9e2623f0d9cf6836a152123377aded 100644
+--- a/src/renderer/src/extensions/mod_management/views/CheckModVersionsButton.tsx
++++ b/src/renderer/src/extensions/mod_management/views/CheckModVersionsButton.tsx
+@@ -23,7 +23,6 @@ interface IConnectedProps {
+   mods: { [modId: string]: IModWithState };
+   gameMode: string;
+   updateRunning: boolean;
+-  isPremium: boolean;
+ }
+ 
+ type IProps = IBaseProps & IConnectedProps;
+@@ -66,7 +65,8 @@ class CheckVersionsButton extends ComponentEx<IProps, {}> {
+       type: "success",
+       message: message,
+       actions:
+-        this.props.isPremium && modIds.length > 0
++        // Vortex Unlocked: "Update All" is offered to every account
++        modIds.length > 0
+           ? [
+               {
+                 title: "Update All",
+@@ -175,7 +175,6 @@ function mapStateToProps(state: any): IConnectedProps {
+     mods: modsWithState,
+     gameMode,
+     updateRunning: getSafe(state, ["session", "mods", "updatingMods", gameMode], false),
+-    isPremium: getSafe(state, ["persistent", "nexus", "userInfo", "isPremium"], false),
+   };
+ }
+ 
+diff --git a/src/renderer/src/extensions/nexus_integration/eventHandlers.ts b/src/renderer/src/extensions/nexus_integration/eventHandlers.ts
+index 5a2991bda20b2a5102a4ceb45fb09f9db9dd7992..1fae3754131ce85760b16d1f89df249a350fabf9 100644
+--- a/src/renderer/src/extensions/nexus_integration/eventHandlers.ts
++++ b/src/renderer/src/extensions/nexus_integration/eventHandlers.ts
+@@ -54,10 +54,10 @@ import { setUpdatingMods } from "../mod_management/actions/session";
+ import type { IModListItem } from "../news_dashlet/types";
+ import { setUserInfo } from "./actions/persistent";
+ import { NEXUS_GAMES_URL } from "./constants";
+-import { ensureFreshMembership, refreshMembership } from "./membership";
++import { refreshMembership } from "./membership";
+ import { nxmModUrl } from "./NXMUrl";
+ import { isRateLimited, notifyRateLimited } from "./rateLimit";
+-import { isLoggedIn, isPremium } from "./selectors";
++import { isLoggedIn } from "./selectors";
+ import type { IValidateKeyDataV2 } from "./types/IValidateKeyData";
+ import {
+   checkModVersionsImpl,
+@@ -365,18 +365,9 @@ function downloadFile(
+ ): Bluebird<string> {
+   const state: IState = api.getState();
+   const gameId = game?.id ?? SITE_ID;
+-  if (game != null && gameId !== SITE_ID && !isPremium(state)) {
+-    // The cached membership is the only thing saying no, and a plan bought on the website pushes
+-    // nothing to Vortex - so confirm it before refusing a download the user can now make.
+-    return Bluebird.resolve(ensureFreshMembership(api, nexus)).then(() => {
+-      if (isPremium(api.getState())) {
+-        return downloadFile(api, nexus, game, modId, fileId, fileName, allowInstall);
+-      }
+-      // nexusmods can't let users download files directly from client, without
+-      // showing ads
+-      return Bluebird.reject(new ProcessCanceled("Only available to premium users"));
+-    });
+-  }
++  // Vortex Unlocked: the premium gate is gone - the generated nxm link goes
++  // straight to the resolver; if the api refuses it, the protocol handler
++  // falls back to the website round trip.
+   // TODO: Need some way to identify if this request is actually for a nexus mod
+   const url = nxmModUrl(game, gameId, modId, fileId);
+   log("debug", "downloading from generated nxm link", { url, fileName });
+diff --git a/src/renderer/src/extensions/nexus_integration/index.tsx b/src/renderer/src/extensions/nexus_integration/index.tsx
+index f4bc63af2a961b401d1cba1bb4cae63012d3681b..d06c4c382a3f71d8439ae50e3c3bbf7749746136 100644
+--- a/src/renderer/src/extensions/nexus_integration/index.tsx
++++ b/src/renderer/src/extensions/nexus_integration/index.tsx
+@@ -17,29 +17,17 @@ import { TimeoutError } from "@nexusmods/nexus-api";
+ import { GameDomain, getErrorMessageOrDefault, unknownToError } from "@vortex/shared";
+ import PromiseBB from "bluebird";
+ import * as fuzz from "fuzzball";
+-import type { TFunction } from "i18next";
+-import React, {
+-  type FunctionComponent,
+-  type MouseEvent,
+-  type PropsWithChildren,
+-  useContext,
+-} from "react";
+-import { Button } from "react-bootstrap";
+ import type { Action } from "redux";
+ import {} from "uuid";
+ 
+ import { setDownloadModInfo, setForcedLogout, setModAttribute } from "../../actions";
+ import type { IDialogResult } from "../../actions/notifications";
+ import { showDialog } from "../../actions/notifications";
+-import FlexLayout from "../../controls/FlexLayout";
+-import Image from "../../controls/Image";
+ import LazyComponent from "../../controls/LazyComponent";
+ import { log } from "../../logging";
+-import type { IComponentContext } from "../../types/IComponentContext";
+ import type { IExtensionApi, IExtensionContext } from "../../types/IExtensionContext";
+ import type { IModLookupResult } from "../../types/IModLookupResult";
+ import type { IState } from "../../types/IState";
+-import { Pictogram } from "../../ui/components/pictogram/Pictogram";
+ import { getApplication } from "../../util/application";
+ import { ProcessCanceled } from "../../util/CustomErrors";
+ import Debouncer from "../../util/Debouncer";
+@@ -49,16 +37,7 @@ import type { LogLevel } from "../../util/log";
+ import { showError } from "../../util/message";
+ import { activeGameId, downloadPathForGame, gameById } from "../../util/selectors";
+ import { currentGame, getSafe } from "../../util/storeHelper";
+-import {
+-  batchDispatch,
+-  decodeHTML,
+-  nexusModsURL,
+-  Section,
+-  truthy,
+-  Content,
+-  Campaign,
+-} from "../../util/util";
+-import { MainContext } from "../../views/MainWindow";
++import { batchDispatch, decodeHTML, truthy } from "../../util/util";
+ import type { ICategoryDictionary } from "../category_management/types/ICategoryDictionary";
+ import type { IDownload } from "../download_management/types/IDownload";
+ import { SITE_ID } from "../gamemode_management/constants";
+@@ -78,7 +57,6 @@ import {
+   NEXUS_API_SUBDOMAIN,
+   NEXUS_BASE_URL,
+   NEXUS_DOMAIN,
+-  PREMIUM_PATH,
+   REVALIDATION_FREQUENCY,
+ } from "./constants";
+ import * as eh from "./eventHandlers";
+@@ -120,7 +98,6 @@ import retrieveCategoryList from "./util/retrieveCategories";
+ import Tracking from "./util/tracking";
+ import { makeFileUID } from "./util/UIDs";
+ import FreeUserDLDialog from "./views/FreeUserDLDialog";
+-import GoPremiumDashlet from "./views/GoPremiumDashlet";
+ import LoginDialog from "./views/LoginDialog";
+ import LoginIcon from "./views/LoginIcon";
+ import {} from "./views/Settings";
+@@ -1177,63 +1154,6 @@ function once(api: IExtensionApi, callbacks: Array<(nexus: NexusT) => void>) {
+   callbacks.forEach((cb) => cb(nexus));
+ }
+ 
+-function toolbarBanner(t: TFunction): FunctionComponent<PropsWithChildren<any>> {
+-  return () => {
+-    const context = useContext<IComponentContext>(MainContext);
+-    const trackAndGoToPremium = (e) => {
+-      context.api.events.emit("analytics-track-click-event", "Go Premium", "Header");
+-      goBuyPremium(e);
+-    };
+-
+-    return (
+-      <div id="nexus-header-ad">
+-        <button data-campaign={Content.HeaderAd} onClick={trackAndGoToPremium}>
+-          <FlexLayout className="ad-flex-container" type="row">
+-            <FlexLayout.Flex>
+-              <FlexLayout className="text-flex-container" type="column">
+-                <div className="nexus-header-ad-title">
+-                  Want <span className="ad-title-highlight">more time</span> playing?
+-                </div>
+-
+-                <div className="nexus-header-ad-body">
+-                  Save time with <span className="ad-body-highlight">max download speeds</span>,{" "}
+-                  <span className="ad-body-highlight">auto-install collections</span>, and{" "}
+-                  <span className="ad-body-highlight">no ads</span>.
+-                </div>
+-              </FlexLayout>
+-            </FlexLayout.Flex>
+-
+-            <FlexLayout.Fixed>
+-              <Pictogram brand="premium" className="size-16" name="premium" size="none" />
+-            </FlexLayout.Fixed>
+-          </FlexLayout>
+-
+-          <FlexLayout className="custom-hover-overlay" type="row">
+-            <FlexLayout.Fixed>
+-              <FlexLayout className="hover-overlay-content" type="row">
+-                {t("Go Premium")}
+-
+-                <div className="arrow-forward" />
+-              </FlexLayout>
+-            </FlexLayout.Fixed>
+-          </FlexLayout>
+-        </button>
+-      </div>
+-    );
+-  };
+-}
+-
+-function goBuyPremium(evt: MouseEvent<any>) {
+-  const content = evt.currentTarget.getAttribute("data-campaign");
+-  window.api.shell.openUrl(
+-    nexusModsURL(PREMIUM_PATH, {
+-      section: Section.Users,
+-      campaign: Campaign.BuyPremium,
+-      content: content,
+-    }),
+-  );
+-}
+-
+ function idValid(
+   thingId: string,
+   mods: { [modId: string]: IMod },
+@@ -1529,49 +1449,8 @@ function init(context: IExtensionContext): boolean {
+     ...nxmProtocol.dialogHandlers,
+   }));
+ 
+-  context.registerBanner(
+-    "downloads",
+-    () => {
+-      const t = context.api.translate;
+-      const electricBoltIconPath = "assets/icons/electric-bolt.svg";
+-      const trackAndGoToPremium = (e) => {
+-        context.api.events.emit("analytics-track-click-event", "Go Premium", "Downloads");
+-        goBuyPremium(e);
+-      };
+-      return (
+-        <div id="nexus-download-banner">
+-          <div className="banner-text">
+-            Free users are <span className="text-highlight">capped at 3MB/s</span> (1.5 MB/s with
+-            AdBlock). Play your modded games{" "}
+-            <span className="text-highlight">faster with premium</span>.
+-          </div>
+-
+-          <Button
+-            data-campaign={Content.DownloadsBannerAd}
+-            id="get-premium-button"
+-            onClick={trackAndGoToPremium}
+-          >
+-            <Image srcs={[electricBoltIconPath]} />
+-
+-            {t("Unlock max download speeds")}
+-          </Button>
+-        </div>
+-      );
+-    },
+-    {
+-      props: {
+-        showAd: (state) => sel.shouldShowPremiumAd(state),
+-      },
+-      condition: (props: any): boolean => props.showAd,
+-    },
+-  );
+-
+-  context.registerBanner("main-toolbar", toolbarBanner(context.api.translate), {
+-    props: {
+-      showAd: (state) => sel.shouldShowPremiumAd(state),
+-    },
+-    condition: (props: any): boolean => props.showAd,
+-  });
++  // Vortex Unlocked: the downloads-page speed-cap banner and the "Go Premium"
++  // main-toolbar banner are not registered.
+ 
+   context.registerModSource(
+     "nexus",
+@@ -1609,27 +1488,8 @@ function init(context: IExtensionContext): boolean {
+     genCollectionIdAttribute(context.api, () => nexus),
+   );
+ 
+-  /* tentatively removed, deemed unnecessary
+-  context.registerDashlet('Nexus Mods Account Banner', 3, 1, 0, DashboardBanner,
+-                          undefined, undefined, {
+-    fixed: true,
+-    closable: true,
+-  });
+-  */
+-
+-  context.registerDashlet(
+-    "Go Premium",
+-    1,
+-    2,
+-    200,
+-    GoPremiumDashlet,
+-    (state: IState) => sel.shouldShowPremiumAd(state),
+-    undefined,
+-    {
+-      fixed: false,
+-      closable: false,
+-    },
+-  );
++  // Vortex Unlocked: the "Nexus Mods Account Banner" and "Go Premium" dashlets
++  // are not registered - the dashboard shows no membership upsell.
+ 
+   context.registerAttributeExtractor(50, (input: any, modPath: string) => {
+     return processAttributes(context.api.store.getState(), input, modPath === undefined);
+diff --git a/src/renderer/src/extensions/nexus_integration/nxmProtocol.ts b/src/renderer/src/extensions/nexus_integration/nxmProtocol.ts
+index 979d3b1f133372f96898f01345ee49d500deadf3..a9df3f29fc6198010078e2ba399c822b4e92d703 100644
+--- a/src/renderer/src/extensions/nexus_integration/nxmProtocol.ts
++++ b/src/renderer/src/extensions/nexus_integration/nxmProtocol.ts
+@@ -18,11 +18,12 @@ import {
+   UserCanceled,
+ } from "../../util/CustomErrors";
+ import { createKeyedCache } from "../../util/keyedCache";
++import { getPreloadApi } from "../../util/preloadAccess";
+ import { batchDispatch } from "../../util/util";
+ import type { IResolvedURL } from "../download_management/types/ProtocolHandlers";
+ import { SITE_ID } from "../gamemode_management/constants";
+ import { addFreeUserDLItem, removeFreeUserDLItem } from "./actions/session";
+-import { refreshMembership, scheduleMembershipRefresh } from "./membership";
++import { scheduleMembershipRefresh } from "./membership";
+ import NXMUrl from "./NXMUrl";
+ import { isRateLimited, notifyRateLimited } from "./rateLimit";
+ import { isPremium, userInfo } from "./selectors";
+@@ -94,6 +95,8 @@ export class NxmProtocol {
+ 
+   // every parked download, each carrying whether its user has gone to fetch a link for it
+   readonly #freeQueue: IQueuedDownload[] = [];
++  // Vortex Unlocked: files with a website-session link generation in flight
++  readonly #autoGenInFlight = new Set<string>();
+   readonly #urlCache = createKeyedCache<{ urls: string[]; meta: unknown }>(
+     DOWNLOAD_URL_CACHE_DURATION,
+   );
+@@ -113,30 +116,14 @@ export class NxmProtocol {
+    * Reading the api is refused during `init` - the extension api is a proxy that throws
+    * "extension uses api in init function" - so anything that touches the store waits until here.
+    * The constructor only records its arguments for the same reason.
++   *
++   * Vortex Unlocked: the membership-change cache drop is gone along with the
++   * membership distinction itself.
+    */
+   readonly start = (): void => {
+-    this.#dropCachedUrlsOnMembershipChange();
++    // intentionally empty
+   };
+ 
+-  /**
+-   * The api mints a download url for the membership that asked for it, but the cache is keyed by
+-   * file, so an entry outlives the plan it was issued under. Both directions matter: after an
+-   * upgrade a cached free url still downloads at free speed, and after a downgrade a cached premium
+-   * url serves a download the account is no longer entitled to. Neither is worth keeping, so a plan
+-   * change drops the lot.
+-   */
+-  #dropCachedUrlsOnMembershipChange(): void {
+-    let premium = isPremium(this.#api.getState());
+-    this.#api.store.subscribe(() => {
+-      const current = isPremium(this.#api.getState());
+-      if (current === premium) {
+-        return;
+-      }
+-      premium = current;
+-      this.#urlCache.clear();
+-    });
+-  }
+-
+   get #nexus(): NexusT {
+     return this.#getNexus();
+   }
+@@ -316,7 +303,11 @@ export class NxmProtocol {
+     },
+   };
+ 
+-  /** Whether this download can go through the api, or has to go via the website. */
++  /**
++   * Whether this download can go through the api, or has to go via the website.
++   * Vortex Unlocked: always eligible - if the server refuses, the 403 handler
++   * in `resolve` falls back to the website round trip.
++   */
+   #canDownloadInApp(url: NXMUrl): boolean {
+     if (!needsAuthorisedLink(url)) {
+       return true;
+@@ -334,28 +325,15 @@ export class NxmProtocol {
+   }
+ 
+   /**
+-   * Whether a refused download link confirms the account is no longer premium. The api answers a
+-   * keyless link with 403 when it isn't, so the refusal prompts the re-read and the answer decides;
+-   * a refusal raised for any other reason keeps the original error.
+-   *
+-   * This asks unconditionally rather than through the freshness gate. A 403 is the server saying the
+-   * cached answer is wrong, and no read is recent enough to argue with it - during active use one
+-   * almost always is, which would leave this confirming the membership against the very state the
+-   * refusal contradicts. Concurrent refusals still share the one request.
++   * Whether a refused download link should fall back to the website round trip. The api answers a
++   * keyless link with 403 when the account can't generate one directly, so that refusal routes the
++   * download through the website queue, where the user can pick up an authorised link; a refusal
++   * raised for any other reason keeps the original error.
+    *
+-   * The refreshed membership is in state before this returns, because FreeUserDLDialog only shows
+-   * itself while the user is non-premium.
++   * Vortex Unlocked: the server's answer decides, not the cached membership.
+    */
+   async #confirmMembershipEnded(url: NXMUrl, err: unknown): Promise<boolean> {
+-    if (!needsAuthorisedLink(url) || !(err instanceof HTTPError) || err.statusCode !== 403) {
+-      return false;
+-    }
+-    await refreshMembership(this.#api, this.#nexus);
+-    const ended = !isPremium(this.#api.getState());
+-    if (ended) {
+-      log("info", "premium membership has ended, downloading as a free user");
+-    }
+-    return ended;
++    return needsAuthorisedLink(url) && err instanceof HTTPError && err.statusCode === 403;
+   }
+ 
+   #queuedFor(inputUrl: string): IQueuedDownload | undefined {
+@@ -390,6 +368,10 @@ export class NxmProtocol {
+   /**
+    * Park the download until the user brings back an authorised link from the website (or cancels
+    * or skips it). FreeUserDLDialog renders off the redux queue this dispatches into.
++   *
++   * Vortex Unlocked: when the embedded website session is enabled, an authorised
++   * link is generated automatically and delivered through the same path a
++   * browser handoff uses, so the dialog only stays up as a fallback.
+    */
+   #websiteDownload(input: string, url: NXMUrl, pageId: GameDomain): Promise<IResolvedURL> {
+     // a promise settles once and #dequeue tolerates a repeat, so cancelling after a skip is safe
+@@ -410,9 +392,96 @@ export class NxmProtocol {
+         awaitingLink: false,
+       });
+       this.#api.store.dispatch(addFreeUserDLItem(input));
++      void this.#tryAutoGenerate(input, url);
+     });
+   }
+ 
++  /**
++   * Vortex Unlocked: whether automatic link generation applies right now. Off by
++   * default; collection installs qualify on their own and single downloads only
++   * with the "always" setting, to keep the request pace conservative.
++   */
++  #autoGenEnabled(): boolean {
++    // Vortex Unlocked: the two settings live in the interface reducer but not
++    // in the (upstream) ISettingsInterface type - read them the same way the
++    // hideDashboard toggle reads its setting.
++    const interfaceSettings = this.#api.getState().settings.interface as any;
++    if (interfaceSettings?.["websiteLinkGen"] !== true) {
++      return false;
++    }
++    const inCollectionInstall = getCollectionActiveSession(this.#api.getState()) !== undefined;
++    return inCollectionInstall || interfaceSettings?.["websiteLinkGenAlways"] === true;
++  }
++
++  /**
++   * Vortex Unlocked: generate an authorised link for a parked download through the
++   * embedded website session and deliver it to everything waiting on that file.
++   * Any failure leaves the download parked for the manual website flow.
++   */
++  async #tryAutoGenerate(input: string, url: NXMUrl): Promise<void> {
++    if (!this.#autoGenEnabled()) {
++      return;
++    }
++
++    const dedupKey = `${url.gameId}_${url.modId}_${url.fileId}`;
++    if (this.#autoGenInFlight.has(dedupKey)) {
++      return;
++    }
++
++    const queued = this.#freeQueue.find((iter) => iter.input === input);
++    if (queued === undefined || queued.awaitingLink) {
++      // already fetching a link for this one (user clicked the dialog's website button)
++      return;
++    }
++    queued.awaitingLink = true;
++    this.#autoGenInFlight.add(dedupKey);
++
++    try {
++      const pageId = nxmPageId(this.#api.getState(), url.gameId);
++      const reply = await getPreloadApi().websiteSession.generateLink({
++        domain: url.gameId,
++        gameId: pageId,
++        modId: url.modId,
++        fileId: url.fileId,
++      });
++
++      if (
++        reply?.ok === true &&
++        typeof reply.nxmUrl === "string" &&
++        reply.nxmUrl.startsWith("nxm://")
++      ) {
++        log("info", "website session auto-authorised download", {
++          modId: url.modId,
++          fileId: url.fileId,
++        });
++        // deliver to every parked download waiting on this file, not just the first
++        const keyedUrl = new NXMUrl(reply.nxmUrl);
++        let deliveries = 0;
++        while (this.#deliverAwaitedLink(keyedUrl, reply.nxmUrl) && ++deliveries < 32) {
++          // keep delivering while entries for this file are still awaiting
++        }
++        return;
++      }
++
++      log("warn", "website session link generation failed", {
++        modId: url.modId,
++        fileId: url.fileId,
++        reason: reply?.reason,
++      });
++    } catch (err) {
++      log("warn", "website session link generation failed", {
++        error: getErrorMessageOrDefault(err),
++      });
++    } finally {
++      // release the entry for the manual flow (or a later retry) if it is still parked
++      const stillQueued = this.#freeQueue.find((iter) => iter.input === input);
++      if (stillQueued !== undefined && stillQueued.awaitingLink) {
++        stillQueued.awaitingLink = false;
++      }
++      this.#autoGenInFlight.delete(dedupKey);
++    }
++  }
++
+   /**
+    * The file's full update chain. Skipping has to name every file id the chain covers, because a
+    * dependency may reference an older or newer file than the one being skipped and the nxm url
+diff --git a/src/renderer/src/extensions/nexus_integration/selectors.ts b/src/renderer/src/extensions/nexus_integration/selectors.ts
+index 258e858676a20fd7bd32e7cb11842c4da89cd906..34b3cffaed12e43f9840e7b4509ba993e09ba0c5 100644
+--- a/src/renderer/src/extensions/nexus_integration/selectors.ts
++++ b/src/renderer/src/extensions/nexus_integration/selectors.ts
+@@ -22,28 +22,22 @@ export const userInfo = (state: IState) => {
+   return state.persistent.nexus.userInfo;
+ };
+ 
+-export const isPremium = (state: IState) => {
+-  if (!hasPersistentWithNexus(state.persistent)) {
+-    return false;
+-  }
+-  return state.persistent.nexus.userInfo?.isPremium ?? false;
++/**
++ * Vortex Unlocked: every premium gate in the client is open.
++ * The upstream build restricted parallel downloads, in-app link resolution,
++ * update-all and collection bulk-install flows to premium members; this fork
++ * treats every account as premium so those client-side gates never engage.
++ * (What the Nexus API itself allows is still decided server-side.)
++ */
++export const isPremium = (_state: IState) => {
++  return true;
+ };
+ 
+ /**
+- * Returns true only when we know for certain the user is not premium.
+- * While userInfo is still loading, assumes premium to avoid flashing
+- * "Go Premium" ads at paying customers on startup.
+- * Use this for ad/banner visibility only — not for feature gating.
++ * Vortex Unlocked: premium upsell UI is permanently suppressed.
+  */
+-export const shouldShowPremiumAd = (state: IState) => {
+-  if (!hasPersistentWithNexus(state.persistent)) {
+-    return false;
+-  }
+-  const info = state.persistent.nexus.userInfo;
+-  if (info === undefined) {
+-    return false;
+-  }
+-  return !info.isPremium && !info.isSupporter;
++export const shouldShowPremiumAd = (_state: IState) => {
++  return false;
+ };
+ 
+ export const isLoggedIn = (state: IState) => {
+diff --git a/src/renderer/src/extensions/nexus_integration/util.ts b/src/renderer/src/extensions/nexus_integration/util.ts
+index a0978b1d4ea2eb77a18504eccd5fe2a1e3b3d2d9..f4826be75d60247d5138af615e18cbbe85f99667 100644
+--- a/src/renderer/src/extensions/nexus_integration/util.ts
++++ b/src/renderer/src/extensions/nexus_integration/util.ts
+@@ -1799,10 +1799,13 @@ export const MEMBERSHIP_ROLE = {
+  * Derive the membership-related fields of userInfo from a user payload (API
+  * response or decoded JWT). Single source of truth for the role checks, used by
+  * both transformUserInfoFromApi and updateUserInfoFromRefreshedToken.
++ *
++ * Vortex Unlocked: membership is always reported as premium so no client-side
++ * gate can ever engage, regardless of what the API says about the account.
+  */
+ function deriveMembership(user: Pick<IUserInfo, "membership_roles">): IMembership {
+   return {
+-    isPremium: user.membership_roles.includes(MEMBERSHIP_ROLE.premium),
++    isPremium: true,
+     isSupporter: user.membership_roles.includes(MEMBERSHIP_ROLE.supporter),
+     isLifetime: user.membership_roles.includes(MEMBERSHIP_ROLE.lifetime),
+   };
+diff --git a/src/renderer/src/extensions/nexus_integration/util/transformUserInfo.ts b/src/renderer/src/extensions/nexus_integration/util/transformUserInfo.ts
+index bf5318474c4397b9073532c51199b64212e41d9f..63bdd1f6cacbe6db6c6259cb0df5b44b153fa304 100644
+--- a/src/renderer/src/extensions/nexus_integration/util/transformUserInfo.ts
++++ b/src/renderer/src/extensions/nexus_integration/util/transformUserInfo.ts
+@@ -3,10 +3,12 @@ import type { IValidateKeyResponse } from "@nexusmods/nexus-api";
+ import type { IValidateKeyData } from "../types/IValidateKeyData";
+ 
+ // transform the server response into the format we store internally
++// Vortex Unlocked: membership is always reported as premium so no client-side
++// gate can ever engage, regardless of what the API says about the account.
+ function transformUserInfo(input: IValidateKeyResponse): IValidateKeyData {
+   return {
+     email: input.email,
+-    isPremium: input.is_premium,
++    isPremium: true,
+     isSupporter: input.is_supporter,
+     name: input.name,
+     profileUrl: input.profile_url,
+diff --git a/src/renderer/src/extensions/nexus_integration/views/FreeUserDLDialog.tsx b/src/renderer/src/extensions/nexus_integration/views/FreeUserDLDialog.tsx
+index 8ca40bf34afa9e037c376c184399b9ac656bce2c..6cc31414eaa6c5ed877646acc5a5114a999ca9cf 100644
+--- a/src/renderer/src/extensions/nexus_integration/views/FreeUserDLDialog.tsx
++++ b/src/renderer/src/extensions/nexus_integration/views/FreeUserDLDialog.tsx
+@@ -12,12 +12,10 @@ import type { IComponentContext } from "../../../types/IComponentContext";
+ import type { IState } from "../../../types/IState";
+ import { freeUserDownloadPosition } from "../../../util/collectionInstallSession";
+ import { log } from "../../../util/log";
+-import { Campaign, Content, nexusModsURL, Section } from "../../../util/util";
+ import { MainContext } from "../../../views/MainWindow";
+-import { NEXUS_BASE_URL, PREMIUM_PATH } from "../constants";
++import { NEXUS_BASE_URL } from "../constants";
+ import { useRefreshUserInfoOnFocus } from "../hooks/useRefreshUserInfoOnFocus";
+ import NXMUrl from "../NXMUrl";
+-import { isPremium } from "../selectors";
+ import { nexusGamesProm } from "../util";
+ import { nexusModPageUrl } from "../util/nexus_urls/nexusUrls";
+ import { makeFileUID } from "../util/UIDs";
+@@ -92,27 +90,29 @@ function nop() {
+ }
+ 
+ function FreeUserDLDialog(props: IFreeUserDLDialogProps) {
+-  const { t, nexus, onCancel, onDownload, onSkip, onUpdated, onRetry } = props;
++  const { t, nexus, onCancel, onDownload, onSkip, onUpdated } = props;
+ 
+   const urls: string[] = useSelector<IState, string[]>(
+     (state) => state.session["nexus"].freeUserDLQueue,
+   );
+ 
+-  const premium = useSelector(isPremium);
+-
+   const collectionInstallSession = useSelector<IState, ICollectionInstallSession | undefined>(
+     (state) => state.session?.["collections"]?.activeSession,
+   );
+   const context = useContext<IComponentContext>(MainContext);
+ 
+   const [fileInfo, setFileInfo] = useState<any>(null);
+-  const [campaign, setCampaign] = useState<string>(undefined);
+   const [positionText, setPositionText] = useState<string>("1/1");
++  const [autoOpenNext, setAutoOpenNext] = useState(
++    () => window.localStorage.getItem("vortex-unlocked:auto-open-next") === "true",
++  );
+   const lastFetchUrl = useRef<string>();
++  const lastAutoOpenedUrl = useRef<string>();
+ 
+-  const show = urls.length > 0 && !premium;
++  // Vortex Unlocked: the queue dialog shows whenever a download is parked
++  // waiting for an authorised link from the website, regardless of membership.
++  const show = urls.length > 0;
+ 
+-  // the user leaves for the website to buy premium, so re-read on their return
+   useRefreshUserInfoOnFocus(context.api, show);
+ 
+   useEffect(() => {
+@@ -123,20 +123,12 @@ function FreeUserDLDialog(props: IFreeUserDLDialogProps) {
+     setPositionText(`${position}/${total}`);
+   }, [collectionInstallSession]);
+ 
+-  useEffect(() => {
+-    // an upgrade mid-dialog means the download can go through the api instead
+-    if (premium && urls.length > 0) {
+-      retry();
+-    }
+-  }, [premium]);
+-
+   useEffect(() => {
+     const fetchFileInfo = async () => {
+       const url: NXMUrl = new NXMUrl(urls[0]);
+ 
+       onUpdated();
+       setFileInfo(null);
+-      setCampaign(url.getParam("campaign"));
+ 
+       try {
+         // makeFileUID needs the nexus games list to map domain -> numeric game id.
+@@ -166,9 +158,20 @@ function FreeUserDLDialog(props: IFreeUserDLDialogProps) {
+     }
+   }, [urls]);
+ 
+-  const retry = useCallback(() => {
+-    onRetry();
+-  }, [onRetry]);
++  useEffect(() => {
++    if (!autoOpenNext) {
++      lastAutoOpenedUrl.current = undefined;
++      return;
++    }
++
++    const current = urls[0];
++    if (current === undefined || current === lastAutoOpenedUrl.current) {
++      return;
++    }
++
++    lastAutoOpenedUrl.current = current;
++    onDownload(current);
++  }, [autoOpenNext, onDownload, urls]);
+ 
+   const cancel = useCallback(() => {
+     onCancel(urls[0]);
+@@ -192,28 +195,15 @@ function FreeUserDLDialog(props: IFreeUserDLDialogProps) {
+     );
+   }, [fileInfo]);
+ 
+-  const goPremium = useCallback(() => {
+-    context.api.events.emit("analytics-track-click-event", "Go Premium", "Download Mod");
+-
+-    window.api.shell.openUrl(
+-      nexusModsURL(PREMIUM_PATH, {
+-        section: Section.Users,
+-        campaign: Campaign.BuyPremium,
+-        content: Content.DownloadModModal,
+-      }),
+-    );
+-  }, [campaign]);
+-
+   return (
+     <Modal id="free-user-dl-dialog" show={show} onHide={nop}>
+       <Modal.Header>
+-        <Modal.Title>{t("Download mod")}</Modal.Title>
++        <Modal.Title>{t("Download mod ({{count}} remaining)", { count: urls.length })}</Modal.Title>
+       </Modal.Header>
+ 
+       <Modal.Body>
+         <NewFreeDownloadModal
+           fileInfo={fileInfo}
+-          goPremium={goPremium}
+           openModPage={openModPage}
+           positionText={positionText}
+           t={t}
+@@ -222,6 +212,23 @@ function FreeUserDLDialog(props: IFreeUserDLDialogProps) {
+       </Modal.Body>
+ 
+       <Modal.Footer>
++        <Button
++          id="auto-open-next-button"
++          active={autoOpenNext}
++          title={t(
++            "Automatically open the next Nexus file page after each authorised download returns",
++          )}
++          onClick={() =>
++            setAutoOpenNext((enabled) => {
++              const next = !enabled;
++              window.localStorage.setItem("vortex-unlocked:auto-open-next", String(next));
++              return next;
++            })
++          }
++        >
++          {autoOpenNext ? t("Auto-open next: On") : t("Auto-open next: Off")}
++        </Button>
++
+         <Button id="cancel-button" onClick={cancel}>
+           {t("Cancel install")}
+         </Button>
+diff --git a/src/renderer/src/extensions/nexus_integration/views/LoginIcon.tsx b/src/renderer/src/extensions/nexus_integration/views/LoginIcon.tsx
+index 0d77c88d314070bc9efe7797a3280338a8bd9fda..d9b0012fe5fb424bfea61543494e5e4c29d6c7f7 100644
+--- a/src/renderer/src/extensions/nexus_integration/views/LoginIcon.tsx
++++ b/src/renderer/src/extensions/nexus_integration/views/LoginIcon.tsx
+@@ -22,7 +22,7 @@ import { setUserInfo } from "../actions/persistent";
+ import { setOauthPending } from "../actions/session";
+ import { FALLBACK_AVATAR, NEXUS_BASE_URL, OAUTH_URL } from "../constants";
+ import { isLoggedIn } from "../selectors";
+-import type { IMembership, IValidateKeyDataV2 } from "../types/IValidateKeyData";
++import type { IValidateKeyDataV2 } from "../types/IValidateKeyData";
+ 
+ export interface IBaseProps extends WithTranslation {
+   nexus: NexusT;
+@@ -58,7 +58,6 @@ class LoginIcon extends ComponentEx<IProps, {}> {
+     }
+     return (
+       <span id="login-control">
+-        {this.renderMembershipStatus()}
+         {this.renderLoginName()}
+         {this.renderAvatar()}
+       </span>
+@@ -72,33 +71,8 @@ class LoginIcon extends ComponentEx<IProps, {}> {
+     onClearUserInfo();
+   };
+ 
+-  private getMembershipText(userInfo: IMembership): string {
+-    if (userInfo?.isPremium === true) {
+-      return "★ Premium";
+-    } else if (userInfo?.isSupporter === true && userInfo?.isPremium === false) {
+-      return "Supporter";
+-    } else if (userInfo?.isLifetime === true) {
+-      return "Premium";
+-    }
+-    return "Free";
+-  }
+-
+-  private renderMembershipStatus = () => {
+-    const { t, userInfo } = this.props;
+-
+-    const membership = this.getMembershipText(userInfo);
+-    const classes = `membership-status ${membership.toLocaleLowerCase()}`;
+-
+-    if (this.isLoggedIn()) {
+-      return (
+-        <div id="membership-status" className={classes}>
+-          <div className="membership-status-text">{membership}</div>
+-        </div>
+-      );
+-    } else {
+-      return null;
+-    }
+-  };
++  // Vortex Unlocked: the membership status badge ("Free"/"Premium"/"Supporter")
++  // is not rendered.
+ 
+   private renderLoginName = () => {
+     const { t, userInfo } = this.props;
+diff --git a/src/renderer/src/extensions/nexus_integration/views/NewFreeDownloadModal.tsx b/src/renderer/src/extensions/nexus_integration/views/NewFreeDownloadModal.tsx
+index 0492857bd2eab675ec2955d9b61a8c2f928fd25d..98a86980b416146f99ac7452b3f7a9d614b4f2d7 100644
+--- a/src/renderer/src/extensions/nexus_integration/views/NewFreeDownloadModal.tsx
++++ b/src/renderer/src/extensions/nexus_integration/views/NewFreeDownloadModal.tsx
+@@ -1,25 +1,21 @@
+ import type { TFunction } from "i18next";
+ import * as React from "react";
+-import { Button, Panel } from "react-bootstrap";
++import { Button } from "react-bootstrap";
+ 
+ import FlexLayout from "../../../controls/FlexLayout";
+ import Image from "../../../controls/Image";
+-import { IconButton } from "../../../controls/TooltipControls";
+ import { Pictogram } from "../../../ui/components/pictogram/Pictogram";
+ 
+-const electricBoltIconPath = "assets/icons/electric-bolt.svg";
+-
+ export interface INewFreeDownloadModal {
+   t: TFunction;
+   fileInfo: any;
+   openModPage: () => void;
+-  goPremium: () => void;
+   onDownload: () => void;
+   positionText: string;
+ }
+ 
+ function NewFreeDownloadModal(props: INewFreeDownloadModal) {
+-  const { t, fileInfo, openModPage, goPremium, onDownload, positionText } = props;
++  const { t, fileInfo, openModPage, onDownload, positionText } = props;
+ 
+   return (
+     <div>
+@@ -52,40 +48,28 @@ function NewFreeDownloadModal(props: INewFreeDownloadModal) {
+           )}
+         </FlexLayout.Fixed>
+ 
+-        {/* Second row - two columns */}
++        {/* Vortex Unlocked: the free/premium membership comparison was removed;
++            only the functional "fetch an authorised link" flow remains. */}
+         <FlexLayout.Fixed>
+           <FlexLayout type="row" id="bottom-row">
+             <FlexLayout.Flex>
+               <FlexLayout type="column" id="free-container">
+                 <Pictogram brand="none" className="mb-3" name="no-mod" size="xs" />
+-                <div className="membership-type">Free</div>
+-                <div className="title">Download one by one</div>
++                <div className="title">{t("Fetch the download link from the website")}</div>
+                 <hr />
+                 <ul>
+-                  <li>Manual download for collections</li>
+-                  <li>Throttled download speeds (3 MB/s)</li>
+-                  <li>Ads and delay for each download</li>
++                  <li>{t("The download will continue automatically once the link arrives")}</li>
++                  <li>
++                    {t(
++                      "You can also open the file page and start the download from there directly",
++                    )}
++                  </li>
+                 </ul>
+                 <Button id="download-mod-button" onClick={onDownload}>
+-                  {t("Download manually")}
++                  {t("Open file page")}
+                 </Button>
+-              </FlexLayout>
+-            </FlexLayout.Flex>
+-
+-            <FlexLayout.Flex>
+-              <FlexLayout type="column" id="premium-container">
+-                <Pictogram brand="premium" className="mb-3" name="premium" size="xs" />
+-                <div className="membership-type">Premium</div>
+-                <div className="title">Get all your mods fast</div>
+-                <hr />
+-                <ul>
+-                  <li>Auto-download collections</li>
+-                  <li>Max download speeds</li>
+-                  <li>No more ads</li>
+-                </ul>
+-                <Button id="get-premium-button" onClick={goPremium}>
+-                  <Image srcs={[electricBoltIconPath]} />
+-                  {t("Auto-download all")}
++                <Button id="mod-page-button" bsStyle="link" onClick={openModPage}>
++                  {t("Open mod page")}
+                 </Button>
+               </FlexLayout>
+             </FlexLayout.Flex>
+diff --git a/src/renderer/src/extensions/settings_interface/SettingsInterface.tsx b/src/renderer/src/extensions/settings_interface/SettingsInterface.tsx
+index 3160623d2ab051755913eef76981284f608314f7..a0cff6b47bd357b33bab535d13809b1eded9ad30 100644
+--- a/src/renderer/src/extensions/settings_interface/SettingsInterface.tsx
++++ b/src/renderer/src/extensions/settings_interface/SettingsInterface.tsx
+@@ -1,7 +1,7 @@
+ import { readdir } from "node:fs/promises";
+ import * as path from "path";
+ 
+-import { getErrorCode } from "@vortex/shared";
++import { getErrorCode, getErrorMessageOrDefault } from "@vortex/shared";
+ import type { IParameters } from "@vortex/shared/cli";
+ import React, { useCallback, useEffect, useReducer, useRef, useState } from "react";
+ import { ControlLabel, FormGroup } from "react-bootstrap";
+@@ -37,11 +37,14 @@ import {
+   setAlwaysCompactHeaders,
+   setDesktopNotifications,
+   setForegroundDL,
++  setHideDashboard,
+   setHideTopLevelCategory,
+   setLanguage,
+   setProfilesVisible,
+   setReduceMotion,
+   setRelativeTimes,
++  setWebsiteLinkGen,
++  setWebsiteLinkGenAlways,
+ } from "./actions/interface";
+ import { buildLanguageOptions, type ILanguage, type ILanguageOption } from "./languageOptions";
+ import getText from "./texts";
+@@ -85,6 +88,17 @@ export function SettingsInterfaceForm(props: IFormProps) {
+     (state: IState) => state.settings.interface.alwaysCompactHeaders === true,
+   );
+   const foregroundDL = useSelector((state: IState) => state.settings.interface.foregroundDL);
++  // Vortex Unlocked settings are intentionally kept in the existing interface
++  // settings reducer so they persist with the rest of the UI preferences.
++  const hideDashboard = useSelector(
++    (state: IState) => (state.settings.interface as any)?.hideDashboard === true,
++  );
++  const websiteLinkGen = useSelector(
++    (state: IState) => (state.settings.interface as any)?.websiteLinkGen === true,
++  );
++  const websiteLinkGenAlways = useSelector(
++    (state: IState) => (state.settings.interface as any)?.websiteLinkGenAlways === true,
++  );
+   const autoDeployment = useSelector((state: IState) => state.settings.automation.deploy);
+   const autoInstall = useSelector((state: IState) => state.settings.automation.install);
+   const autoEnable = useSelector((state: IState) => state.settings.automation.enable);
+@@ -203,6 +217,32 @@ export function SettingsInterfaceForm(props: IFormProps) {
+     });
+   };
+ 
++  const importVortexData = () => {
++    dispatch(
++      showDialog(
++        "question",
++        t("Import data from Vortex"),
++        {
++          text: t(
++            "This restarts Vortex Unlocked and imports the data of your official Vortex " +
++              "installation - profiles, mods, settings and downloads. The Vortex " +
++              "installation is not modified and a backup of the current Vortex Unlocked " +
++              "data is kept. Please close the official Vortex client before continuing. " +
++              "This may take a while for large mod libraries.",
++          ),
++          options: { translated: true, wrap: true },
++        },
++        [
++          { label: "Cancel" },
++          {
++            label: t("Import and restart"),
++            action: () => relaunch(["--import-vortex-data"]),
++          },
++        ],
++      ),
++    );
++  };
++
+   const needRestartNotification = needRestart ? (
+     <div className="flex items-center gap-x-4 rounded-lg border border-info-weak bg-info-950 p-3">
+       <Typography brand="neutral-translucent" className="grow">
+@@ -308,6 +348,64 @@ export function SettingsInterfaceForm(props: IFormProps) {
+             {t("Bring Vortex to foreground when starting downloads in browser")}
+           </Toggle>
+         </div>
++
++        {/* Vortex Unlocked: fully hides the Dashboard tab from the main navigation. */}
++        <div>
++          <Toggle
++            checked={hideDashboard}
++            onToggle={(enabled) => dispatch(setHideDashboard(enabled))}
++          >
++            {t("Hide Dashboard tab")}
++          </Toggle>
++        </div>
++      </FormGroup>
++
++      {/* Vortex Unlocked: import data and website-session download authorisation. */}
++      <FormGroup controlId="unlockedImport">
++        <ControlLabel>{t("Vortex Unlocked")}</ControlLabel>
++
++        <div>
++          <Typography>
++            {t(
++              "Vortex Unlocked keeps its data separate from the official Vortex client, " +
++                "so both can be used side by side. Import the data of an existing " +
++                "Vortex installation to carry over profiles, mods, settings and downloads.",
++            )}
++          </Typography>
++        </div>
++
++        <Button brand="neutral" onClick={importVortexData}>
++          {t("Import data from Vortex")}
++        </Button>
++
++        <div>
++          <Toggle
++            checked={websiteLinkGen}
++            onToggle={(enabled) => dispatch(setWebsiteLinkGen(enabled))}
++          >
++            {t("Auto-authorise downloads via website session")}
++
++            <Typography appearance="subdued" typographyType="body-sm">
++              {t(
++                "When the api refuses a download link, generate an authorised link " +
++                  "automatically through the website session connected below. Applies to " +
++                  "collection installs unless extended below. Downloads stay speed-limited " +
++                  "by the account tier.",
++              )}
++            </Typography>
++          </Toggle>
++        </div>
++
++        <div>
++          <Toggle
++            checked={websiteLinkGenAlways}
++            onToggle={(enabled) => dispatch(setWebsiteLinkGenAlways(enabled))}
++          >
++            {t("Also auto-authorise downloads outside collections")}
++          </Toggle>
++        </div>
++
++        <WebsiteSessionSection />
+       </FormGroup>
+ 
+       <FormGroup className="mt-4" controlId="accessibility">
+@@ -442,6 +540,75 @@ export function SettingsInterfaceForm(props: IFormProps) {
+   );
+ }
+ 
++/**
++ * Vortex Unlocked: connection status and login button for the embedded
++ * nexusmods.com website session the auto-authorisation feature uses.
++ */
++function WebsiteSessionSection() {
++  const { t } = useTranslation(["common"]);
++  const [connected, setConnected] = React.useState<boolean | null>(null);
++  const [busy, setBusy] = React.useState(false);
++
++  const refresh = React.useCallback(async () => {
++    try {
++      const res = await getPreloadApi().websiteSession.status();
++      setConnected(res?.loggedIn === true);
++    } catch (err) {
++      log("warn", "failed to query website session status", {
++        error: getErrorMessageOrDefault(err),
++      });
++      setConnected(null);
++    }
++  }, []);
++
++  React.useEffect(() => {
++    void refresh();
++  }, [refresh]);
++
++  const connect = React.useCallback(async () => {
++    setBusy(true);
++    try {
++      await getPreloadApi().websiteSession.login();
++      await refresh();
++    } catch (err) {
++      log("warn", "website session login failed", { error: getErrorMessageOrDefault(err) });
++    } finally {
++      setBusy(false);
++    }
++  }, [refresh]);
++
++  const disconnect = React.useCallback(async () => {
++    setBusy(true);
++    try {
++      await getPreloadApi().websiteSession.logout();
++    } catch (err) {
++      log("warn", "website session logout failed", { error: getErrorMessageOrDefault(err) });
++    } finally {
++      await refresh();
++      setBusy(false);
++    }
++  }, [refresh]);
++
++  return (
++    <div className="flex items-center gap-x-4">
++      <Button brand="neutral" disabled={busy} onClick={connected === true ? disconnect : connect}>
++        {connected === true ? t("Disconnect website session") : t("Connect website session")}
++      </Button>
++
++      <Typography appearance="subdued" typographyType="body-sm">
++        {connected === null
++          ? t("Website session status unknown")
++          : connected === true
++            ? t("Website session connected")
++            : t(
++                "Not connected - click connect and log in to nexusmods.com in the window " +
++                  "that opens. Use the same account as in Vortex.",
++              )}
++      </Typography>
++    </div>
++  );
++}
++
+ /** List the subdirectories of a base directory; a missing base yields none. */
+ async function listSubdirectories(basePath: string): Promise<string[]> {
+   try {
+diff --git a/src/renderer/src/extensions/settings_interface/actions/interface.ts b/src/renderer/src/extensions/settings_interface/actions/interface.ts
+index cace1c18cbb5e0f0138711988d7da236d5d26e83..487ded84ff1be7a623fa3afc44be4c7b93dc8932 100644
+--- a/src/renderer/src/extensions/settings_interface/actions/interface.ts
++++ b/src/renderer/src/extensions/settings_interface/actions/interface.ts
+@@ -53,3 +53,27 @@ export const setAlwaysCompactHeaders = safeCreateAction(
+  * then the setting is absent and the operating system's preference is followed.
+  */
+ export const setReduceMotion = safeCreateAction("SET_REDUCE_MOTION", (enabled: boolean) => enabled);
++
++/**
++ * Vortex Unlocked: hide or show the Dashboard tab in the main navigation.
++ */
++export const setHideDashboard = safeCreateAction("SET_HIDE_DASHBOARD", (hide: boolean) => hide);
++
++/**
++ * Vortex Unlocked: automatically authorise refused download links through the
++ * embedded nexusmods.com website session. Applies to collection installs; see
++ * setWebsiteLinkGenAlways for single downloads.
++ */
++export const setWebsiteLinkGen = safeCreateAction(
++  "SET_WEBSITE_LINK_GEN",
++  (enabled: boolean) => enabled,
++);
++
++/**
++ * Vortex Unlocked: extend automatic link generation to downloads outside
++ * collection installs.
++ */
++export const setWebsiteLinkGenAlways = safeCreateAction(
++  "SET_WEBSITE_LINK_GEN_ALWAYS",
++  (enabled: boolean) => enabled,
++);
+diff --git a/src/renderer/src/extensions/settings_interface/reducers/interface.ts b/src/renderer/src/extensions/settings_interface/reducers/interface.ts
+index e283185cca21b70d0862063ba9b7da6596efa45a..19718ac41519315c2ed21d8c13acda214cbf8421 100644
+--- a/src/renderer/src/extensions/settings_interface/reducers/interface.ts
++++ b/src/renderer/src/extensions/settings_interface/reducers/interface.ts
+@@ -30,6 +30,12 @@ const settingsReducer: IReducerSpec = {
+     // Deliberately absent from the defaults below: unset means "follow the OS".
+     [actions.setReduceMotion as any]: (state, payload) =>
+       update(state, { reduceMotion: { $set: payload } }),
++    [actions.setHideDashboard as any]: (state, payload) =>
++      update(state, { hideDashboard: { $set: payload } }),
++    [actions.setWebsiteLinkGen as any]: (state, payload) =>
++      update(state, { websiteLinkGen: { $set: payload } }),
++    [actions.setWebsiteLinkGenAlways as any]: (state, payload) =>
++      update(state, { websiteLinkGenAlways: { $set: payload } }),
+   },
+   defaults: {
+     language: "en",
+@@ -40,6 +46,9 @@ const settingsReducer: IReducerSpec = {
+     relativeTimes: true,
+     foregroundDL: true,
+     alwaysCompactHeaders: false,
++    hideDashboard: false,
++    websiteLinkGen: false,
++    websiteLinkGenAlways: false,
+     usage: {},
+   },
+ };
+diff --git a/src/renderer/src/index.html b/src/renderer/src/index.html
+index a6ac1a2d05cda2ad38f2d9beed7d0a09fd03078a..29437e42efb1e10bef0a85a02e9ecaaf55741766 100644
+--- a/src/renderer/src/index.html
++++ b/src/renderer/src/index.html
+@@ -6,7 +6,7 @@
+             http-equiv="Content-Security-Policy"
+             content="script-src 'self' 'sha256-bFRIEmBXWkB30lOfVGw1yYX8VUoq6PSmi6cNnDehTqU='"
+         />
+-        <title>Vortex</title>
++        <title>Vortex Unlocked</title>
+         <link rel="stylesheet" href="assets/css/loadingScreen.css" />
+         <link rel="stylesheet" href="assets/css/tailwind-v4.css" />
+     </head>
+diff --git a/src/renderer/src/views/components/Header/Header.tsx b/src/renderer/src/views/components/Header/Header.tsx
+index 40b612f8ab3b395e8e9c3cbabece3a58cb54fd11..3c9228e52bc6429f088b6d97a67f4e0addc0dff2 100644
+--- a/src/renderer/src/views/components/Header/Header.tsx
++++ b/src/renderer/src/views/components/Header/Header.tsx
+@@ -13,7 +13,6 @@ import {
+   knownGames as knownGamesSelector,
+ } from "../../../util/selectors";
+ import { useSpineContext } from "../Spine/SpineContext";
+-import { PremiumIndicator } from "./premium/PremiumIndicator";
+ import { ProfileSection } from "./profile/ProfileSection";
+ import { StagingIndicator } from "./StagingIndicator";
+ import { VersionIndicator } from "./VersionIndicator";
+@@ -83,8 +82,6 @@ export const Header: FC<React.PropsWithChildren<unknown>> = () => {
+ 
+         <VersionIndicator />
+ 
+-        <PremiumIndicator />
+-
+         <div className="flex items-center gap-x-5">
+           <ProfileSection />
+ 
+diff --git a/src/renderer/src/views/components/Spine/SpineContext.tsx b/src/renderer/src/views/components/Spine/SpineContext.tsx
+index c8eb525e01369e64e6fc883089e99d4c3a8ac7bb..27a36f9f1f09a713815b4e0c1c48f1f8e22ba1b0 100644
+--- a/src/renderer/src/views/components/Spine/SpineContext.tsx
++++ b/src/renderer/src/views/components/Spine/SpineContext.tsx
+@@ -63,6 +63,11 @@ export const SpineProvider: FC<React.PropsWithChildren<unknown>> = ({
+   const dispatch = useDispatch();
+ 
+   const profilesVisible = useSelector((state: IState) => state.settings.interface.profilesVisible);
++  // Vortex Unlocked: watched so the "Hide Dashboard tab" setting re-filters
++  // the menu immediately, without a restart.
++  const hideDashboard = useSelector(
++    (state: IState) => (state.settings.interface as any)?.hideDashboard === true,
++  );
+   const lastActiveProfile = useSelector(lastActiveProfilesSelector);
+   const activeProfileId = useSelector(activeProfileIdSelector);
+   const activeGameId = useSelector(activeGameIdSelector);
+@@ -109,7 +114,14 @@ export const SpineProvider: FC<React.PropsWithChildren<unknown>> = ({
+           page.id !== "Downloads" &&
+           isPageVisible(page),
+       ),
+-    [mainPages, isPageVisible, activeGameId, profilesVisible, pluginManagementEnabled],
++    [
++      mainPages,
++      isPageVisible,
++      activeGameId,
++      profilesVisible,
++      pluginManagementEnabled,
++      hideDashboard,
++    ],
+   );
+ 
+   const gamePages: IMainPage[] = useMemo(
+diff --git a/src/renderer/src/views/layout/PageGroup.tsx b/src/renderer/src/views/layout/PageGroup.tsx
+index 65357602da038df43a9fbded3cedb214cd44924e..14a55e4fa3460a73b8dffff378ba6b54d8f6983e 100644
+--- a/src/renderer/src/views/layout/PageGroup.tsx
++++ b/src/renderer/src/views/layout/PageGroup.tsx
+@@ -2,10 +2,12 @@ import { getErrorMessageOrDefault } from "@vortex/shared";
+ import React, { memo, useMemo, type FC } from "react";
+ import { Nav } from "react-bootstrap";
+ import { useTranslation } from "react-i18next";
++import { useSelector } from "react-redux";
+ 
+ import { NavItem } from "../../controls/TooltipControls";
+ import { log } from "../../logging";
+ import type { IMainPage } from "../../types/IMainPage";
++import type { IState } from "../../types/IState";
+ import { PageButton } from "../PageButton";
+ 
+ export interface IPageGroupProps {
+@@ -27,6 +29,12 @@ export const PageGroup: FC<React.PropsWithChildren<IPageGroupProps>> = memo((pro
+ 
+   const { t } = useTranslation();
+ 
++  // Vortex Unlocked: watched so the "Hide Dashboard tab" setting re-filters
++  // the classic-layout sidebar immediately, without a restart.
++  const hideDashboard = useSelector(
++    (state: IState) => (state.settings.interface as any)?.hideDashboard === true,
++  );
++
+   const visiblePages = useMemo(() => {
+     return pages.filter((page) => {
+       try {
+@@ -39,7 +47,7 @@ export const PageGroup: FC<React.PropsWithChildren<IPageGroupProps>> = memo((pro
+         return false;
+       }
+     });
+-  }, [pages]);
++  }, [pages, hideDashboard]);
+ 
+   if (visiblePages.length === 0) {
+     return null;
+diff --git a/src/shared/src/types/ipc.ts b/src/shared/src/types/ipc.ts
+index b5b9ac5af7984cf265a8af2934cbe2d7b4399392..6817be515614d7a2c73c9b86f4669bff7ba0a2fe 100644
+--- a/src/shared/src/types/ipc.ts
++++ b/src/shared/src/types/ipc.ts
+@@ -521,6 +521,7 @@ export interface InvokeChannels {
+     dest: string,
+     collationId: number,
+     downloadId?: string,
++    priority?: number,
+   ) => Promise<{ downloadId: string }>;
+   "download:pause": (downloadId: string) => Promise<WireDownloadCheckpoint>;
+   "download:resume": (checkpoint: WireDownloadCheckpoint) => Promise<void>;
+@@ -629,6 +630,28 @@ export interface InvokeChannels {
+   "fs:stream-read": (handle: number, max: number) => Promise<StreamReadReply>;
+   "fs:stream-write": (handle: number, bytes: Uint8Array) => Promise<void>;
+   "fs:stream-close": (handle: number) => Promise<void>;
++
++  // Vortex Unlocked: the embedded nexusmods.com website session, used to
++  // auto-authorise download links the api would refuse for the account tier.
++  /** Whether the website session is logged in (login cookies present). */
++  "website-session:status": () => Promise<{ loggedIn: boolean }>;
++  /** Open the login window; resolves once the session cookie appears or the window is closed. */
++  "website-session:login": () => Promise<{ ok: boolean; reason?: string }>;
++  /** Wipe the website session (cookies and storage of its partition). */
++  "website-session:logout": () => Promise<void>;
++  /**
++   * Generate an authorised download link for one file through the website
++   * session, returning it as a keyed nxm:// url the download pipeline can
++   * resolve directly. Serialized and paced server-side courtesy.
++   */
++  "website-session:generate": (request: {
++    /** game domain, e.g. "fallout4" - used to build the nxm url */
++    domain: string;
++    /** numeric game id, as expected by the website endpoint's game_id param */
++    gameId: string;
++    modId: number;
++    fileId: number;
++  }) => Promise<{ ok: boolean; nxmUrl?: string; reason?: string }>;
+ }
+ 
+ /** Wire reply of {@link InvokeChannels["fs:stream-read"]}. `bytes` holds the
+diff --git a/src/shared/src/types/preload.ts b/src/shared/src/types/preload.ts
+index f1175572e09cc6d2f87fc0cf792ec31168d3b37b..9eb12c5891d69187429e3112fefd4979aa383951 100644
+--- a/src/shared/src/types/preload.ts
++++ b/src/shared/src/types/preload.ts
+@@ -81,6 +81,9 @@ export interface Api {
+   /** Session APIs */
+   session: Session;
+ 
++  /** Vortex Unlocked: embedded nexusmods.com website session APIs */
++  websiteSession: WebsiteSessionApi;
++
+   /** Window APIs */
+   window: WindowAPI;
+ 
+@@ -237,6 +240,26 @@ export interface Session {
+   getCookies(filter: CookiesGetFilter): Promise<Cookie[]>;
+ }
+ 
++/**
++ * Vortex Unlocked: the embedded nexusmods.com website session, used to
++ * auto-authorise download links the api refuses for the account tier.
++ */
++export interface WebsiteSessionApi {
++  /** Whether the website session is logged in (login cookies present). */
++  status(): Promise<{ loggedIn: boolean }>;
++  /** Open the login window; resolves once logged in or the window is closed. */
++  login(): Promise<{ ok: boolean; reason?: string }>;
++  /** Wipe the website session. */
++  logout(): Promise<void>;
++  /** Generate an authorised (keyed) nxm link for one file. */
++  generateLink(request: {
++    domain: string;
++    gameId: string;
++    modId: number;
++    fileId: number;
++  }): Promise<{ ok: boolean; nxmUrl?: string; reason?: string }>;
++}
++
+ export interface WindowAPI {
+   /** Get the current window ID */
+   getId(): Promise<number>;
+@@ -521,7 +544,12 @@ export interface DownloaderApi {
+    * Passing `downloadId` restores an existing download: the transfer starts from
+    * scratch under that id, replacing any previous attempt tracked for it.
+    */
+-  start(dest: string, collationId: number, downloadId?: string): Promise<{ downloadId: string }>;
++  start(
++    dest: string,
++    collationId: number,
++    downloadId?: string,
++    priority?: number,
++  ): Promise<{ downloadId: string }>;
+ 
+   /** Pauses an active download and returns a checkpoint for later resumption. */
+   pause(downloadId: string): Promise<WireDownloadCheckpoint>;
